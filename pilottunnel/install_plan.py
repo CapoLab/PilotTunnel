@@ -30,6 +30,7 @@ def build_install_plan(
     paths: SwitchPaths,
     state: AppState,
     install_root: Path | None = None,
+    preflight: dict | None = None,
 ) -> dict:
     planned_role = canonical_role(role or profile.role)
     _validate_install_inputs(profile.name, adapter_name, transport, install_root)
@@ -60,7 +61,7 @@ def build_install_plan(
     warnings = _plan_warnings(
         source_files=source_files,
         binary_plan=binary_plan,
-        preflight=run_preflight(paths.staging_root, profile).to_dict(),
+        preflight=preflight or run_preflight(paths.staging_root, profile).to_dict(),
     )
     return {
         "ok": True,

@@ -13,6 +13,7 @@ SAFE_INSPECT_ACTIONS = {
     "binary_list",
     "logs",
     "node_status",
+    "readiness_report",
     "preflight",
     "simulate_e2e",
     "status",

@@ -57,6 +57,7 @@ def run_preflight(
     *,
     command_lookup=None,
     platform_name: str | None = None,
+    probe_write: bool = True,
 ) -> HostPreflightResult:
     lookup = command_lookup or shutil.which
     system_name = (platform_name or platform.system()).lower()
@@ -77,7 +78,7 @@ def run_preflight(
     if is_windows:
         warnings.append("Windows host detected; real apply remains unsupported in v0.1")
 
-    staging_writable = _check_staging_writable(staging_root)
+    staging_writable = _check_staging_writable(staging_root) if probe_write else _check_staging_writable_readonly(staging_root)
     if not staging_writable:
         warnings.append(f"Staging root is not writable: {staging_root}")
 
@@ -116,6 +117,18 @@ def _check_staging_writable(staging_root: Path) -> bool:
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
         return True
+    except OSError:
+        return False
+
+
+def _check_staging_writable_readonly(staging_root: Path) -> bool:
+    candidate = staging_root
+    while not candidate.exists():
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    try:
+        return os.access(candidate, os.W_OK)
     except OSError:
         return False
 

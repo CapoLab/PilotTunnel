@@ -195,6 +195,18 @@ python -m pilottunnel.cli healthcheck --profile turkey-6221 --all --json
 python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY --require-healthcheck
 ```
 
+## Server Readiness Report
+
+- `readiness report` is read-only.
+- It is the recommended check before any future real apply.
+- It does not start services or modify system state.
+
+```bash
+python -m pilottunnel.cli readiness report
+python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter rathole --transport tcp --json
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.

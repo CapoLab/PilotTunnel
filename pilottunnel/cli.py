@@ -33,6 +33,7 @@ from .install_plan import apply_install, apply_uninstall, build_install_plan, bu
 from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
+from .readiness import build_readiness_report
 from .simulation import run_e2e_simulation
 from .service_lifecycle import build_service_plan, inspect_service_logs, inspect_service_status
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
@@ -208,6 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--profile")
     preflight.add_argument("--json", action="store_true")
 
+    readiness = subparsers.add_parser("readiness")
+    readiness_subparsers = readiness.add_subparsers(dest="readiness_command", required=True)
+    readiness_report = readiness_subparsers.add_parser("report")
+    readiness_report.add_argument("--profile")
+    readiness_report.add_argument("--adapter")
+    readiness_report.add_argument("--transport")
+    readiness_report.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
+    readiness_report.add_argument("--install-root", type=Path, default=None)
+    readiness_report.add_argument("--json", action="store_true")
+
     binary = subparsers.add_parser("binary")
     binary_subparsers = binary.add_subparsers(dest="binary_command", required=True)
     binary_subparsers.add_parser("list")
@@ -307,6 +318,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"registry_{args.registry_command}"
     if args.command == "node":
         return "node_status"
+    if args.command == "readiness":
+        return f"readiness_{args.readiness_command}"
     if args.command in {"switch", "status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
         return args.command
     return None
@@ -1114,6 +1127,26 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_preflight(switch_paths.staging_root, profile).to_dict()
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "readiness" and args.readiness_command == "report":
+        try:
+            payload = build_readiness_report(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                staging_root=getattr(args, "command_staging_root", None) or args.staging_root,
+                install_root=args.install_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "binary" and args.binary_command == "list":
         print(json.dumps(list_binary_plans(switch_paths.work_dir, state), indent=2))

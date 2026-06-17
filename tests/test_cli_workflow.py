@@ -237,6 +237,40 @@ class CliWorkflowTests(unittest.TestCase):
             "3106",
         )
 
+    def _create_profile_with_ports(
+        self,
+        *,
+        name: str,
+        main_port: int,
+        target_port: int,
+        control_port: int,
+        service_port: int,
+        check_port: int,
+        role: str = "controller",
+        target_host: str = "127.0.0.1",
+    ) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            name,
+            "--main-port",
+            str(main_port),
+            "--target-host",
+            target_host,
+            "--target-port",
+            str(target_port),
+            "--role",
+            role,
+            "--control-port",
+            str(control_port),
+            "--service-port",
+            str(service_port),
+            "--check-port",
+            str(check_port),
+        )
+
     def _export_worker_bundle(self, adapter: str, transport: str, *, force: bool = False, include_staged_paths: bool = False) -> Path:
         bundle_path = Path(self.temp_dir.name) / f"{adapter}-{transport}-worker.json"
         args = [
@@ -793,6 +827,113 @@ class CliWorkflowTests(unittest.TestCase):
         code, output = self.run_cli("preflight")
         self.assertEqual(code, 0)
         self.assertFalse(json.loads(output)["safe_to_real_apply"])
+
+    def _allocate_tcp_ports(self, count: int = 4) -> tuple[list[int], list[socket.socket]]:
+        listeners: list[socket.socket] = []
+        ports: list[int] = []
+        for _ in range(count):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            sock.listen()
+            listeners.append(sock)
+            ports.append(sock.getsockname()[1])
+        return ports, listeners
+
+    def test_readiness_report_without_init_returns_not_initialized(self) -> None:
+        code, output = self.run_cli("readiness", "report")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["readiness_level"], "not_initialized")
+        self.assertFalse(payload["role_initialized"])
+
+    def test_readiness_report_after_controller_init_shows_controller_role(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        code, output = self.run_cli("readiness", "report")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["node_role"], "controller")
+        self.assertTrue(payload["role_initialized"])
+
+    def test_readiness_report_after_worker_init_shows_worker_role(self) -> None:
+        self.run_cli("init", "--role", "worker")
+        code, output = self.run_cli("readiness", "report")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["node_role"], "worker")
+        self.assertTrue(payload["role_initialized"])
+
+    def test_readiness_report_with_missing_binary_shows_warning_and_blocker(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["binary_imported"])
+        self.assertTrue(payload["blockers"])
+        self.assertIn("Imported binary missing", " ".join(payload["blockers"]))
+
+    def test_readiness_report_with_existing_profile_shows_profile_exists(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertTrue(payload["profile_exists"])
+        self.assertEqual(payload["profile"], "turkey-6221")
+
+    def test_readiness_report_with_staged_files_shows_staged_ready_or_higher(self) -> None:
+        ports, listeners = self._allocate_tcp_ports(5)
+        try:
+            self._create_profile_with_ports(
+                name="turkey-6221",
+                main_port=ports[0],
+                target_port=ports[1],
+                control_port=ports[2],
+                service_port=ports[3],
+                check_port=ports[4],
+            )
+            source = self._make_binary_source("backhaul")
+            self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+            self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+            code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+            self.assertEqual(code, 0, msg=output)
+            payload = json.loads(output)
+            self.assertIn(payload["readiness_level"], {"staged_ready", "install_plan_ready", "service_plan_ready"})
+            self.assertTrue(payload["staged_files_exist"])
+        finally:
+            for listener in listeners:
+                listener.close()
+
+    def test_readiness_report_json_output_is_valid(self) -> None:
+        code, output = self.run_cli("readiness", "report", "--json")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertIn("ok", payload)
+
+    def test_readiness_report_rejects_path_traversal(self) -> None:
+        code, output = self.run_cli("readiness", "report", "--profile", "../turkey-6221")
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal blocked", output)
+
+    def test_readiness_report_unknown_adapter_rejected(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "missing", "--transport", "tcp")
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_readiness_report_unsupported_transport_rejected(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcptun")
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_readiness_output_confirms_no_systemd_firewall_routes_services_downloads_touched(self) -> None:
+        code, output = self.run_cli("readiness", "report")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+        self.assertFalse(payload["services_started"])
+        self.assertFalse(payload["downloads_performed"])
 
     def test_binary_list_includes_backhaul_and_rathole(self) -> None:
         code, output = self.run_cli("binary", "list")
