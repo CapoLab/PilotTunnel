@@ -143,8 +143,10 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 - `service status` and `service logs` can read from real systemd only with `--real-systemd`.
 - `service daemon-reload` requires exact confirmation with `--confirm DAEMON_RELOAD`.
 - `service start` remains gated and requires exact confirmation with `--confirm START_SERVICE`.
+- `service stop` remains gated and requires exact confirmation with `--confirm STOP_SERVICE`.
 - Only PilotTunnel-owned unit files are eligible for real start.
-- Real `stop`, `restart`, `enable`, and `disable` remain blocked in this safety stage.
+- Only PilotTunnel-owned unit files are eligible for real stop.
+- Real `restart`, `enable`, and `disable` remain blocked in this safety stage.
 - Firewall rules, routes, and interfaces remain untouched.
 
 ```bash
@@ -165,6 +167,20 @@ python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_
 ```bash
 python -m pilottunnel.cli service start --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE
 python -m pilottunnel.cli service start --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE --require-healthcheck
+python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+```
+
+## Controlled Real Service Stop Gate
+
+- `service stop` requires `--real-systemd` and exact `--confirm STOP_SERVICE`.
+- Only PilotTunnel-owned unit files can be stopped.
+- After stop, PilotTunnel runs read-only `systemctl is-active` and `systemctl status`.
+- Real `restart`, `enable`, and `disable` are still blocked.
+- Firewall rules, routes, interfaces, and downloads remain untouched.
+
+```bash
+python -m pilottunnel.cli service stop --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm STOP_SERVICE
 python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
 python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
 ```

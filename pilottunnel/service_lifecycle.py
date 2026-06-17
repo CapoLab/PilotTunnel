@@ -592,6 +592,164 @@ def start_service(
     return payload
 
 
+def stop_service(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+    confirm: str | None,
+    real_systemd: bool,
+    timeout_seconds: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+) -> dict:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    attempt = {
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "real_systemd": real_systemd,
+        "confirm": confirm or "",
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    if not real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Refusing real service stop without --real-systemd. Use service plan --action stop for plan-only guidance.",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+    if confirm != "STOP_SERVICE":
+        payload = {
+            "ok": False,
+            "message": "Refusing real service stop without --confirm STOP_SERVICE",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_linux():
+        payload = {
+            "ok": False,
+            "message": "Real service stop is Linux-only",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _systemd_available():
+        payload = {
+            "ok": False,
+            "message": "systemd is unavailable on this host",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_root():
+        payload = {
+            "ok": False,
+            "message": "systemctl stop requires root/admin privileges",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    ownership = _verify_pilottunnel_unit_ownership(request=request)
+    if not ownership["ok"]:
+        payload = {
+            "ok": False,
+            "message": ownership["message"],
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    stop_command = ["systemctl", "stop", request.service_name]
+    stop_result = _run_command(stop_command, timeout_seconds=timeout_seconds)
+    status_payload = _service_status_payload(request=request, timeout_seconds=timeout_seconds)
+    if stop_result["returncode"] != 0 or stop_result["timed_out"]:
+        payload = {
+            "ok": False,
+            "message": "systemctl stop failed; review service status and logs",
+            "command_executed": " ".join(stop_command),
+            "exit_code": stop_result["returncode"],
+            "stdout": stop_result["stdout"],
+            "stderr": stop_result["stderr"],
+            "timed_out": stop_result["timed_out"],
+            "status": status_payload,
+            "real_systemd_touched": True,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "service_restarted": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+            "systemctl_executed": True,
+            "real_systemd": True,
+            "read_only": False,
+            "service_name": request.service_name,
+            "unit_path": request.unit_path,
+            "profile": request.profile,
+            "role": request.role,
+            "adapter": request.adapter,
+            "transport": request.transport,
+        }
+        _audit("service-stop", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    payload = {
+        "ok": True,
+        "message": "Service stop completed",
+        "command_executed": " ".join(stop_command),
+        "exit_code": stop_result["returncode"],
+        "stdout": stop_result["stdout"],
+        "stderr": stop_result["stderr"],
+        "timed_out": stop_result["timed_out"],
+        "status": status_payload,
+        "real_systemd_touched": True,
+        "service_started": False,
+        "service_stopped": True,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": True,
+        "real_systemd": True,
+        "read_only": False,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+    }
+    _audit("service-stop", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
 def block_real_service_action(
     *,
     action: str,
@@ -610,9 +768,11 @@ def block_real_service_action(
         paths=paths,
     )
     if real_systemd:
+        blocked_actions = {"restart", "enable", "disable"}
+        blocked_action_text = "/".join(sorted(blocked_actions, key=lambda item: ["restart", "enable", "disable"].index(item)))
         payload = {
             "ok": False,
-            "message": "Real stop/restart/enable/disable is not implemented in this safety stage.",
+            "message": f"Real {blocked_action_text} is not implemented in this safety stage.",
             "action": action,
             "service_name": request.service_name,
             "unit_path": request.unit_path,
