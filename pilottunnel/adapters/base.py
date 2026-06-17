@@ -28,6 +28,7 @@ class AdapterContext:
     profile: Profile
     transport: str
     work_dir: Path
+    staging_root: Path
     apply_changes: bool = False
     role: str = ""
     remote_stub: dict[str, str] = field(default_factory=dict)

@@ -37,6 +37,7 @@ class SafetyTests(unittest.TestCase):
                 lock_dir=Path(tempfile.gettempdir()) / "locks",
                 work_dir=Path(tempfile.gettempdir()) / "work",
                 audit_path=Path(tempfile.gettempdir()) / "audit.log",
+                staging_root=Path(tempfile.gettempdir()) / "staging",
             ),
         )
         with self.assertRaises(ValueError):
@@ -50,6 +51,7 @@ class SafetyTests(unittest.TestCase):
                 profile=profile,
                 transport="tcptun",
                 work_dir=Path(tempfile.gettempdir()),
+                staging_root=Path(tempfile.gettempdir()) / "staging",
                 role="controller",
             )
         )

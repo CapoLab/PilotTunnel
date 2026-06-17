@@ -18,6 +18,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.audit = base / "audit.log"
         self.lock_dir = base / "locks"
         self.work_dir = base / "work"
+        self.staging_root = base / "staging"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -39,6 +40,8 @@ class CliWorkflowTests(unittest.TestCase):
                     str(self.lock_dir),
                     "--work-dir",
                     str(self.work_dir),
+                    "--staging-root",
+                    str(self.staging_root),
                     *args,
                 ]
             )
@@ -197,3 +200,69 @@ class CliWorkflowTests(unittest.TestCase):
         code, output = self.run_cli("registry", "check")
         self.assertEqual(code, 1)
         self.assertIn("conflict", output)
+
+    def test_plan_command_for_backhaul_tcpmux(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["adapter"], "backhaul")
+        self.assertEqual(payload["transport"], "tcpmux")
+        self.assertIn("configs", payload["generated_config_path"])
+
+    def test_plan_command_for_rathole_tcp(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("plan", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["adapter"], "rathole")
+        self.assertTrue(payload["supported_in_v0_1"])
+
+    def test_apply_writes_backhaul_staged_files_only_under_staging_root(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["staged_only"])
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertTrue((self.staging_root / "configs" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml").exists())
+        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+
+    def test_apply_writes_rathole_staged_files_only_under_staging_root(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["staged_only"])
+        self.assertTrue((self.staging_root / "configs" / "turkey-6221" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
+        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-turkey-6221-rathole-tcp-controller.service").exists())
+
+    def test_staged_list_shows_generated_files(self) -> None:
+        self._create_profile()
+        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("staged", "list")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(any("backhaul-controller.toml" in item for item in payload))
+
+    def test_staged_show_displays_generated_file_content(self) -> None:
+        self._create_profile()
+        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("staged", "show", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(any("role = controller" in content for content in payload["configs"].values()))
+
+    def test_path_traversal_staging_root_or_profile_name_is_blocked(self) -> None:
+        self.run_cli("init")
+        code, output = self.run_cli("profile", "create", "--name", "../bad", "--main-port", "6221", "--target-port", "6221")
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_audit_records_staged_only_true(self) -> None:
+        self._create_profile()
+        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        lines = self.audit.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(lines[-1])
+        self.assertTrue(payload["details"]["staged_only"])

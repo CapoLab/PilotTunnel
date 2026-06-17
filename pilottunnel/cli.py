@@ -20,6 +20,7 @@ from .config import (
     get_profile,
     load_config,
     save_config,
+    validate_profile_name,
 )
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
@@ -34,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-log", type=Path, default=None)
     parser.add_argument("--lock-dir", type=Path, default=None)
     parser.add_argument("--work-dir", type=Path, default=None)
+    parser.add_argument("--staging-root", type=Path, default=None)
     parser.add_argument("--apply", action="store_true", help="Allow dangerous operations to write runtime artifacts")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -94,6 +96,19 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup = subparsers.add_parser("cleanup")
     cleanup.add_argument("--profile", required=True)
     cleanup.add_argument("--dry-run", action="store_true")
+
+    plan = subparsers.add_parser("plan")
+    plan.add_argument("--profile", required=True)
+    plan.add_argument("--adapter", required=True)
+    plan.add_argument("--transport", required=True)
+
+    staged = subparsers.add_parser("staged")
+    staged_subparsers = staged.add_subparsers(dest="staged_command", required=True)
+    staged_subparsers.add_parser("list")
+    staged_show = staged_subparsers.add_parser("show")
+    staged_show.add_argument("--profile", required=True)
+    staged_show.add_argument("--adapter", required=True)
+    staged_show.add_argument("--transport", required=True)
     return parser
 
 
@@ -104,7 +119,8 @@ def _paths(args: argparse.Namespace) -> tuple[Path, Path, Path, SwitchPaths]:
     audit_path = args.audit_log or Path("/var/log/pilottunnel/audit.log")
     lock_dir = args.lock_dir or Path("/var/lib/pilottunnel/locks")
     work_dir = args.work_dir or Path(tempfile.gettempdir()) / "pilottunnel"
-    return config_path, state_path, registry_path, SwitchPaths(lock_dir=lock_dir, work_dir=work_dir, audit_path=audit_path)
+    staging_root = args.staging_root or (work_dir / ".var" / "pilottunnel" / "staging")
+    return config_path, state_path, registry_path, SwitchPaths(lock_dir=lock_dir, work_dir=work_dir, audit_path=audit_path, staging_root=staging_root)
 
 
 def _load_runtime(args: argparse.Namespace) -> tuple[AppConfig, AppState, PortRegistry, Path, Path, Path, SwitchPaths]:
@@ -235,6 +251,28 @@ def _status_payload(config: AppConfig, state: AppState, registry: PortRegistry, 
     }
 
 
+def _staged_list(paths: SwitchPaths) -> list[str]:
+    if not paths.staging_root.exists():
+        return []
+    return [str(path) for path in sorted(paths.staging_root.rglob("*")) if path.is_file()]
+
+
+def _staged_show(paths: SwitchPaths, profile: str, adapter: str, transport: str) -> dict:
+    base = paths.staging_root / "configs" / profile / adapter / transport
+    systemd_dir = paths.staging_root / "systemd"
+    if not base.exists() and not systemd_dir.exists():
+        raise FileNotFoundError("No staged files found")
+    configs: dict[str, str] = {}
+    if base.exists():
+        for path in sorted(base.rglob("*.toml")):
+            configs[str(path)] = path.read_text(encoding="utf-8")
+    units: dict[str, str] = {}
+    if systemd_dir.exists():
+        for path in sorted(systemd_dir.glob(f"pilottunnel-{profile}-{adapter}-{transport}-*.service")):
+            units[str(path)] = path.read_text(encoding="utf-8")
+    return {"configs": configs, "units": units}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -270,6 +308,11 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 safety=ProfileSafety(),
             )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        try:
+            profile.name = validate_profile_name(profile.name)
         except ValueError as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
@@ -405,6 +448,28 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(result.__dict__, indent=2))
         return 0 if result.ok else 1
+
+    if args.command == "plan":
+        try:
+            payload = engine.plan(args.profile, args.adapter, args.transport, apply_changes=False)
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["supported_in_v0_1"] else 1
+
+    if args.command == "staged" and args.staged_command == "list":
+        print(json.dumps(_staged_list(switch_paths), indent=2))
+        return 0
+
+    if args.command == "staged" and args.staged_command == "show":
+        try:
+            payload = _staged_show(switch_paths, args.profile, args.adapter, args.transport)
+        except FileNotFoundError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
 
     parser.error("Unhandled command")
     return 2

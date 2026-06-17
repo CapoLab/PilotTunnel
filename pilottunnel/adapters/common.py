@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 
 from ..healthcheck import local_only_healthcheck
+from ..staging import resolve_staging_root, safe_profile_dir, safe_systemd_path
 from ..systemd import render_unit_file
 from .base import AdapterContext, AdapterMetadata
 
@@ -43,29 +45,39 @@ class DryRunAdapter:
         }
 
     def render_config(self, context: AdapterContext) -> dict:
+        staging = resolve_staging_root(context.staging_root, context.profile.name)
+        config_dir = safe_profile_dir(staging, context.profile.name, self.metadata().name, context.transport, context.role)
+        config_name = self.config_filename(context.role)
+        config_path = config_dir / config_name
+        if context.apply_changes:
+            config_dir.mkdir(parents=True, exist_ok=True)
         return {
             "action": "render_config",
-            "mode": "apply" if context.apply_changes else "dry-run",
+            "mode": "staged-apply" if context.apply_changes else "dry-run",
             "profile": context.profile.name,
             "role": context.role,
             "transport": context.transport,
             "target": f"{context.profile.target_host}:{context.profile.target_port}",
+            "config_path": str(config_path),
         }
 
     def render_systemd_unit(self, context: AdapterContext) -> dict:
+        staging = resolve_staging_root(context.staging_root, context.profile.name)
+        systemd_dir = staging.systemd_root
         unit = render_unit_file(
             unit_name=self.service_name(context),
             description=f"PilotTunnel {context.profile.name} {self.metadata().name} {context.transport} {context.role}",
             command=f"/usr/bin/env echo Starting {self.metadata().name} {context.transport} {context.role}",
-            output_dir=context.work_dir,
+            output_dir=systemd_dir,
             apply_changes=context.apply_changes,
         )
-        return {"action": "render_systemd_unit", "mode": "apply" if context.apply_changes else "dry-run", "unit": asdict(unit)}
+        safe_systemd_path(staging, unit.unit_name)
+        return {"action": "render_systemd_unit", "mode": "staged-apply" if context.apply_changes else "dry-run", "unit": asdict(unit)}
 
     def start(self, context: AdapterContext) -> dict:
         return {
             "action": "start",
-            "mode": "apply" if context.apply_changes else "dry-run",
+            "mode": "staged-apply" if context.apply_changes else "dry-run",
             "service": self.service_name(context),
             "plan": [f"start {self.service_name(context)}"],
         }
@@ -73,7 +85,7 @@ class DryRunAdapter:
     def stop(self, context: AdapterContext) -> dict:
         return {
             "action": "stop",
-            "mode": "apply" if context.apply_changes else "dry-run",
+            "mode": "staged-apply" if context.apply_changes else "dry-run",
             "service": self.service_name(context),
             "plan": [f"stop {self.service_name(context)}"],
         }
@@ -81,7 +93,7 @@ class DryRunAdapter:
     def cleanup_runtime(self, context: AdapterContext) -> dict:
         return {
             "action": "cleanup_runtime",
-            "mode": "apply" if context.apply_changes else "dry-run",
+            "mode": "staged-apply" if context.apply_changes else "dry-run",
             "plan": [f"cleanup owned runtime for {self.service_name(context)}"],
         }
 
@@ -93,4 +105,16 @@ class DryRunAdapter:
         return result.ok, result.message
 
     def uninstall(self, context: AdapterContext) -> dict:
-        return {"action": "uninstall", "mode": "apply" if context.apply_changes else "dry-run"}
+        return {"action": "uninstall", "mode": "staged-apply" if context.apply_changes else "dry-run"}
+
+    def config_filename(self, role: str) -> str:
+        return f"{self.metadata().name}-{role}.toml"
+
+    def _write_config_file(self, context: AdapterContext, content: str, config_name: str) -> str:
+        staging = resolve_staging_root(context.staging_root, context.profile.name)
+        config_dir = safe_profile_dir(staging, context.profile.name, self.metadata().name, context.transport, context.role)
+        config_path = config_dir / config_name
+        if context.apply_changes:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(content, encoding="utf-8")
+        return str(config_path)

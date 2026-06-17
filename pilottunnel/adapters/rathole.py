@@ -23,10 +23,11 @@ class RatholeAdapter(DryRunAdapter):
                 f"remote_stub_mode = {context.remote_stub.get('mode', 'local-only')}",
             ]
         )
+        config_path = self._write_config_file(context, config_text, self.config_filename(context.role))
         return {
             "action": "render_config",
-            "mode": "apply" if context.apply_changes else "dry-run",
+            "mode": "staged-apply" if context.apply_changes else "dry-run",
             "service_name": self.service_name(context),
-            "config_path": str(context.work_dir / f"{self.service_name(context)}.toml"),
+            "config_path": config_path,
             "content": config_text,
         }

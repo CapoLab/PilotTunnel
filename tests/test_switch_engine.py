@@ -88,6 +88,7 @@ class SwitchEngineTests(unittest.TestCase):
             lock_dir=temp_dir / "locks",
             work_dir=temp_dir / "work",
             audit_path=temp_dir / "audit.log",
+            staging_root=temp_dir / "staging",
         )
         if state is None:
             state = AppState(
@@ -184,3 +185,21 @@ class SwitchEngineTests(unittest.TestCase):
         payload = json.loads(lines[-1])
         self.assertTrue(payload["details"]["dry_run"])
         self.assertEqual(payload["details"]["to_adapter"], "rathole")
+
+    def test_switch_transaction_rolls_back_if_staged_healthcheck_fails(self) -> None:
+        events: list[str] = []
+        adapters = {
+            "backhaul": StubAdapter("backhaul", events, transports=("tcp", "tcpmux")),
+            "rathole": StubAdapter("rathole", events, transports=("tcp",), healthy=False),
+        }
+        engine, temp_dir = self._engine(adapters)
+        engine.paths = SwitchPaths(
+            lock_dir=engine.paths.lock_dir,
+            work_dir=engine.paths.work_dir,
+            audit_path=engine.paths.audit_path,
+            staging_root=temp_dir / "staging",
+        )
+        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=True)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.rollback_performed)
+        self.assertEqual(engine.registry.owners["turkey-6221"].adapter, "backhaul")

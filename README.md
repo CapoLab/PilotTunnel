@@ -50,6 +50,21 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json registry check
 ```
 
+## Staged Apply Mode
+
+- `dry-run`: no files are written.
+- `staged apply`: `--apply` writes generated config and unit files into the staging root only.
+- `real apply`: not implemented yet.
+
+In this stage, `--apply` does not call `systemctl`, does not touch real systemd locations, does not modify firewall rules or routes, and does not download or execute tunnel binaries.
+
+```bash
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging plan --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging --apply switch --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged list
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile turkey-6221 --adapter backhaul --transport tcpmux
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.

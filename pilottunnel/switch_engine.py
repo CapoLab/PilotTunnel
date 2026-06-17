@@ -21,6 +21,7 @@ class SwitchPaths:
     lock_dir: Path
     work_dir: Path
     audit_path: Path
+    staging_root: Path
 
 
 @dataclass
@@ -35,6 +36,10 @@ class SwitchResult:
     generated_service: str = ""
     healthcheck: dict[str, str | bool] = field(default_factory=dict)
     committed: bool = False
+    staged_only: bool = False
+    real_systemd_touched: bool = False
+    real_firewall_touched: bool = False
+    generated_files: list[str] = field(default_factory=list)
 
 
 class SwitchEngine:
@@ -91,6 +96,7 @@ class SwitchEngine:
                 dry_run=not apply_changes,
                 current={"adapter": profile.active_adapter, "transport": profile.active_transport},
                 target={"adapter": adapter_name, "transport": transport},
+                staged_only=apply_changes,
             )
         actions = [
             "precheck",
@@ -101,6 +107,7 @@ class SwitchEngine:
         install_result = adapter.install(context)
         render_result = adapter.render_config(context)
         unit_result = adapter.render_systemd_unit(context)
+        generated_files = [render_result.get("config_path", ""), unit_result["unit"].get("path", "")]
         write_audit_log(
             "install",
             profile_name,
@@ -110,6 +117,9 @@ class SwitchEngine:
                 "to_adapter": adapter_name,
                 "to_transport": transport,
                 "dry_run": not apply_changes,
+                "staged_only": apply_changes,
+                "real_systemd_touched": False,
+                "real_firewall_touched": False,
                 "result": "prepared",
                 "rollback_status": "not-needed",
                 "install": install_result,
@@ -126,6 +136,8 @@ class SwitchEngine:
             current={"adapter": profile.active_adapter, "transport": profile.active_transport},
             target={"adapter": adapter_name, "transport": transport},
             generated_service=adapter.service_name(context),
+            staged_only=apply_changes,
+            generated_files=generated_files,
         )
 
     def switch(self, profile_name: str, adapter_name: str, transport: str, apply_changes: bool) -> SwitchResult:
@@ -153,13 +165,15 @@ class SwitchEngine:
                     current={"adapter": from_adapter, "transport": from_transport},
                     target={"adapter": adapter_name, "transport": transport},
                     generated_service=adapter.service_name(context),
+                    staged_only=apply_changes,
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, raise_or_result)
                 return raise_or_result
 
             actions = ["lock", "precheck", "render_config", "render_systemd_unit"]
-            adapter.render_config(context)
-            adapter.render_systemd_unit(context)
+            rendered_config = adapter.render_config(context)
+            rendered_unit = adapter.render_systemd_unit(context)
+            generated_files = [rendered_config.get("config_path", ""), rendered_unit["unit"].get("path", "")]
             old_adapter_name = from_adapter
             old_transport = from_transport or transport
 
@@ -185,6 +199,8 @@ class SwitchEngine:
                     current={"adapter": from_adapter, "transport": from_transport},
                     target={"adapter": adapter_name, "transport": transport},
                     generated_service=adapter.service_name(context),
+                    staged_only=apply_changes,
+                    generated_files=generated_files,
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
                 return result
@@ -213,6 +229,8 @@ class SwitchEngine:
                     target={"adapter": adapter_name, "transport": transport},
                     generated_service=adapter.service_name(context),
                     healthcheck={"result": False, "message": message},
+                    staged_only=apply_changes,
+                    generated_files=generated_files,
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
                 return result
@@ -238,6 +256,8 @@ class SwitchEngine:
                 generated_service=adapter.service_name(context),
                 healthcheck={"result": True, "message": message},
                 committed=True,
+                staged_only=apply_changes,
+                generated_files=generated_files,
             )
             self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
             return result
@@ -256,7 +276,14 @@ class SwitchEngine:
                 record.active_adapter = ""
                 record.active_transport = ""
                 record.healthy = False
-                return SwitchResult(True, "Rolled back to empty state", actions=["rollback"], dry_run=not apply_changes, committed=True)
+                return SwitchResult(
+                    True,
+                    "Rolled back to empty state",
+                    actions=["rollback"],
+                    dry_run=not apply_changes,
+                    committed=True,
+                    staged_only=apply_changes,
+                )
             return self.switch(profile_name, previous_adapter, previous_transport, apply_changes)
 
     def status(self, profile_name: str) -> dict:
@@ -292,13 +319,20 @@ class SwitchEngine:
             adapter = self.adapter_factory(record.active_adapter)
             context = self._build_context(profile, record.active_transport or "tcp", apply_changes and not dry_run)
             adapter.cleanup_runtime(context)
-        return SwitchResult(True, "Cleanup prepared", actions=actions, dry_run=not apply_changes or dry_run)
+        return SwitchResult(
+            True,
+            "Cleanup prepared",
+            actions=actions,
+            dry_run=not apply_changes or dry_run,
+            staged_only=apply_changes and not dry_run,
+        )
 
     def _build_context(self, profile: Profile, transport: str, apply_changes: bool) -> AdapterContext:
         return AdapterContext(
             profile=profile,
             transport=transport,
             work_dir=self.paths.work_dir / profile.name,
+            staging_root=self.paths.staging_root,
             apply_changes=apply_changes,
             role=profile.role,
             remote_stub=asdict(build_worker_stub(profile)),
@@ -335,8 +369,41 @@ class SwitchEngine:
                 "to_adapter": adapter_name,
                 "to_transport": transport,
                 "dry_run": result.dry_run,
+                "staged_only": result.staged_only,
+                "real_systemd_touched": result.real_systemd_touched,
+                "real_firewall_touched": result.real_firewall_touched,
                 "result": "ok" if result.ok else "failed",
                 "rollback_status": "performed" if result.rollback_performed else "not-needed",
             },
             self.paths.audit_path,
         )
+
+    def plan(self, profile_name: str, adapter_name: str, transport: str, apply_changes: bool = False) -> dict:
+        profile = self._find_profile(profile_name)
+        adapter = self.adapter_factory(adapter_name)
+        context = self._build_context(profile, transport, apply_changes)
+        ok, reason = adapter.precheck(context)
+        warnings: list[str] = []
+        if not ok:
+            warnings.append(reason)
+        rendered = adapter.render_config(context)
+        unit = adapter.render_systemd_unit(context)
+        return {
+            "profile": profile.name,
+            "role": profile.role,
+            "adapter": adapter_name,
+            "transport": transport,
+            "supported_in_v0_1": ok,
+            "warnings": warnings,
+            "ports_used": profile.ports.owned_ports(),
+            "generated_config_path": rendered.get("config_path", ""),
+            "generated_service_path": unit["unit"]["path"],
+            "future_apply_commands": [
+                f"systemctl daemon-reload",
+                f"systemctl enable {unit['unit']['unit_name']}",
+                f"systemctl start {unit['unit']['unit_name']}",
+            ],
+            "staged_only": apply_changes,
+            "real_systemd_touched": False,
+            "real_firewall_touched": False,
+        }

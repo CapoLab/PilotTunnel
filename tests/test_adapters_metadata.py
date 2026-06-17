@@ -36,8 +36,8 @@ class AdapterMetadataTests(unittest.TestCase):
             role="controller",
             ports=ProfilePorts(main_port=6221, control_port=7001, service_port=7002, check_port=7003),
         )
-        controller = AdapterContext(profile=profile, transport="tcpmux", work_dir=Path("/tmp"), role="controller")
-        worker = AdapterContext(profile=profile, transport="ws", work_dir=Path("/tmp"), role="worker")
+        controller = AdapterContext(profile=profile, transport="tcpmux", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
+        worker = AdapterContext(profile=profile, transport="ws", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         controller_render = adapter.render_config(controller)
         worker_render = adapter.render_config(worker)
         self.assertIn("role = controller", controller_render["content"])
@@ -48,8 +48,8 @@ class AdapterMetadataTests(unittest.TestCase):
     def test_backhaul_systemd_unit_naming(self) -> None:
         adapter = ADAPTERS["backhaul"]()
         profile = Profile(name="turkey-6221", main_port=6221, target_host="127.0.0.1", target_port=5201)
-        controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), role="controller")
-        worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), role="worker")
+        controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
+        worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         self.assertEqual(
             adapter.render_systemd_unit(controller)["unit"]["unit_name"],
             "pilottunnel-turkey-6221-backhaul-tcp-controller.service",
@@ -69,16 +69,16 @@ class AdapterMetadataTests(unittest.TestCase):
             role="controller",
             ports=ProfilePorts(main_port=6221, control_port=7001),
         )
-        controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), role="controller")
-        worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), role="worker")
+        controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
+        worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         self.assertIn("role = controller", adapter.render_config(controller)["content"])
         self.assertIn("role = worker", adapter.render_config(worker)["content"])
 
     def test_rathole_systemd_unit_naming(self) -> None:
         adapter = ADAPTERS["rathole"]()
         profile = Profile(name="turkey-6221", main_port=6221, target_host="127.0.0.1", target_port=5201)
-        controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), role="controller")
-        worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), role="worker")
+        controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
+        worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         self.assertEqual(
             adapter.render_systemd_unit(controller)["unit"]["unit_name"],
             "pilottunnel-turkey-6221-rathole-tcp-controller.service",

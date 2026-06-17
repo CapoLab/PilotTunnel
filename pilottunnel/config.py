@@ -107,6 +107,16 @@ def canonical_role(value: str) -> str:
     return ROLE_ALIASES[normalized]
 
 
+def validate_profile_name(value: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("Profile name cannot be empty")
+    blocked = {".", ".."}
+    if candidate in blocked or "/" in candidate or "\\" in candidate or ".." in candidate:
+        raise ValueError(f"Path traversal blocked for profile name: {value!r}")
+    return candidate
+
+
 def build_worker_stub(profile: Profile) -> RemoteWorkerStub:
     return RemoteWorkerStub(profile=profile.name, role=profile.role)
 
