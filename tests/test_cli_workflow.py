@@ -116,6 +116,9 @@ class CliWorkflowTests(unittest.TestCase):
             "3106",
         )
 
+    def _stage_switch(self, adapter: str, transport: str) -> None:
+        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", adapter, "--transport", transport)
+
     def test_cli_dry_run_switch_to_backhaul_tcpmux_works(self) -> None:
         self._create_profile()
         code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
@@ -416,3 +419,131 @@ class CliWorkflowTests(unittest.TestCase):
         code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", output)
+
+    def test_install_plan_for_backhaul_tcpmux_includes_expected_destinations(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        source = self._make_binary_source("backhaul")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        destinations = {item["kind"]: item["path"] for item in payload["planned_destination_files"]}
+        self.assertIn("/etc/pilottunnel/profiles/turkey-6221/backhaul/tcpmux/controller/backhaul-controller.toml", destinations["config"])
+        self.assertIn("/etc/systemd/system/pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", destinations["systemd_unit"])
+        self.assertIn("/usr/local/bin/backhaul", destinations["binary"])
+
+    def test_install_plan_for_rathole_tcp_includes_expected_destinations(self) -> None:
+        self._create_profile()
+        self._stage_switch("rathole", "tcp")
+        source = self._make_binary_source("rathole")
+        self.run_cli("binary", "import", "--adapter", "rathole", "--source", str(source), "--version", "manual-v0.0.0")
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        destinations = {item["kind"]: item["path"] for item in payload["planned_destination_files"]}
+        self.assertIn("/etc/pilottunnel/profiles/turkey-6221/rathole/tcp/controller/rathole-controller.toml", destinations["config"])
+        self.assertIn("/etc/systemd/system/pilottunnel-turkey-6221-rathole-tcp-controller.service", destinations["systemd_unit"])
+        self.assertIn("/usr/local/bin/rathole", destinations["binary"])
+
+    def test_install_plan_does_not_touch_real_system_paths(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["service_started"])
+        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+
+    def test_install_plan_with_test_install_root_stays_inside_temp_root(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        for item in payload["planned_destination_files"]:
+            self.assertTrue(Path(item["path"]).resolve().is_relative_to(install_root.resolve()))
+
+    def test_install_plan_reports_missing_staged_files_with_warnings(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(any("run staged apply first" in item.lower() for item in payload["warnings"]))
+
+    def test_install_plan_reports_imported_binary_status(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        source = self._make_binary_source("backhaul")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["binary"]["imported_binary_exists"])
+
+    def test_uninstall_plan_includes_service_and_file_cleanup_steps(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("uninstall", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", payload["services_that_would_be_stopped_disabled"][0])
+        self.assertTrue(any(path.endswith("backhaul-controller.toml") for path in payload["files_that_would_be_removed"]))
+
+    def test_uninstall_plan_does_not_stop_real_services(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("uninstall", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["service_stopped"])
+
+    def test_install_plan_path_traversal_is_blocked(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "plan", "--profile", "../bad", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+        code, output = self.run_cli(
+            "install",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(Path(self.temp_dir.name) / ".." / "escape"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_install_plan_blocks_unsupported_backhaul_experimental_transport(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcptun")
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_install_plan_rejects_unknown_adapter(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "missing", "--transport", "tcp")
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_install_plan_json_output_is_valid(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux", "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["action"], "install-plan")

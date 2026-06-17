@@ -23,6 +23,7 @@ from .config import (
     save_config,
     validate_profile_name,
 )
+from .install_plan import build_install_plan, build_uninstall_plan
 from .preflight import run_preflight
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
@@ -71,9 +72,26 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_show.add_argument("--name", required=True)
 
     install = subparsers.add_parser("install")
-    install.add_argument("--profile", required=True)
-    install.add_argument("--adapter", required=True)
-    install.add_argument("--transport", required=True)
+    install_subparsers = install.add_subparsers(dest="install_command", required=True)
+    install_plan = install_subparsers.add_parser("plan")
+    install_plan.add_argument("--profile", required=True)
+    install_plan.add_argument("--adapter", required=True)
+    install_plan.add_argument("--transport", required=True)
+    install_plan.add_argument("--role")
+    install_plan.add_argument("--staging-root", type=Path, default=None)
+    install_plan.add_argument("--install-root", type=Path, default=None)
+    install_plan.add_argument("--json", action="store_true")
+
+    uninstall = subparsers.add_parser("uninstall")
+    uninstall_subparsers = uninstall.add_subparsers(dest="uninstall_command", required=True)
+    uninstall_plan = uninstall_subparsers.add_parser("plan")
+    uninstall_plan.add_argument("--profile", required=True)
+    uninstall_plan.add_argument("--adapter", required=True)
+    uninstall_plan.add_argument("--transport", required=True)
+    uninstall_plan.add_argument("--role")
+    uninstall_plan.add_argument("--staging-root", type=Path, default=None)
+    uninstall_plan.add_argument("--install-root", type=Path, default=None)
+    uninstall_plan.add_argument("--json", action="store_true")
 
     switch = subparsers.add_parser("switch")
     switch.add_argument("--profile", required=True)
@@ -396,11 +414,49 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    if args.command == "install":
-        result = engine.install(args.profile, args.adapter, args.transport, args.apply)
-        _save_runtime(engine.config, engine.state, engine.registry, config_path, state_path, registry_path)
-        print(json.dumps(result.__dict__, indent=2))
-        return 0 if result.ok else 1
+    if args.command == "install" and args.install_command == "plan":
+        if args.apply:
+            print(json.dumps({"ok": False, "message": "Real apply execution is not supported for install planning"}, indent=2))
+            return 1
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = build_install_plan(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                paths=switch_paths,
+                state=state,
+                install_root=args.install_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "uninstall" and args.uninstall_command == "plan":
+        if args.apply:
+            print(json.dumps({"ok": False, "message": "Real apply execution is not supported for uninstall planning"}, indent=2))
+            return 1
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = build_uninstall_plan(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                paths=switch_paths,
+                state=state,
+                install_root=args.install_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
 
     if args.command == "switch":
         try:

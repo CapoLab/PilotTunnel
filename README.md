@@ -95,6 +95,20 @@ python -m pilottunnel.cli binary verify --adapter backhaul
 python -m pilottunnel.cli binary verify --adapter rathole --run-version
 ```
 
+## Real-Host Install Planning
+
+- `install plan` is read-only.
+- It does not copy to real system paths.
+- It does not run `systemctl`.
+- It does not start or stop services.
+- Future real apply will require explicit confirmation and backups.
+
+```bash
+python -m pilottunnel.cli install plan --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli install plan --profile turkey-6221 --adapter rathole --transport tcp --install-root .var/pilottunnel/install-root
+python -m pilottunnel.cli uninstall plan --profile turkey-6221 --adapter backhaul --transport tcpmux
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.
