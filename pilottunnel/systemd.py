@@ -24,6 +24,7 @@ def render_unit_file(
     path = output_dir / unit_name
     content = "\n".join(
         [
+            "# Managed-by: PilotTunnel",
             "[Unit]",
             f"Description={description}",
             "",

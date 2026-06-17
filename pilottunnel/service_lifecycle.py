@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -15,10 +16,13 @@ from .adapters import ADAPTERS
 from .adapters.base import AdapterContext
 from .audit import write_audit_log
 from .config import Profile, build_worker_stub, canonical_role, validate_profile_name
+from .healthcheck import run_profile_healthchecks, summarize_healthchecks
 from .state import AppState
 from .switch_engine import SwitchPaths
 
 DEFAULT_SERVICE_TIMEOUT_SECONDS = 2.0
+REAL_SYSTEM_ROOT = Path("/")
+PILOTTUNNEL_UNIT_MARKER = "# Managed-by: PilotTunnel"
 
 
 @dataclass
@@ -39,6 +43,16 @@ class ServiceLifecyclePlan:
     service_stopped: bool = False
     firewall_touched: bool = False
     routes_touched: bool = False
+
+
+@dataclass
+class ServiceStartRequest:
+    profile: str
+    role: str
+    adapter: str
+    transport: str
+    service_name: str
+    unit_path: str
 
 
 def build_service_plan(
@@ -387,6 +401,266 @@ def run_daemon_reload(
     return payload
 
 
+def start_service(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+    confirm: str | None,
+    real_systemd: bool,
+    require_healthcheck: bool = False,
+    healthcheck_timeout: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+) -> dict:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    attempt = {
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "real_systemd": real_systemd,
+        "confirm": confirm or "",
+        "require_healthcheck": require_healthcheck,
+        "healthcheck_timeout": healthcheck_timeout,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    if not real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Refusing real service start without --real-systemd. Use service plan --action start for plan-only guidance.",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+    if confirm != "START_SERVICE":
+        payload = {
+            "ok": False,
+            "message": "Refusing real service start without --confirm START_SERVICE",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_linux():
+        payload = {
+            "ok": False,
+            "message": "Real service start is Linux-only",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _systemd_available():
+        payload = {
+            "ok": False,
+            "message": "systemd is unavailable on this host",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_root():
+        payload = {
+            "ok": False,
+            "message": "systemctl start requires root/admin privileges",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    ownership = _verify_pilottunnel_unit_ownership(request=request)
+    if not ownership["ok"]:
+        payload = {
+            "ok": False,
+            "message": ownership["message"],
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    start_command = ["systemctl", "start", request.service_name]
+    start_result = _run_command(start_command, timeout_seconds=healthcheck_timeout)
+    status_payload = _service_status_payload(request=request, timeout_seconds=healthcheck_timeout)
+    if start_result["returncode"] != 0 or start_result["timed_out"]:
+        payload = {
+            "ok": False,
+            "message": "systemctl start failed; review service status and logs",
+            "command_executed": " ".join(start_command),
+            "exit_code": start_result["returncode"],
+            "stdout": start_result["stdout"],
+            "stderr": start_result["stderr"],
+            "timed_out": start_result["timed_out"],
+            "status": status_payload,
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": True,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "service_restarted": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+            "systemctl_executed": True,
+            "real_systemd": True,
+            "read_only": False,
+            "service_name": request.service_name,
+            "unit_path": request.unit_path,
+            "profile": request.profile,
+            "role": request.role,
+            "adapter": request.adapter,
+            "transport": request.transport,
+        }
+        _audit("service-start", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    healthcheck_ok: bool | str = "skipped"
+    healthcheck_summary: dict[str, Any] | None = None
+    ok = True
+    message = "Service start completed"
+    if require_healthcheck:
+        healthcheck_summary = summarize_healthchecks(
+            run_profile_healthchecks(
+                profile=profile,
+                node_role=request.role,
+                timeout=healthcheck_timeout,
+                include_all=True,
+                role_aware=True,
+            ),
+            profile=profile.name,
+            role=request.role,
+        )
+        healthcheck_ok = healthcheck_summary["ok"]
+        if not healthcheck_summary["ok"]:
+            ok = False
+            message = "Service started but healthcheck failed; review service status and logs manually"
+
+    payload = {
+        "ok": ok,
+        "message": message,
+        "command_executed": " ".join(start_command),
+        "exit_code": start_result["returncode"],
+        "stdout": start_result["stdout"],
+        "stderr": start_result["stderr"],
+        "timed_out": start_result["timed_out"],
+        "status": status_payload,
+        "healthcheck_ok": healthcheck_ok,
+        "healthcheck": healthcheck_summary,
+        "real_systemd_touched": True,
+        "service_started": True,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": True,
+        "real_systemd": True,
+        "read_only": False,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+    }
+    _audit("service-start", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
+def block_real_service_action(
+    *,
+    action: str,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+    real_systemd: bool,
+) -> dict:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    if real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Real stop/restart/enable/disable is not implemented in this safety stage.",
+            "action": action,
+            "service_name": request.service_name,
+            "unit_path": request.unit_path,
+            "profile": request.profile,
+            "role": request.role,
+            "adapter": request.adapter,
+            "transport": request.transport,
+            "real_systemd": True,
+            "read_only": False,
+            "real_systemd_touched": False,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "service_restarted": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+            "systemctl_executed": False,
+        }
+        _audit(f"service-{action}", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    payload = {
+        "ok": False,
+        "message": f"Real service {action} requires --real-systemd, and remains blocked in this safety stage. Use service plan --action {action} for plan-only guidance.",
+        "action": action,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "real_systemd": False,
+        "read_only": False,
+        "real_systemd_touched": False,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    _audit(f"service-{action}", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
 def _adapter_for(adapter_name: str):
     if adapter_name not in ADAPTERS:
         raise KeyError(f"Unknown adapter '{adapter_name}'")
@@ -607,6 +881,92 @@ def _real_systemd_unavailable_payload(
     return None
 
 
+def _service_start_request(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+) -> ServiceStartRequest:
+    planned_role = _resolve_role(profile, role)
+    _validate_service_inputs(profile.name, adapter_name, transport, planned_role, None)
+    adapter = _adapter_for(adapter_name)
+    context = AdapterContext(
+        profile=profile,
+        transport=transport,
+        work_dir=paths.work_dir / profile.name,
+        staging_root=paths.staging_root,
+        apply_changes=False,
+        role=planned_role,
+        remote_stub=asdict(build_worker_stub(profile)),
+    )
+    ok, reason = adapter.precheck(context)
+    if not ok:
+        raise ValueError(reason)
+    service_name = adapter.service_name(context)
+    if not _is_valid_pilottunnel_service_name(service_name):
+        raise ValueError(f"Refusing unsafe service name '{service_name}'")
+    unit_path = _real_service_unit_path(service_name)
+    return ServiceStartRequest(
+        profile=profile.name,
+        role=planned_role,
+        adapter=adapter_name,
+        transport=transport,
+        service_name=service_name,
+        unit_path=str(unit_path),
+    )
+
+
+def _service_status_payload(*, request: ServiceStartRequest, timeout_seconds: float) -> dict[str, Any]:
+    status_command = ["systemctl", "status", request.service_name, "--no-pager"]
+    active_command = ["systemctl", "is-active", request.service_name]
+    status_result = _run_command(status_command, timeout_seconds=timeout_seconds)
+    active_result = _run_command(active_command, timeout_seconds=timeout_seconds)
+    return {
+        "ok": status_result["returncode"] == 0 and not status_result["timed_out"],
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "status_command": " ".join(status_command),
+        "command_executed": " ".join(status_command),
+        "exit_code": status_result["returncode"],
+        "stdout": status_result["stdout"],
+        "stderr": status_result["stderr"],
+        "timed_out": status_result["timed_out"],
+        "is_active": _sanitize_output(active_result["stdout"]) if active_result["stdout"] else "",
+        "read_only": True,
+        "real_systemd": True,
+        "real_systemd_touched": False,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "checked_at": _checked_at(),
+    }
+
+
+def _verify_pilottunnel_unit_ownership(*, request: ServiceStartRequest) -> dict[str, Any]:
+    unit_path = Path(request.unit_path)
+    if not unit_path.exists():
+        return {"ok": False, "message": f"PilotTunnel service unit is missing: {unit_path}"}
+    content = unit_path.read_text(encoding="utf-8")
+    if PILOTTUNNEL_UNIT_MARKER not in content and f"Description=PilotTunnel {request.profile}" not in content:
+        return {"ok": False, "message": f"Service unit is not marked as PilotTunnel-owned: {unit_path}"}
+    manifest_path = _real_manifest_path(request.profile, request.adapter, request.transport)
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        owned_destinations = {item.get("destination", "") for item in manifest.get("copied_files", [])}
+        if str(unit_path) not in owned_destinations:
+            return {"ok": False, "message": "Apply manifest does not mark this service unit as PilotTunnel-owned"}
+    return {"ok": True, "message": "PilotTunnel ownership verified"}
+
+
 def _sanitize_output(value: str) -> str:
     return value.replace("\x00", "").replace("\r", "").strip()[:800]
 
@@ -624,3 +984,22 @@ def _is_root() -> bool:
     if geteuid is None:
         return False
     return geteuid() == 0
+
+
+def _real_service_unit_path(service_name: str) -> Path:
+    return (REAL_SYSTEM_ROOT / "etc" / "systemd" / "system" / service_name).resolve()
+
+
+def _real_manifest_path(profile: str, adapter: str, transport: str) -> Path:
+    filename = f"{profile}-{adapter}-{transport}.json"
+    return (REAL_SYSTEM_ROOT / "var" / "lib" / "pilottunnel" / "apply-manifests" / filename).resolve()
+
+
+def _is_valid_pilottunnel_service_name(service_name: str) -> bool:
+    if not service_name.startswith("pilottunnel-") or not service_name.endswith(".service"):
+        return False
+    stem = service_name[: -len(".service")]
+    parts = stem.split("-")
+    if len(parts) < 5:
+        return False
+    return parts[-1] in {"controller", "worker"}

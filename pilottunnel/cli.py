@@ -35,7 +35,7 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .readiness import build_readiness_report
 from .simulation import run_e2e_simulation
-from .service_lifecycle import build_service_plan, inspect_service_logs, inspect_service_status, run_daemon_reload
+from .service_lifecycle import block_real_service_action, build_service_plan, inspect_service_logs, inspect_service_status, run_daemon_reload, start_service
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
@@ -170,6 +170,25 @@ def build_parser() -> argparse.ArgumentParser:
     service_daemon_reload.add_argument("--real-systemd", action="store_true")
     service_daemon_reload.add_argument("--confirm")
     service_daemon_reload.add_argument("--json", action="store_true")
+    service_start = service_subparsers.add_parser("start")
+    service_start.add_argument("--profile", required=True)
+    service_start.add_argument("--adapter", required=True)
+    service_start.add_argument("--transport", required=True)
+    service_start.add_argument("--role")
+    service_start.add_argument("--real-systemd", action="store_true")
+    service_start.add_argument("--confirm")
+    service_start.add_argument("--require-healthcheck", action="store_true")
+    service_start.add_argument("--healthcheck-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    service_start.add_argument("--json", action="store_true")
+    for blocked_action in ("stop", "restart", "enable", "disable"):
+        blocked_parser = service_subparsers.add_parser(blocked_action)
+        blocked_parser.add_argument("--profile", required=True)
+        blocked_parser.add_argument("--adapter", required=True)
+        blocked_parser.add_argument("--transport", required=True)
+        blocked_parser.add_argument("--role")
+        blocked_parser.add_argument("--real-systemd", action="store_true")
+        blocked_parser.add_argument("--confirm")
+        blocked_parser.add_argument("--json", action="store_true")
 
     switch = subparsers.add_parser("switch")
     switch.add_argument("--profile", required=True)
@@ -908,6 +927,54 @@ def main(argv: list[str] | None = None) -> int:
             confirm=args.confirm,
             real_systemd=args.real_systemd,
         )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "service" and args.service_command == "start":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            requested_role = canonical_role(args.role) if args.role else None
+            if requested_role and config.node.initialized and requested_role != config.node.normalized_role:
+                raise ValueError(f"Requested service role '{requested_role}' does not match initialized node role '{config.node.normalized_role}'")
+            if not config.node.initialized:
+                raise ValueError("Real service start requires an initialized node role")
+            payload = start_service(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=requested_role or config.node.normalized_role or profile.role,
+                paths=switch_paths,
+                confirm=args.confirm,
+                real_systemd=args.real_systemd,
+                require_healthcheck=args.require_healthcheck,
+                healthcheck_timeout=args.healthcheck_timeout,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "service" and args.service_command in {"stop", "restart", "enable", "disable"}:
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            requested_role = canonical_role(args.role) if args.role else None
+            if requested_role and config.node.initialized and requested_role != config.node.normalized_role:
+                raise ValueError(f"Requested service role '{requested_role}' does not match initialized node role '{config.node.normalized_role}'")
+            payload = block_real_service_action(
+                action=args.service_command,
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=requested_role or config.node.normalized_role or profile.role,
+                paths=switch_paths,
+                real_systemd=args.real_systemd,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
 

@@ -142,13 +142,31 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 
 - `service status` and `service logs` can read from real systemd only with `--real-systemd`.
 - `service daemon-reload` requires exact confirmation with `--confirm DAEMON_RELOAD`.
-- Service start, stop, restart, enable, and disable are still blocked.
+- `service start` remains gated and requires exact confirmation with `--confirm START_SERVICE`.
+- Only PilotTunnel-owned unit files are eligible for real start.
+- Real `stop`, `restart`, `enable`, and `disable` remain blocked in this safety stage.
 - Firewall rules, routes, and interfaces remain untouched.
 
 ```bash
 python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
 python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
 python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_RELOAD
+```
+
+## Controlled Real Service Start Gate
+
+- `service start` requires `--real-systemd` and exact `--confirm START_SERVICE`.
+- Only PilotTunnel-owned unit files can be started.
+- After start, PilotTunnel runs read-only `systemctl is-active` and `systemctl status`.
+- Optional `--require-healthcheck` runs TCP healthchecks after start without stopping the service on failure.
+- Real `stop`, `restart`, `enable`, and `disable` are still blocked.
+- Firewall rules, routes, interfaces, and downloads remain untouched.
+
+```bash
+python -m pilottunnel.cli service start --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE
+python -m pilottunnel.cli service start --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE --require-healthcheck
+python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
 ```
 
 ## Two-Sided Controller/Worker Bundles
