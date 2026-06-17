@@ -80,6 +80,21 @@ python -m pilottunnel.cli binary plan --adapter backhaul
 python -m pilottunnel.cli binary plan --adapter rathole
 ```
 
+## Binary Import And Verification
+
+- No automatic downloads yet.
+- Imported binaries are not executed unless `--run-version` is explicitly used.
+- Services are not started.
+- Real apply is still not implemented.
+
+```bash
+python -m pilottunnel.cli binary import --adapter backhaul --source ./backhaul --version manual-v0.0.0
+python -m pilottunnel.cli binary import --adapter rathole --source ./rathole --version manual-v0.0.0
+python -m pilottunnel.cli binary status
+python -m pilottunnel.cli binary verify --adapter backhaul
+python -m pilottunnel.cli binary verify --adapter rathole --run-version
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.

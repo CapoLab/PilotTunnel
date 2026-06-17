@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from pilottunnel import cli
 
@@ -319,3 +320,99 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertIn("preflight", payload)
         self.assertIn("warnings", payload["preflight"])
+
+    def _make_binary_source(self, name: str, content: str = "binary") -> Path:
+        path = Path(self.temp_dir.name) / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_binary_import_backhaul_from_local_temp_file(self) -> None:
+        source = self._make_binary_source("backhaul")
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(Path(payload["imported_path"]).exists())
+
+    def test_binary_import_rathole_from_local_temp_file(self) -> None:
+        source = self._make_binary_source("rathole")
+        code, output = self.run_cli("binary", "import", "--adapter", "rathole", "--source", str(source), "--version", "manual-v0.0.0")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("sha256", payload)
+
+    def test_binary_import_rejects_unknown_adapter(self) -> None:
+        source = self._make_binary_source("unknown")
+        code, output = self.run_cli("binary", "import", "--adapter", "missing", "--source", str(source), "--version", "manual-v0.0.0")
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown binary adapter", output)
+
+    def test_binary_import_rejects_missing_source(self) -> None:
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(Path(self.temp_dir.name) / "missing"), "--version", "manual-v0.0.0")
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", output)
+
+    def test_binary_import_rejects_directory_source(self) -> None:
+        source_dir = Path(self.temp_dir.name) / "srcdir"
+        source_dir.mkdir()
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source_dir), "--version", "manual-v0.0.0")
+        self.assertEqual(code, 1)
+        self.assertIn("must be a file", output)
+
+    def test_binary_import_rejects_checksum_mismatch(self) -> None:
+        source = self._make_binary_source("backhaul")
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0", "--sha256", "deadbeef")
+        self.assertEqual(code, 1)
+        self.assertIn("sha256", output)
+
+    def test_binary_import_refuses_overwrite_without_force(self) -> None:
+        source = self._make_binary_source("backhaul")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.1")
+        self.assertEqual(code, 1)
+        self.assertIn("Use --force", output)
+
+    def test_binary_import_with_force_overwrites_safely(self) -> None:
+        source = self._make_binary_source("backhaul", "one")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        source.write_text("two", encoding="utf-8")
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.1", "--force")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["version"], "manual-v0.0.1")
+
+    def test_binary_status_shows_imported_binary(self) -> None:
+        source = self._make_binary_source("backhaul")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        code, output = self.run_cli("binary", "status", "--adapter", "backhaul")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["install_status"], "imported")
+
+    def test_binary_verify_shows_sha256_executable_platform(self) -> None:
+        source = self._make_binary_source("backhaul")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        code, output = self.run_cli("binary", "verify", "--adapter", "backhaul")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("sha256", payload)
+        self.assertIn("platform", payload)
+        self.assertIn("executable", payload)
+
+    @patch("pilottunnel.binaries.subprocess.run")
+    def test_binary_verify_run_version_is_mocked_and_timeout_safe(self, mock_run) -> None:
+        source = self._make_binary_source("backhaul")
+        self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        class Completed:
+            returncode = 0
+            stdout = "backhaul 1.2.3"
+            stderr = ""
+        mock_run.return_value = Completed()
+        code, output = self.run_cli("binary", "verify", "--adapter", "backhaul", "--run-version")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["run_version_result"]["ran"])
+
+    def test_binary_cache_path_traversal_is_blocked(self) -> None:
+        source = Path(self.temp_dir.name) / ".." / "backhaul"
+        code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)

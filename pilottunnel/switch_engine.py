@@ -426,7 +426,7 @@ class SwitchEngine:
             "ports_used": profile.ports.owned_ports(),
             "generated_config_path": rendered.get("config_path", ""),
             "generated_service_path": unit["unit"]["path"],
-            "binary_plan": get_binary_plan(adapter_name, self.paths.work_dir),
+            "binary_plan": get_binary_plan(adapter_name, self.paths.work_dir, self.state),
             "future_apply_commands": [
                 f"systemctl daemon-reload",
                 f"systemctl enable {unit['unit']['unit_name']}",

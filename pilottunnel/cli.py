@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .adapters import ADAPTERS
-from .binaries import get_binary_plan, list_binary_plans
+from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
 from .config import (
     AppConfig,
     Candidate,
@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lock-dir", type=Path, default=None)
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--staging-root", type=Path, default=None)
+    parser.add_argument("--cache-root", type=Path, default=None)
     parser.add_argument("--apply", action="store_true", help="Allow dangerous operations to write runtime artifacts")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -121,6 +122,17 @@ def build_parser() -> argparse.ArgumentParser:
     binary_subparsers.add_parser("list")
     binary_plan = binary_subparsers.add_parser("plan")
     binary_plan.add_argument("--adapter", required=True)
+    binary_import = binary_subparsers.add_parser("import")
+    binary_import.add_argument("--adapter", required=True)
+    binary_import.add_argument("--source", type=Path, required=True)
+    binary_import.add_argument("--version", required=True)
+    binary_import.add_argument("--sha256")
+    binary_import.add_argument("--force", action="store_true")
+    binary_status = binary_subparsers.add_parser("status")
+    binary_status.add_argument("--adapter")
+    binary_verify = binary_subparsers.add_parser("verify")
+    binary_verify.add_argument("--adapter", required=True)
+    binary_verify.add_argument("--run-version", action="store_true")
     return parser
 
 
@@ -131,8 +143,9 @@ def _paths(args: argparse.Namespace) -> tuple[Path, Path, Path, SwitchPaths]:
     audit_path = args.audit_log or Path("/var/log/pilottunnel/audit.log")
     lock_dir = args.lock_dir or Path("/var/lib/pilottunnel/locks")
     work_dir = args.work_dir or Path(tempfile.gettempdir()) / "pilottunnel"
+    cache_root = args.cache_root or work_dir
     staging_root = args.staging_root or (work_dir / ".var" / "pilottunnel" / "staging")
-    return config_path, state_path, registry_path, SwitchPaths(lock_dir=lock_dir, work_dir=work_dir, audit_path=audit_path, staging_root=staging_root)
+    return config_path, state_path, registry_path, SwitchPaths(lock_dir=lock_dir, work_dir=cache_root, audit_path=audit_path, staging_root=staging_root)
 
 
 def _load_runtime(args: argparse.Namespace) -> tuple[AppConfig, AppState, PortRegistry, Path, Path, Path, SwitchPaths]:
@@ -481,15 +494,59 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "binary" and args.binary_command == "list":
-        print(json.dumps(list_binary_plans(switch_paths.work_dir), indent=2))
+        print(json.dumps(list_binary_plans(switch_paths.work_dir, state), indent=2))
         return 0
 
     if args.command == "binary" and args.binary_command == "plan":
         try:
-            print(json.dumps(get_binary_plan(args.adapter, switch_paths.work_dir), indent=2))
+            print(json.dumps(get_binary_plan(args.adapter, switch_paths.work_dir, state), indent=2))
         except KeyError as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
+        return 0
+
+    if args.command == "binary" and args.binary_command == "import":
+        try:
+            payload = import_binary(
+                adapter=args.adapter,
+                source=args.source,
+                version=args.version,
+                cache_root=switch_paths.work_dir,
+                state=state,
+                sha256_expected=args.sha256,
+                force=args.force,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "binary" and args.binary_command == "status":
+        if args.adapter:
+            try:
+                print(json.dumps(get_binary_plan(args.adapter, switch_paths.work_dir, state), indent=2))
+            except KeyError as exc:
+                print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+                return 1
+            return 0
+        print(json.dumps(list_binary_plans(switch_paths.work_dir, state), indent=2))
+        return 0
+
+    if args.command == "binary" and args.binary_command == "verify":
+        try:
+            payload = verify_binary(
+                adapter=args.adapter,
+                cache_root=switch_paths.work_dir,
+                state=state,
+                run_version=args.run_version,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        print(json.dumps(payload, indent=2))
         return 0
 
     if args.command == "staged" and args.staged_command == "list":

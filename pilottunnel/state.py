@@ -26,8 +26,23 @@ class RuntimeRecord:
 
 
 @dataclass
+class BinaryRecord:
+    adapter: str
+    source_filename: str
+    imported_path: str
+    sha256: str
+    version: str
+    imported_at: str
+    executable: bool
+    platform: str
+    source_type: str = "user_supplied"
+    run_version_result: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class AppState:
     profiles: dict[str, RuntimeRecord] = field(default_factory=dict)
+    binaries: dict[str, BinaryRecord] = field(default_factory=dict)
 
     def clone(self) -> "AppState":
         return copy.deepcopy(self)
@@ -38,7 +53,8 @@ def load_state(path: Path = DEFAULT_STATE_PATH) -> AppState:
         return AppState()
     data = json.loads(path.read_text(encoding="utf-8"))
     profiles = {name: RuntimeRecord(**payload) for name, payload in data.get("profiles", {}).items()}
-    return AppState(profiles=profiles)
+    binaries = {name: BinaryRecord(**payload) for name, payload in data.get("binaries", {}).items()}
+    return AppState(profiles=profiles, binaries=binaries)
 
 
 def save_state(state: AppState, path: Path = DEFAULT_STATE_PATH) -> None:

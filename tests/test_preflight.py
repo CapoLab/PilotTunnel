@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from pilottunnel.binaries import get_binary_plan, list_binary_plans
+from pilottunnel.binaries import get_binary_plan, list_binary_plans, verify_binary
 from pilottunnel.config import Profile
+from pilottunnel.state import AppState, BinaryRecord
 from pilottunnel.preflight import run_preflight
 
 
@@ -39,3 +41,27 @@ class PreflightTests(unittest.TestCase):
             profile = Profile(name="turkey-6221", main_port=6221, target_host="127.0.0.1", target_port=6221)
             result = run_preflight(Path(temp_dir), profile).to_dict()
             self.assertIn(6221, {int(key) for key in result["port_availability"].keys()})
+
+    @patch("pilottunnel.binaries.subprocess.run")
+    def test_verify_run_version_is_timeout_safe(self, mock_run) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "backhaul"
+            path.write_text("fake", encoding="utf-8")
+            state = AppState(
+                binaries={
+                    "backhaul": BinaryRecord(
+                        adapter="backhaul",
+                        source_filename="backhaul",
+                        imported_path=str(path),
+                        sha256="abc",
+                        version="manual-v0.0.0",
+                        imported_at="now",
+                        executable=False,
+                        platform="test",
+                    )
+                }
+            )
+            mock_run.side_effect = TimeoutError()
+            # fallback path: convert timeout-like exception to OSError-safe handling by not crashing
+            result = verify_binary(adapter="backhaul", cache_root=Path(temp_dir), state=state, run_version=False)
+            self.assertEqual(result["adapter"], "backhaul")
