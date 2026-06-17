@@ -1,0 +1,45 @@
+"""Runtime state persistence."""
+
+from __future__ import annotations
+
+import copy
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .config import DEFAULT_STATE_PATH
+
+
+@dataclass
+class RuntimeRecord:
+    profile: str
+    active_adapter: str = ""
+    active_transport: str = ""
+    active_layer: str = "layer4"
+    service_name: str = ""
+    healthy: bool = False
+    last_error: str = ""
+    last_switch_at: str = ""
+    rollback_snapshot: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AppState:
+    profiles: dict[str, RuntimeRecord] = field(default_factory=dict)
+
+    def clone(self) -> "AppState":
+        return copy.deepcopy(self)
+
+
+def load_state(path: Path = DEFAULT_STATE_PATH) -> AppState:
+    if not path.exists():
+        return AppState()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    profiles = {name: RuntimeRecord(**payload) for name, payload in data.get("profiles", {}).items()}
+    return AppState(profiles=profiles)
+
+
+def save_state(state: AppState, path: Path = DEFAULT_STATE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asdict(state), indent=2, sort_keys=True), encoding="utf-8")
