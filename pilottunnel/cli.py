@@ -28,6 +28,7 @@ from .config import (
 )
 from .install_plan import apply_install, apply_uninstall, build_install_plan, build_uninstall_plan, rollback_install
 from .node_role import action_allowed_for_role, node_status_payload
+from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
@@ -100,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_apply.add_argument("--install-root", type=Path, default=None)
     install_apply.add_argument("--confirm")
     install_apply.add_argument("--dry-run", action="store_true")
+    install_apply.add_argument("--require-healthcheck", action="store_true")
     install_rollback = install_subparsers.add_parser("rollback")
     install_rollback.add_argument("--profile", required=True)
     install_rollback.add_argument("--adapter", required=True)
@@ -130,12 +132,19 @@ def build_parser() -> argparse.ArgumentParser:
     switch.add_argument("--profile", required=True)
     switch.add_argument("--adapter", required=True)
     switch.add_argument("--transport", required=True)
+    switch.add_argument("--require-healthcheck", action="store_true")
 
     status = subparsers.add_parser("status")
     status.add_argument("--profile", required=True)
 
     healthcheck = subparsers.add_parser("healthcheck")
-    healthcheck.add_argument("--profile", required=True)
+    healthcheck.add_argument("--profile")
+    healthcheck.add_argument("--host")
+    healthcheck.add_argument("--port", type=int)
+    healthcheck.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    healthcheck.add_argument("--json", action="store_true")
+    healthcheck.add_argument("--all", action="store_true")
+    healthcheck.add_argument("--role-aware", action="store_true")
 
     rollback = subparsers.add_parser("rollback")
     rollback.add_argument("--profile", required=True)
@@ -584,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
                 install_root=args.install_root,
                 confirm=args.confirm,
                 dry_run=args.dry_run,
+                require_healthcheck=args.require_healthcheck,
             )
         except (KeyError, ValueError) as exc:
             payload = {"ok": False, "action": "install-apply", "message": str(exc)}
@@ -650,12 +660,45 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "switch":
         try:
+            profile = get_profile(config, args.profile)
+            tcp_plan = build_profile_healthcheck_plan(
+                profile=profile,
+                node_role=config.node.normalized_role or "controller",
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+                include_all=True,
+                role_aware=True,
+            )
+            tcp_summary = None
+            if args.require_healthcheck:
+                tcp_summary = summarize_healthchecks(
+                    run_profile_healthchecks(
+                        profile=profile,
+                        node_role=config.node.normalized_role or "controller",
+                        timeout=DEFAULT_TIMEOUT_SECONDS,
+                        include_all=True,
+                        role_aware=True,
+                    ),
+                    profile=profile.name,
+                    role=config.node.normalized_role or "controller",
+                )
+            if args.require_healthcheck and not tcp_summary["ok"]:
+                write_audit_log(
+                    "healthcheck",
+                    profile.name,
+                    {"result": "failed", "reason": "require-healthcheck blocked switch", "healthcheck": tcp_summary},
+                    switch_paths.audit_path,
+                )
+                print(json.dumps({"ok": False, "message": "Healthcheck requirement failed before switch", "healthcheck": tcp_summary}, indent=2))
+                return 1
             result = engine.switch(args.profile, args.adapter, args.transport, args.apply)
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
         _save_runtime(engine.config, engine.state, engine.registry, config_path, state_path, registry_path)
-        print(json.dumps(result.__dict__, indent=2))
+        payload = dict(result.__dict__)
+        payload["tcp_healthcheck"] = tcp_summary
+        payload["tcp_healthcheck_plan"] = tcp_plan
+        print(json.dumps(payload, indent=2))
         return 0 if result.ok else 1
 
     if args.command == "status":
@@ -668,21 +711,42 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "healthcheck":
         try:
-            result = engine.healthcheck(args.profile)
-        except KeyError as exc:
+            if args.host or args.port:
+                if not (args.host and args.port):
+                    raise ValueError("Both --host and --port are required for direct endpoint checks")
+                role = config.node.normalized_role or "controller"
+                profile_name = args.profile or ""
+                payload = tcp_healthcheck(
+                    host=args.host,
+                    port=args.port,
+                    timeout=args.timeout,
+                    role=role,
+                    profile=profile_name,
+                ).to_dict()
+                payload["result"] = "ok" if payload["ok"] else "failed"
+                if not payload["ok"]:
+                    write_audit_log("healthcheck", profile_name or "direct", {"result": "failed", "healthcheck": payload}, switch_paths.audit_path)
+                print(json.dumps(payload, indent=2))
+                return 0 if payload["ok"] else 1
+            if not args.profile:
+                raise ValueError("healthcheck requires --profile or both --host and --port")
+            profile = get_profile(config, args.profile)
+            node_role = config.node.normalized_role or "controller"
+            results = run_profile_healthchecks(
+                profile=profile,
+                node_role=node_role,
+                timeout=args.timeout,
+                include_all=args.all,
+                role_aware=args.role_aware,
+            )
+            payload = summarize_healthchecks(results, profile=profile.name, role=node_role)
+            if not payload["ok"]:
+                write_audit_log("healthcheck", profile.name, {"result": "failed", "healthcheck": payload}, switch_paths.audit_path)
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
+        except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
-        _save_runtime(engine.config, engine.state, engine.registry, config_path, state_path, registry_path)
-        payload = {
-            "profile": args.profile,
-            "adapter": result.current.get("adapter", ""),
-            "transport": result.current.get("transport", ""),
-            "dry_run": result.dry_run,
-            "result": "ok" if result.ok else "failed",
-            "message": result.healthcheck.get("message", result.message),
-        }
-        print(json.dumps(payload, indent=2))
-        return 0 if result.ok else 1
 
     if args.command == "rollback":
         try:

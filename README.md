@@ -138,6 +138,20 @@ python -m pilottunnel.cli init --role worker
 python -m pilottunnel.cli node status
 ```
 
+## TCP Healthchecks
+
+- `healthcheck` is read-only.
+- It only performs TCP connect probes.
+- It does not start services.
+- It does not modify firewall, routes, or systemd.
+
+```bash
+python -m pilottunnel.cli healthcheck --host 127.0.0.1 --port 6221
+python -m pilottunnel.cli healthcheck --profile turkey-6221 --all
+python -m pilottunnel.cli healthcheck --profile turkey-6221 --all --json
+python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY --require-healthcheck
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.

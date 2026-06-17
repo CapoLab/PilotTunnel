@@ -15,6 +15,7 @@ from .adapters.base import AdapterContext
 from .audit import write_audit_log
 from .binaries import binary_filename, get_binary_plan
 from .config import Profile, build_worker_stub, canonical_role, validate_profile_name
+from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks
 from .preflight import run_preflight
 from .state import AppState
 from .switch_engine import SwitchPaths
@@ -205,6 +206,7 @@ def apply_install(
     install_root: Path | None,
     confirm: str | None,
     dry_run: bool,
+    require_healthcheck: bool = False,
 ) -> dict:
     profile_name = profile.name
     attempt = {
@@ -213,6 +215,7 @@ def apply_install(
         "install_root": str(install_root.resolve()) if install_root else None,
         "confirm": bool(confirm),
         "dry_run": dry_run,
+        "require_healthcheck": require_healthcheck,
     }
     if confirm != "APPLY":
         _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm APPLY"}, path=paths.audit_path)
@@ -232,6 +235,25 @@ def apply_install(
             install_root=install_root,
         )
         root = _validated_apply_root(install_root)
+        healthcheck_plan = build_profile_healthcheck_plan(
+            profile=profile,
+            node_role=plan["role"],
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            include_all=True,
+            role_aware=True,
+        )
+        healthcheck_summary = None
+        if require_healthcheck:
+            healthcheck_results = run_profile_healthchecks(
+                profile=profile,
+                node_role=plan["role"],
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+                include_all=True,
+                role_aware=True,
+            )
+            healthcheck_summary = summarize_healthchecks(healthcheck_results, profile=profile_name, role=plan["role"])
+            if not healthcheck_summary["ok"]:
+                raise ValueError("Healthcheck requirement failed before install apply")
         source_map = {item["kind"]: item for item in plan["source_staged_files"]}
         missing = [item["path"] for item in plan["source_staged_files"] if not item["exists"]]
         if missing:
@@ -290,6 +312,8 @@ def apply_install(
                 "manifest": str(manifest_path),
                 "copied_files": copied_files,
                 "backups_created": backups_created,
+                "healthcheck": healthcheck_summary,
+                "healthcheck_plan": healthcheck_plan,
             },
             path=paths.audit_path,
         )
@@ -306,6 +330,8 @@ def apply_install(
             "skipped_files": skipped_files,
             "manifest_path": str(manifest_path),
             "dry_run": dry_run,
+            "healthcheck": healthcheck_summary,
+            "healthcheck_plan": healthcheck_plan,
             "real_systemd_touched": False,
             "service_started": False,
             "firewall_touched": False,

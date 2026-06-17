@@ -1,6 +1,8 @@
 import io
 import json
+import socket
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -245,6 +247,107 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["target"]["adapter"], "rathole")
         self.assertEqual(payload["healthcheck"]["result"], True)
 
+    def test_tcp_healthcheck_succeeds_against_local_test_socket(self) -> None:
+        server, port, _ = self._start_tcp_server()
+        self.addCleanup(server.close)
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", str(port))
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["port"], port)
+        self.assertIsNotNone(payload["latency_ms"])
+
+    def test_tcp_healthcheck_fails_safely_when_port_is_closed(self) -> None:
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "65534")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["error"])
+
+    def test_healthcheck_json_output_is_valid(self) -> None:
+        server, port, _ = self._start_tcp_server()
+        self.addCleanup(server.close)
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", str(port), "--json")
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(output)["ok"])
+
+    def test_healthcheck_direct_host_port_works(self) -> None:
+        server, port, _ = self._start_tcp_server()
+        self.addCleanup(server.close)
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", str(port), "--timeout", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["host"], "127.0.0.1")
+
+    def test_profile_healthcheck_checks_expected_ports(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("healthcheck", "--profile", "turkey-6221", "--all")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        labels = {item["label"] for item in payload["results"]}
+        self.assertIn("target", labels)
+        self.assertTrue(any("port" in label for label in labels))
+
+    def test_controller_role_healthcheck_includes_controller_side_checks(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-port",
+            "6221",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+        code, output = self.run_cli("healthcheck", "--profile", "turkey-6221", "--role-aware")
+        self.assertEqual(code, 1)
+        labels = {item["label"] for item in json.loads(output)["results"]}
+        self.assertIn("target", labels)
+        self.assertIn("main_port", labels)
+
+    def test_worker_role_healthcheck_includes_worker_side_checks(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-port",
+            "6221",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+        self.run_cli("init", "--force", "--role", "worker")
+        code, output = self.run_cli("healthcheck", "--profile", "turkey-6221", "--role-aware")
+        self.assertEqual(code, 1)
+        labels = {item["label"] for item in json.loads(output)["results"]}
+        self.assertIn("worker_target_port", labels)
+        self.assertIn("controller_endpoint", labels)
+
+    def test_invalid_healthcheck_port_is_rejected(self) -> None:
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "70000")
+        self.assertEqual(code, 1)
+        self.assertIn("port must be between", output)
+
+    @patch("pilottunnel.healthcheck.socket.create_connection", side_effect=TimeoutError("timed out"))
+    def test_healthcheck_timeout_is_handled_safely(self, _mock_create_connection) -> None:
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "6553", "--timeout", "0.1")
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+
     def test_status_output_includes_active_adapter_transport(self) -> None:
         self._create_profile()
         self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
@@ -441,6 +544,24 @@ class CliWorkflowTests(unittest.TestCase):
         source = self._make_binary_source(adapter, content)
         self.run_cli("binary", "import", "--adapter", adapter, "--source", str(source), "--version", "manual-v0.0.0")
         return source
+
+    def _start_tcp_server(self) -> tuple[socket.socket, int, threading.Thread]:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+
+        def run() -> None:
+            try:
+                while True:
+                    conn, _ = server.accept()
+                    conn.close()
+            except OSError:
+                return
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return server, port, thread
 
     def test_binary_import_backhaul_from_local_temp_file(self) -> None:
         source = self._make_binary_source("backhaul")
@@ -679,6 +800,68 @@ class CliWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("--confirm APPLY", output)
+
+    def test_require_healthcheck_blocks_install_apply_when_check_fails(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+            "--require-healthcheck",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Healthcheck requirement failed", output)
+        self.assertFalse((install_root / "var" / "lib" / "pilottunnel" / "apply-manifests").exists())
+
+    @patch("pilottunnel.install_plan.run_profile_healthchecks")
+    def test_require_healthcheck_allows_install_apply_when_mocked_check_passes(self, mock_run_profile_healthchecks) -> None:
+        mock_run_profile_healthchecks.return_value = [
+            {
+                "ok": True,
+                "host": "127.0.0.1",
+                "port": 6221,
+                "timeout": 2.0,
+                "latency_ms": 1.0,
+                "error": "",
+                "checked_at": "now",
+                "role": "controller",
+                "profile": "turkey-6221",
+                "label": "target",
+            }
+        ]
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+            "--require-healthcheck",
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(output)["healthcheck"]["ok"])
 
     def test_install_apply_refuses_without_install_root(self) -> None:
         self._create_profile()
@@ -1072,3 +1255,10 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("install-apply", actions)
         self.assertIn("install-rollback", actions)
         self.assertIn("uninstall-apply", actions)
+
+    def test_audit_records_healthcheck_failure(self) -> None:
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "65534")
+        self.assertEqual(code, 1)
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(lines[-1]["action"], "healthcheck")
+        self.assertEqual(lines[-1]["details"]["result"], "failed")
