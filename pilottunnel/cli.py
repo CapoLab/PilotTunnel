@@ -10,7 +10,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .adapters import ADAPTERS
+from .adapters.base import AdapterContext
 from .audit import write_audit_log
+from .bundles import build_worker_bundle, import_bundle, inspect_bundle
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
 from .config import (
     AppConfig,
@@ -19,6 +21,7 @@ from .config import (
     ProfilePorts,
     ProfileSafety,
     SUPPORTED_LAYERS,
+    build_worker_stub,
     build_node_settings,
     canonical_role,
     get_profile,
@@ -220,6 +223,27 @@ def build_parser() -> argparse.ArgumentParser:
     binary_verify = binary_subparsers.add_parser("verify")
     binary_verify.add_argument("--adapter", required=True)
     binary_verify.add_argument("--run-version", action="store_true")
+
+    bundle = subparsers.add_parser("bundle")
+    bundle_subparsers = bundle.add_subparsers(dest="bundle_command", required=True)
+    bundle_export = bundle_subparsers.add_parser("export-worker")
+    bundle_export.add_argument("--profile", required=True)
+    bundle_export.add_argument("--adapter", required=True)
+    bundle_export.add_argument("--transport", required=True)
+    bundle_export.add_argument("--output", type=Path, required=True)
+    bundle_export.add_argument("--include-staged-paths", action="store_true")
+    bundle_export.add_argument("--force", action="store_true")
+    bundle_export.add_argument("--json", action="store_true")
+    bundle_inspect = bundle_subparsers.add_parser("inspect")
+    bundle_inspect.add_argument("--input", type=Path, required=True)
+    bundle_inspect.add_argument("--json", action="store_true")
+    bundle_import = bundle_subparsers.add_parser("import")
+    bundle_import.add_argument("--input", type=Path, required=True)
+    bundle_import.add_argument("--staging-root", type=Path, default=None)
+    bundle_import.add_argument("--confirm")
+    bundle_import.add_argument("--dry-run", action="store_true")
+    bundle_import.add_argument("--force", action="store_true")
+    bundle_import.add_argument("--json", action="store_true")
     return parser
 
 
@@ -254,6 +278,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"adapter_{args.adapter_command}"
     if args.command == "binary":
         return f"binary_{args.binary_command}"
+    if args.command == "bundle":
+        return f"bundle_{args.bundle_command.replace('-', '_')}"
     if args.command == "install":
         return f"install_{args.install_command}"
     if args.command == "uninstall":
@@ -338,6 +364,55 @@ def _validate_profile_ports(profile: Profile) -> None:
         ("check_port", profile.ports.check_port),
     ]:
         _validate_port(value, label)
+
+
+def _validate_bundle_output_path(output: Path) -> Path:
+    if ".." in output.parts:
+        raise ValueError(f"Path traversal blocked for output path: {output!r}")
+    return output
+
+
+def _profile_from_bundle_profile(data: dict) -> Profile:
+    ports_data = data.get("ports") or {}
+    safety_data = data.get("safety") or {}
+    return Profile(
+        name=data["name"],
+        main_port=data.get("main_port", ports_data.get("main_port")),
+        target_host=data.get("target_host", ""),
+        target_port=data.get("target_port", ports_data.get("target_port")),
+        role=data.get("role", "worker"),
+        active_layer=data.get("active_layer", "layer4"),
+        active_adapter=data.get("active_adapter", ""),
+        active_transport=data.get("active_transport", ""),
+        candidates=[Candidate(**item) for item in data.get("candidates", [])],
+        ports=ProfilePorts(
+            main_port=data.get("main_port", ports_data.get("main_port")),
+            control_port=ports_data.get("control_port"),
+            service_port=ports_data.get("service_port"),
+            check_port=ports_data.get("check_port"),
+        ),
+        safety=ProfileSafety(
+            cooldown_seconds=safety_data.get("cooldown_seconds", 30),
+            rollback_on_failure=safety_data.get("rollback_on_failure", True),
+            dry_run_default=safety_data.get("dry_run_default", True),
+        ),
+    )
+
+
+def _stage_bundle_import(profile: Profile, adapter_name: str, transport: str, switch_paths: SwitchPaths) -> list[str]:
+    adapter = ADAPTERS[adapter_name]()
+    context = AdapterContext(
+        profile=profile,
+        transport=transport,
+        work_dir=switch_paths.work_dir / profile.name,
+        staging_root=switch_paths.staging_root,
+        apply_changes=True,
+        role="worker",
+        remote_stub=asdict(build_worker_stub(profile)),
+    )
+    rendered_config = adapter.render_config(context)
+    rendered_unit = adapter.render_systemd_unit(context)
+    return [rendered_config["config_path"], rendered_unit["unit"]["path"]]
 
 
 def _adapter_payload(name: str) -> dict:
@@ -499,6 +574,13 @@ def main(argv: list[str] | None = None) -> int:
 
     role_error = _guard_role(config, _action_name(args))
     if role_error:
+        if args.command == "bundle" and args.bundle_command == "export-worker":
+            write_audit_log(
+                "bundle-export-worker",
+                args.profile,
+                {"result": "failed", "reason": role_error, "adapter": args.adapter, "transport": args.transport},
+                switch_paths.audit_path,
+            )
         print(json.dumps({"ok": False, "message": role_error}, indent=2))
         return 1
 
@@ -752,6 +834,112 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
         print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "bundle" and args.bundle_command == "export-worker":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            requested_role = config.node.normalized_role
+            if requested_role == "worker":
+                raise PermissionError("bundle export-worker is blocked for node role 'worker'")
+            output_path = _validate_bundle_output_path(args.output)
+            if output_path.exists() and not args.force:
+                raise ValueError(f"Bundle output '{output_path}' already exists. Use --force to overwrite.")
+            bundle = build_worker_bundle(
+                profile,
+                args.adapter,
+                args.transport,
+                include_staged_paths=args.include_staged_paths,
+                audit_path=switch_paths.audit_path,
+            )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+            payload = dict(bundle)
+            payload["output_path"] = str(output_path)
+            payload["written"] = True
+        except (KeyError, ValueError, PermissionError, json.JSONDecodeError) as exc:
+            write_audit_log(
+                "bundle-export-worker",
+                args.profile if getattr(args, "profile", None) else "bundle-export",
+                {"result": "failed", "reason": str(exc), "adapter": getattr(args, "adapter", ""), "transport": getattr(args, "transport", "")},
+                switch_paths.audit_path,
+            )
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "bundle" and args.bundle_command == "inspect":
+        try:
+            payload = inspect_bundle(args.input)
+            payload["node_role"] = config.node.normalized_role
+            payload["node_role_matches_worker"] = config.node.normalized_role == "worker"
+        except (KeyError, ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "bundle" and args.bundle_command == "import":
+        bundle_profile_name = "bundle-import"
+        try:
+            bundle_data = import_bundle(args.input)
+            bundle_profile_name = bundle_data["profile"]["name"]
+            if config.node.initialized and config.node.normalized_role == "controller" and not args.force:
+                raise PermissionError("bundle import is blocked for controller nodes without --force")
+            if args.confirm != "IMPORT":
+                raise ValueError("Refusing to import bundle without --confirm IMPORT")
+
+            imported_profile = _profile_from_bundle_profile(bundle_data["profile"])
+            _validate_profile_ports(imported_profile)
+            for existing in config.profiles:
+                if existing.name == imported_profile.name:
+                    continue
+                overlap = set(existing.ports.owned_ports()) & set(imported_profile.ports.owned_ports())
+                if overlap:
+                    raise ValueError(f"Profile '{imported_profile.name}' conflicts with '{existing.name}' on ports {sorted(overlap)}")
+
+            preview_paths = bundle_data.get("staged_paths") or bundle_data.get("expected_paths") or {}
+            staged_files: list[str] = []
+            if not args.dry_run:
+                config.profiles = [item for item in config.profiles if item.name != imported_profile.name]
+                config.profiles.append(imported_profile)
+                _save_runtime(config, state, registry, config_path, state_path, registry_path)
+                staged_files = _stage_bundle_import(imported_profile, bundle_data["adapter"], bundle_data["transport"], switch_paths)
+            else:
+                staged_files = list(preview_paths.values())
+            audit_details = {
+                "result": "ok",
+                "dry_run": args.dry_run,
+                "force": args.force,
+                "staged_files": staged_files,
+                "bundle_type": bundle_data["bundle_type"],
+                "adapter": bundle_data["adapter"],
+                "transport": bundle_data["transport"],
+            }
+            write_audit_log("bundle-import", bundle_profile_name, audit_details, switch_paths.audit_path)
+            result_payload = {
+                "ok": True,
+                "dry_run": args.dry_run,
+                "profile": imported_profile.name,
+                "adapter": bundle_data["adapter"],
+                "transport": bundle_data["transport"],
+                "staged_files": staged_files,
+                "config_written": not args.dry_run,
+                "no_system_changes": True,
+                "worker_role": "worker",
+            }
+        except (KeyError, ValueError, PermissionError, FileNotFoundError, json.JSONDecodeError) as exc:
+            write_audit_log(
+                "bundle-import",
+                bundle_profile_name,
+                {"result": "failed", "reason": str(exc), "dry_run": args.dry_run, "force": args.force},
+                switch_paths.audit_path,
+            )
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(result_payload, indent=2))
         return 0
 
     if args.command == "switch":

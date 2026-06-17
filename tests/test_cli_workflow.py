@@ -237,6 +237,29 @@ class CliWorkflowTests(unittest.TestCase):
             "3106",
         )
 
+    def _export_worker_bundle(self, adapter: str, transport: str, *, force: bool = False, include_staged_paths: bool = False) -> Path:
+        bundle_path = Path(self.temp_dir.name) / f"{adapter}-{transport}-worker.json"
+        args = [
+            "bundle",
+            "export-worker",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            adapter,
+            "--transport",
+            transport,
+            "--output",
+            str(bundle_path),
+        ]
+        if include_staged_paths:
+            args.append("--include-staged-paths")
+        if force:
+            args.append("--force")
+        code, output = self.run_cli(*args)
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(bundle_path.exists())
+        return bundle_path
+
     def _stage_switch(self, adapter: str, transport: str) -> None:
         self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", adapter, "--transport", transport)
 
@@ -776,6 +799,216 @@ class CliWorkflowTests(unittest.TestCase):
         code, output = self.run_cli("binary", "plan", "--adapter", "missing")
         self.assertEqual(code, 1)
         self.assertIn("Unknown binary adapter", output)
+
+    def test_controller_exports_valid_backhaul_tcpmux_worker_bundle(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["bundle_type"], "worker_prepare")
+        self.assertEqual(payload["profile"]["role"], "worker")
+        self.assertFalse(Path(payload["expected_paths"]["config"]).is_absolute())
+        self.assertTrue(payload["no_system_changes"])
+
+    def test_controller_exports_valid_rathole_tcp_worker_bundle(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("rathole", "tcp")
+        payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["adapter"], "rathole")
+        self.assertEqual(payload["transport"], "tcp")
+        self.assertEqual(payload["config_filenames"]["worker"], "rathole-worker.toml")
+
+    def test_worker_role_is_blocked_from_export_worker(self) -> None:
+        self._create_profile()
+        self.run_cli("init", "--force", "--role", "worker")
+        code, output = self.run_cli(
+            "bundle",
+            "export-worker",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--output",
+            str(Path(self.temp_dir.name) / "blocked.json"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked for node role 'worker'", output)
+
+    def test_bundle_export_rejects_unknown_adapter(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "bundle",
+            "export-worker",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "missing",
+            "--transport",
+            "tcp",
+            "--output",
+            str(Path(self.temp_dir.name) / "missing.json"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_bundle_export_rejects_unsupported_backhaul_experimental_transport(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "bundle",
+            "export-worker",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcptun",
+            "--output",
+            str(Path(self.temp_dir.name) / "experimental.json"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_bundle_export_refuses_overwrite_without_force(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        code, output = self.run_cli(
+            "bundle",
+            "export-worker",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--output",
+            str(bundle_path),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", output)
+
+    def test_bundle_inspect_reads_valid_bundle_without_writing_files(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        before = sorted(str(path) for path in self.staging_root.rglob("*")) if self.staging_root.exists() else []
+        code, output = self.run_cli("bundle", "inspect", "--input", str(bundle_path))
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["no_changes_made"])
+        self.assertFalse(payload["node_role_matches_worker"])
+        after = sorted(str(path) for path in self.staging_root.rglob("*")) if self.staging_root.exists() else []
+        self.assertEqual(before, after)
+
+    def test_bundle_inspect_warns_when_node_role_does_not_match_expected_worker(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        code, output = self.run_cli("bundle", "inspect", "--input", str(bundle_path))
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["node_role_matches_worker"])
+        self.assertTrue(payload["warnings"])
+
+    def test_bundle_import_refuses_without_confirm_import(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        self.run_cli("init", "--force", "--role", "worker")
+        before = self.config.read_text(encoding="utf-8")
+        code, output = self.run_cli("bundle", "import", "--input", str(bundle_path))
+        self.assertEqual(code, 1)
+        self.assertIn("confirm IMPORT", output)
+        self.assertEqual(before, self.config.read_text(encoding="utf-8"))
+
+    @patch("subprocess.run")
+    def test_worker_bundle_import_creates_worker_side_profile_and_staged_files_under_staging_root(self, mock_run) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        self.run_cli("init", "--force", "--role", "worker")
+        code, output = self.run_cli(
+            "bundle",
+            "import",
+            "--input",
+            str(bundle_path),
+            "--staging-root",
+            str(self.staging_root),
+            "--confirm",
+            "IMPORT",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["config_written"])
+        config_data = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(config_data["profiles"][0]["role"], "worker")
+        self.assertTrue((self.staging_root / "configs" / "turkey-6221" / "backhaul" / "tcpmux" / "worker" / "backhaul-worker.toml").exists())
+        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-turkey-6221-backhaul-tcpmux-worker.service").exists())
+        mock_run.assert_not_called()
+
+    def test_controller_bundle_import_refuses_unless_force(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        code, output = self.run_cli("bundle", "import", "--input", str(bundle_path), "--confirm", "IMPORT")
+        self.assertEqual(code, 1)
+        self.assertIn("blocked for controller nodes", output)
+
+    def test_invalid_json_bundle_rejected(self) -> None:
+        bundle_path = Path(self.temp_dir.name) / "invalid.json"
+        bundle_path.write_text("{not json", encoding="utf-8")
+        code, output = self.run_cli("bundle", "inspect", "--input", str(bundle_path))
+        self.assertEqual(code, 1)
+        self.assertIn("Invalid JSON bundle", output)
+
+    def test_missing_required_fields_rejected(self) -> None:
+        bundle_path = Path(self.temp_dir.name) / "missing.json"
+        bundle_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "bundle_type": "worker_prepare",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "profile": {
+                        "name": "turkey-6221",
+                        "main_port": 6221,
+                        "target_host": "127.0.0.1",
+                        "target_port": 6221,
+                        "role": "worker",
+                    },
+                    "adapter": "backhaul",
+                    "transport": "tcpmux",
+                    "controller_role": "controller",
+                    "worker_role": "worker",
+                    "service_names": {"worker": "pilottunnel-turkey-6221-backhaul-tcpmux-worker.service"},
+                    "config_filenames": {"worker": "backhaul-worker.toml"},
+                    "healthcheck_expectations": [],
+                    "warnings": [],
+                    "no_system_changes": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        code, output = self.run_cli("bundle", "inspect", "--input", str(bundle_path))
+        self.assertEqual(code, 1)
+        self.assertIn("Missing required bundle field", output)
+
+    def test_path_traversal_profile_rejected(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+        payload["profile"]["name"] = "../bad"
+        bundle_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        code, output = self.run_cli("bundle", "inspect", "--input", str(bundle_path))
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_audit_records_bundle_export_import_attempts(self) -> None:
+        self._create_profile()
+        bundle_path = self._export_worker_bundle("backhaul", "tcpmux")
+        self.run_cli("init", "--force", "--role", "worker")
+        code, output = self.run_cli("bundle", "import", "--input", str(bundle_path), "--confirm", "IMPORT")
+        self.assertEqual(code, 0, msg=output)
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        actions = [item["action"] for item in lines]
+        self.assertIn("bundle-export-worker", actions)
+        self.assertIn("bundle-import", actions)
 
     def test_staged_switch_output_includes_preflight_info(self) -> None:
         self._create_profile()

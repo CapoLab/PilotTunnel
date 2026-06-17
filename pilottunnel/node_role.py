@@ -7,6 +7,7 @@ from .config import AppConfig
 SAFE_INSPECT_ACTIONS = {
     "adapter_list",
     "adapter_show",
+    "bundle_inspect",
     "binary_status",
     "binary_verify",
     "binary_list",
@@ -23,6 +24,7 @@ CONTROLLER_ONLY_ACTIONS = {
     "switch",
     "plan",
     "registry_check",
+    "bundle_export_worker",
 }
 
 WORKER_ONLY_ACTIONS: set[str] = set()
@@ -31,6 +33,7 @@ ROLE_ALLOWED_ACTIONS = {
     "controller": SAFE_INSPECT_ACTIONS
     | CONTROLLER_ONLY_ACTIONS
     | {
+        "bundle_import",
         "binary_import",
         "binary_plan",
         "cleanup",
@@ -50,6 +53,7 @@ ROLE_ALLOWED_ACTIONS = {
     "worker": SAFE_INSPECT_ACTIONS
     | WORKER_ONLY_ACTIONS
     | {
+        "bundle_import",
         "binary_import",
         "binary_plan",
         "cleanup",

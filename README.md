@@ -138,6 +138,22 @@ python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhau
 python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --limit 50
 ```
 
+## Two-Sided Controller/Worker Bundles
+
+- One unified CLI is used on both sides.
+- The controller/Iran side exports a worker preparation bundle.
+- The worker/Foreign side inspects and imports that bundle to prepare local files.
+- No real services are started.
+- No firewall, routes, or systemd changes are performed on the host.
+
+```bash
+python -m pilottunnel.cli init --role controller
+python -m pilottunnel.cli bundle export-worker --profile turkey-6221 --adapter backhaul --transport tcpmux --output .var/pilottunnel/bundles/turkey-6221-worker.json
+python -m pilottunnel.cli init --role worker
+python -m pilottunnel.cli bundle inspect --input .var/pilottunnel/bundles/turkey-6221-worker.json
+python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/turkey-6221-worker.json --staging-root .var/pilottunnel/staging --confirm IMPORT
+```
+
 ## Single Script, Two Roles
 
 - The same `pilottunnel` CLI is used on Iran and Foreign servers.
