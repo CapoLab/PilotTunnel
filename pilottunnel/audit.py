@@ -14,7 +14,10 @@ SECRET_KEYS = {"secret", "password", "token", "private_key", "apikey", "api_key"
 
 def redact_secrets(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: ("***REDACTED***" if key.lower() in SECRET_KEYS else redact_secrets(inner)) for key, inner in value.items()}
+        return {
+            key: ("***REDACTED***" if key.lower() in SECRET_KEYS else redact_secrets(inner))
+            for key, inner in value.items()
+        }
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
     return value
@@ -23,9 +26,9 @@ def redact_secrets(value: Any) -> Any:
 def write_audit_log(action: str, profile: str, details: dict[str, Any], path: Path = DEFAULT_AUDIT_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "action": action,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "action": action,
         "details": redact_secrets(details),
     }
     with path.open("a", encoding="utf-8") as handle:

@@ -18,6 +18,7 @@ class RuntimeRecord:
     active_transport: str = ""
     active_layer: str = "layer4"
     service_name: str = ""
+    role: str = "controller"
     healthy: bool = False
     last_error: str = ""
     last_switch_at: str = ""

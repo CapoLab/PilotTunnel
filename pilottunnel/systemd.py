@@ -15,18 +15,17 @@ class UnitRenderResult:
 
 def render_unit_file(
     *,
-    profile: str,
-    adapter: str,
+    unit_name: str,
+    description: str,
     command: str,
     output_dir: Path,
     apply_changes: bool,
 ) -> UnitRenderResult:
-    unit_name = f"pilottunnel-{profile}-{adapter}.service"
     path = output_dir / unit_name
     content = "\n".join(
         [
             "[Unit]",
-            f"Description=PilotTunnel {profile} via {adapter}",
+            f"Description={description}",
             "",
             "[Service]",
             "Type=simple",

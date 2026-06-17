@@ -10,9 +10,9 @@ from typing import Callable
 from .adapters import ADAPTERS
 from .adapters.base import AdapterContext, BaseAdapter
 from .audit import write_audit_log
-from .config import AppConfig, Profile, SUPPORTED_LAYERS
+from .config import AppConfig, Profile, SUPPORTED_LAYERS, build_worker_stub
 from .locks import profile_lock
-from .registry import PortRegistry
+from .registry import PortRegistry, RegistryEntry
 from .state import AppState, RuntimeRecord
 
 
@@ -28,6 +28,8 @@ class SwitchResult:
     ok: bool
     message: str
     actions: list[str] = field(default_factory=list)
+    dry_run: bool = True
+    rollback_performed: bool = False
 
 
 class SwitchEngine:
@@ -65,8 +67,11 @@ class SwitchEngine:
         if not record.last_switch_at:
             return
         last_switch = datetime.fromisoformat(record.last_switch_at)
-        if self.now_provider() < last_switch + timedelta(seconds=profile.cooldown_seconds):
+        if self.now_provider() < last_switch + timedelta(seconds=profile.safety.cooldown_seconds):
             raise ValueError(f"Profile '{profile.name}' is in cooldown")
+
+    def _is_dry_run(self, profile: Profile, apply_changes: bool) -> bool:
+        return not apply_changes if not apply_changes else False if profile.safety.dry_run_default else False
 
     def install(self, profile_name: str, adapter_name: str, transport: str, apply_changes: bool) -> SwitchResult:
         profile = self._find_profile(profile_name)
@@ -75,16 +80,34 @@ class SwitchEngine:
         context = self._build_context(profile, transport, apply_changes)
         ok, reason = adapter.precheck(context)
         if not ok:
-            return SwitchResult(False, reason)
+            return SwitchResult(False, reason, dry_run=not apply_changes)
+        actions = [
+            "precheck",
+            "install",
+            "render_config",
+            "render_systemd_unit",
+        ]
         install_result = adapter.install(context)
         render_result = adapter.render_config(context)
+        unit_result = adapter.render_systemd_unit(context)
         write_audit_log(
             "install",
             profile_name,
-            {"adapter": adapter_name, "transport": transport, "install": install_result, "render": render_result},
+            {
+                "from_adapter": profile.active_adapter,
+                "from_transport": profile.active_transport,
+                "to_adapter": adapter_name,
+                "to_transport": transport,
+                "dry_run": not apply_changes,
+                "result": "prepared",
+                "rollback_status": "not-needed",
+                "install": install_result,
+                "render": render_result,
+                "unit": unit_result,
+            },
             self.paths.audit_path,
         )
-        return SwitchResult(True, "Adapter prepared", actions=["install", "render_config"])
+        return SwitchResult(True, "Adapter prepared", actions=actions, dry_run=not apply_changes)
 
     def switch(self, profile_name: str, adapter_name: str, transport: str, apply_changes: bool) -> SwitchResult:
         profile = self._find_profile(profile_name)
@@ -98,55 +121,77 @@ class SwitchEngine:
             backup_registry = PortRegistry(owners=dict(self.registry.owners))
             record.rollback_snapshot = asdict(record)
             context = self._build_context(profile, transport, apply_changes)
+            from_adapter = record.active_adapter
+            from_transport = record.active_transport
 
             ok, reason = adapter.precheck(context)
             if not ok:
-                return SwitchResult(False, reason)
+                raise_or_result = SwitchResult(False, reason, actions=["precheck"], dry_run=not apply_changes)
+                self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, raise_or_result)
+                return raise_or_result
 
+            actions = ["lock", "precheck", "render_config", "render_systemd_unit"]
             adapter.render_config(context)
-            old_adapter_name = record.active_adapter
+            adapter.render_systemd_unit(context)
+            old_adapter_name = from_adapter
+            old_transport = from_transport or transport
+
             if old_adapter_name:
                 old_adapter = self.adapter_factory(old_adapter_name)
-                old_context = self._build_context(profile, record.active_transport or transport, apply_changes)
+                old_context = self._build_context(profile, old_transport, apply_changes)
                 old_adapter.stop(old_context)
                 old_adapter.cleanup_runtime(old_context)
-                self.registry.release(profile.main_port, profile.name)
+                self.registry.release(profile.name)
+                actions.extend(["stop_old", "cleanup_old"])
 
-            self.registry.claim(profile.main_port, profile.name, adapter_name, transport)
-            adapter.start(context)
-            healthy, message = adapter.healthcheck(context)
-            if not healthy:
+            entry = self._registry_entry(profile, adapter_name, transport, adapter.service_name(context))
+            self.registry.claim(entry)
+            conflicts = self.registry.check_conflicts()
+            if conflicts:
                 self.state = backup_state
                 self.registry = backup_registry
-                if old_adapter_name:
-                    old_adapter = self.adapter_factory(old_adapter_name)
-                    old_context = self._build_context(profile, record.active_transport or transport, apply_changes)
-                    old_adapter.start(old_context)
-                write_audit_log(
-                    "switch_failed",
-                    profile_name,
-                    {"adapter": adapter_name, "transport": transport, "reason": message},
-                    self.paths.audit_path,
+                result = SwitchResult(False, "; ".join(conflicts), actions=actions + ["registry_check"], dry_run=not apply_changes)
+                self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
+                return result
+
+            adapter.start(context)
+            actions.extend(["registry_check", "start_new"])
+            healthy, message = adapter.healthcheck(context)
+            actions.append("healthcheck")
+            if not healthy:
+                rollback_performed = False
+                if profile.safety.rollback_on_failure:
+                    self.state = backup_state
+                    self.registry = backup_registry
+                    rollback_performed = True
+                    if old_adapter_name:
+                        old_adapter = self.adapter_factory(old_adapter_name)
+                        old_context = self._build_context(profile, old_transport, apply_changes)
+                        old_adapter.start(old_context)
+                result = SwitchResult(
+                    False,
+                    f"Switch failed healthcheck: {message}",
+                    actions=actions + ["rollback"],
+                    dry_run=not apply_changes,
+                    rollback_performed=rollback_performed,
                 )
-                return SwitchResult(False, f"Switch failed healthcheck: {message}", actions=["rollback"])
+                self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
+                return result
 
             record.active_adapter = adapter_name
             record.active_transport = transport
             record.active_layer = metadata.layer
-            record.service_name = f"pilottunnel-{profile.name}-{adapter_name}.service"
+            record.service_name = adapter.service_name(context)
+            record.role = profile.role
             record.healthy = True
             record.last_error = ""
             record.last_switch_at = self.now_provider().isoformat()
             profile.active_adapter = adapter_name
             profile.active_transport = transport
             profile.active_layer = metadata.layer
-            write_audit_log(
-                "switch",
-                profile_name,
-                {"adapter": adapter_name, "transport": transport, "message": message},
-                self.paths.audit_path,
-            )
-            return SwitchResult(True, message, actions=["switch"])
+            result = SwitchResult(True, message, actions=actions + ["commit"], dry_run=not apply_changes)
+            self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
+            return result
 
     def rollback(self, profile_name: str, apply_changes: bool) -> SwitchResult:
         profile = self._find_profile(profile_name)
@@ -154,15 +199,15 @@ class SwitchEngine:
             record = self._record_for(profile_name)
             snapshot = record.rollback_snapshot
             if not snapshot:
-                return SwitchResult(False, "No rollback snapshot available")
+                return SwitchResult(False, "No rollback snapshot available", dry_run=not apply_changes)
             previous_adapter = snapshot.get("active_adapter", "")
             previous_transport = snapshot.get("active_transport", "")
             if not previous_adapter:
-                self.registry.release(profile.main_port, profile.name)
+                self.registry.release(profile.name)
                 record.active_adapter = ""
                 record.active_transport = ""
                 record.healthy = False
-                return SwitchResult(True, "Rolled back to empty state", actions=["rollback"])
+                return SwitchResult(True, "Rolled back to empty state", actions=["rollback"], dry_run=not apply_changes)
             return self.switch(profile_name, previous_adapter, previous_transport, apply_changes)
 
     def status(self, profile_name: str) -> dict:
@@ -189,15 +234,51 @@ class SwitchEngine:
             adapter = self.adapter_factory(record.active_adapter)
             context = self._build_context(profile, record.active_transport or "tcp", apply_changes and not dry_run)
             adapter.cleanup_runtime(context)
-        return SwitchResult(True, "Cleanup prepared", actions=actions)
+        return SwitchResult(True, "Cleanup prepared", actions=actions, dry_run=not apply_changes or dry_run)
 
     def _build_context(self, profile: Profile, transport: str, apply_changes: bool) -> AdapterContext:
         return AdapterContext(
-            profile_name=profile.name,
-            main_port=profile.main_port,
-            target_host=profile.target_host,
-            target_port=profile.target_port,
+            profile=profile,
             transport=transport,
             work_dir=self.paths.work_dir / profile.name,
             apply_changes=apply_changes,
+            role=profile.role,
+            remote_stub=asdict(build_worker_stub(profile)),
+        )
+
+    def _registry_entry(self, profile: Profile, adapter_name: str, transport: str, service_name: str) -> RegistryEntry:
+        return RegistryEntry(
+            profile=profile.name,
+            main_port=profile.ports.main_port,
+            adapter=adapter_name,
+            transport=transport,
+            role=profile.role,
+            owned_ports=profile.ports.owned_ports(),
+            owned_services=[service_name],
+            owned_firewall_rule_tags=[f"pilottunnel:{profile.name}:{adapter_name}:{transport}"],
+            owned_routes=[],
+        )
+
+    def _write_switch_audit(
+        self,
+        profile_name: str,
+        from_adapter: str,
+        from_transport: str,
+        adapter_name: str,
+        transport: str,
+        result: SwitchResult,
+    ) -> None:
+        write_audit_log(
+            "switch",
+            profile_name,
+            {
+                "from_adapter": from_adapter,
+                "from_transport": from_transport,
+                "to_adapter": adapter_name,
+                "to_transport": transport,
+                "dry_run": result.dry_run,
+                "result": "ok" if result.ok else "failed",
+                "rollback_status": "performed" if result.rollback_performed else "not-needed",
+            },
+            self.paths.audit_path,
         )

@@ -8,7 +8,17 @@ import tempfile
 from pathlib import Path
 
 from .adapters import ADAPTERS
-from .config import AppConfig, Candidate, Profile, SUPPORTED_LAYERS, load_config, save_config
+from .config import (
+    AppConfig,
+    Candidate,
+    Profile,
+    ProfilePorts,
+    ProfileSafety,
+    SUPPORTED_LAYERS,
+    canonical_role,
+    load_config,
+    save_config,
+)
 from .registry import PortRegistry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
@@ -34,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     profile_create.add_argument("--main-port", type=int, required=True)
     profile_create.add_argument("--target-host", default="127.0.0.1")
     profile_create.add_argument("--target-port", type=int, required=True)
+    profile_create.add_argument("--role", default="controller")
+    profile_create.add_argument("--control-port", type=int)
+    profile_create.add_argument("--service-port", type=int)
+    profile_create.add_argument("--check-port", type=int)
     profile_create.add_argument("--layer", default="layer4")
     profile_create.add_argument("--candidate", action="append", default=[], help="adapter:transport")
     profile_subparsers.add_parser("list")
@@ -135,8 +149,16 @@ def main(argv: list[str] | None = None) -> int:
             main_port=args.main_port,
             target_host=args.target_host,
             target_port=args.target_port,
+            role=canonical_role(args.role),
             active_layer=args.layer,
             candidates=_profile_candidates(args.candidate),
+            ports=ProfilePorts(
+                main_port=args.main_port,
+                control_port=args.control_port,
+                service_port=args.service_port,
+                check_port=args.check_port,
+            ),
+            safety=ProfileSafety(),
         )
         config.profiles = [item for item in config.profiles if item.name != profile.name]
         config.profiles.append(profile)
@@ -162,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
                     "layer": meta.layer,
                     "supported": meta.supported,
                     "transports": list(meta.transports),
+                    "experimental_transports": list(meta.experimental_transports),
                     "experimental": meta.experimental,
                 }
             )

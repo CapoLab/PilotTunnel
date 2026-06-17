@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+from ..config import Profile
 
 
 @dataclass(frozen=True)
@@ -12,20 +14,27 @@ class AdapterMetadata:
     name: str
     layer: str
     transports: tuple[str, ...]
+    experimental_transports: tuple[str, ...] = ()
     experimental: bool = False
     supported: bool = True
     notes: str = ""
 
+    def all_transports(self) -> tuple[str, ...]:
+        return self.transports + self.experimental_transports
+
 
 @dataclass
 class AdapterContext:
-    profile_name: str
-    main_port: int
-    target_host: str
-    target_port: int
+    profile: Profile
     transport: str
     work_dir: Path
     apply_changes: bool = False
+    role: str = ""
+    remote_stub: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.role:
+            self.role = self.profile.role
 
 
 class BaseAdapter(Protocol):
@@ -39,6 +48,9 @@ class BaseAdapter(Protocol):
         ...
 
     def render_config(self, context: AdapterContext) -> dict:
+        ...
+
+    def render_systemd_unit(self, context: AdapterContext) -> dict:
         ...
 
     def start(self, context: AdapterContext) -> dict:

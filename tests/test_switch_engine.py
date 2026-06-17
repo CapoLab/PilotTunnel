@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -5,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pilottunnel.adapters.base import AdapterContext, AdapterMetadata
-from pilottunnel.config import AppConfig, Profile
+from pilottunnel.config import AppConfig, Profile, ProfilePorts
 from pilottunnel.registry import PortRegistry, RegistryEntry
 from pilottunnel.state import AppState, RuntimeRecord
 from pilottunnel.switch_engine import SwitchEngine, SwitchPaths
@@ -15,14 +16,17 @@ from pilottunnel.switch_engine import SwitchEngine, SwitchPaths
 class StubAdapter:
     name: str
     events: list[str]
+    transports: tuple[str, ...]
     healthy: bool = True
     layer: str = "layer4"
 
     def metadata(self) -> AdapterMetadata:
-        return AdapterMetadata(name=self.name, layer=self.layer, transports=("tcp",))
+        return AdapterMetadata(name=self.name, layer=self.layer, transports=self.transports)
 
     def precheck(self, context: AdapterContext) -> tuple[bool, str]:
-        self.events.append(f"{self.name}:precheck")
+        self.events.append(f"{self.name}:precheck:{context.transport}")
+        if context.transport not in self.transports:
+            return False, "unsupported"
         return True, "ok"
 
     def install(self, context: AdapterContext) -> dict:
@@ -32,6 +36,13 @@ class StubAdapter:
     def render_config(self, context: AdapterContext) -> dict:
         self.events.append(f"{self.name}:render")
         return {}
+
+    def render_systemd_unit(self, context: AdapterContext) -> dict:
+        self.events.append(f"{self.name}:unit")
+        return {"unit": {"unit_name": f"svc-{self.name}-{context.transport}-{context.role}"}}
+
+    def service_name(self, context: AdapterContext) -> str:
+        return f"svc-{self.name}-{context.transport}-{context.role}"
 
     def start(self, context: AdapterContext) -> dict:
         self.events.append(f"{self.name}:start")
@@ -57,7 +68,8 @@ class StubAdapter:
 
 
 class SwitchEngineTests(unittest.TestCase):
-    def _engine(self, adapters: dict[str, StubAdapter], state: AppState | None = None) -> SwitchEngine:
+    def _engine(self, adapters: dict[str, StubAdapter], state: AppState | None = None) -> tuple[SwitchEngine, Path]:
+        temp_dir = Path(tempfile.mkdtemp())
         config = AppConfig(
             profiles=[
                 Profile(
@@ -65,15 +77,17 @@ class SwitchEngineTests(unittest.TestCase):
                     main_port=6221,
                     target_host="127.0.0.1",
                     target_port=6221,
+                    role="controller",
                     active_adapter="backhaul",
                     active_transport="tcp",
+                    ports=ProfilePorts(main_port=6221, control_port=7001, service_port=7002, check_port=7003),
                 )
             ]
         )
         paths = SwitchPaths(
-            lock_dir=Path(tempfile.gettempdir()) / "pilottunnel-locks",
-            work_dir=Path(tempfile.gettempdir()) / "pilottunnel-work",
-            audit_path=Path(tempfile.gettempdir()) / "pilottunnel-audit.log",
+            lock_dir=temp_dir / "locks",
+            work_dir=temp_dir / "work",
+            audit_path=temp_dir / "audit.log",
         )
         if state is None:
             state = AppState(
@@ -82,43 +96,91 @@ class SwitchEngineTests(unittest.TestCase):
                         profile="turkey-6221",
                         active_adapter="backhaul",
                         active_transport="tcp",
+                        role="controller",
                         healthy=True,
                         last_switch_at=(datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat(),
                     )
                 }
             )
-        return SwitchEngine(
+        engine = SwitchEngine(
             config=config,
             state=state,
             registry=PortRegistry(
-                owners={"6221": RegistryEntry(profile="turkey-6221", adapter="backhaul", transport="tcp")}
+                owners={
+                    "turkey-6221": RegistryEntry(
+                        profile="turkey-6221",
+                        main_port=6221,
+                        adapter="backhaul",
+                        transport="tcp",
+                        role="controller",
+                        owned_ports=[6221, 7001, 7002, 7003],
+                        owned_services=["svc-backhaul-tcp-controller"],
+                    )
+                }
             ),
             paths=paths,
             adapter_factory=lambda name: adapters[name],
             now_provider=lambda: datetime.now(timezone.utc),
         )
+        return engine, temp_dir
 
-    def test_only_one_active_owner_per_main_port(self) -> None:
+    def test_manual_switch_to_backhaul_tcpmux_dry_run(self) -> None:
         events: list[str] = []
-        adapters = {"backhaul": StubAdapter("backhaul", events), "frp": StubAdapter("frp", events)}
-        engine = self._engine(adapters)
-        result = engine.switch("turkey-6221", "frp", "tcp", apply_changes=False)
+        adapters = {
+            "backhaul": StubAdapter("backhaul", events, transports=("tcp", "tcpmux")),
+            "rathole": StubAdapter("rathole", events, transports=("tcp",)),
+        }
+        engine, _ = self._engine(adapters)
+        result = engine.switch("turkey-6221", "backhaul", "tcpmux", apply_changes=False)
         self.assertTrue(result.ok)
-        self.assertEqual(engine.registry.owners["6221"].adapter, "frp")
+        self.assertTrue(result.dry_run)
+        self.assertEqual(engine.registry.owners["turkey-6221"].transport, "tcpmux")
+
+    def test_manual_switch_to_rathole_tcp_dry_run(self) -> None:
+        events: list[str] = []
+        adapters = {
+            "backhaul": StubAdapter("backhaul", events, transports=("tcp", "tcpmux")),
+            "rathole": StubAdapter("rathole", events, transports=("tcp",)),
+        }
+        engine, _ = self._engine(adapters)
+        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(engine.registry.owners["turkey-6221"].adapter, "rathole")
 
     def test_old_tunnel_stop_happens_before_new_commit(self) -> None:
         events: list[str] = []
-        adapters = {"backhaul": StubAdapter("backhaul", events), "frp": StubAdapter("frp", events)}
-        engine = self._engine(adapters)
-        result = engine.switch("turkey-6221", "frp", "tcp", apply_changes=False)
+        adapters = {
+            "backhaul": StubAdapter("backhaul", events, transports=("tcp", "tcpmux")),
+            "rathole": StubAdapter("rathole", events, transports=("tcp",)),
+        }
+        engine, _ = self._engine(adapters)
+        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
         self.assertTrue(result.ok)
-        self.assertLess(events.index("backhaul:stop"), events.index("frp:start"))
+        self.assertLess(events.index("backhaul:stop"), events.index("rathole:start"))
 
-    def test_rollback_restores_previous_state_on_failed_healthcheck(self) -> None:
+    def test_rollback_restores_previous_active_tunnel_on_failed_healthcheck(self) -> None:
         events: list[str] = []
-        adapters = {"backhaul": StubAdapter("backhaul", events), "frp": StubAdapter("frp", events, healthy=False)}
-        engine = self._engine(adapters)
-        result = engine.switch("turkey-6221", "frp", "tcp", apply_changes=False)
+        adapters = {
+            "backhaul": StubAdapter("backhaul", events, transports=("tcp", "tcpmux")),
+            "rathole": StubAdapter("rathole", events, transports=("tcp",), healthy=False),
+        }
+        engine, _ = self._engine(adapters)
+        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
         self.assertFalse(result.ok)
-        self.assertEqual(engine.registry.owners["6221"].adapter, "backhaul")
+        self.assertTrue(result.rollback_performed)
+        self.assertEqual(engine.registry.owners["turkey-6221"].adapter, "backhaul")
         self.assertIn("backhaul:start", events)
+
+    def test_audit_records_dry_run_switch_metadata(self) -> None:
+        events: list[str] = []
+        adapters = {
+            "backhaul": StubAdapter("backhaul", events, transports=("tcp", "tcpmux")),
+            "rathole": StubAdapter("rathole", events, transports=("tcp",)),
+        }
+        engine, temp_dir = self._engine(adapters)
+        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
+        self.assertTrue(result.ok)
+        lines = (temp_dir / "audit.log").read_text(encoding="utf-8").splitlines()
+        payload = json.loads(lines[-1])
+        self.assertTrue(payload["details"]["dry_run"])
+        self.assertEqual(payload["details"]["to_adapter"], "rathole")
