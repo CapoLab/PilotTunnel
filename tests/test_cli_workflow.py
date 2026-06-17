@@ -266,3 +266,56 @@ class CliWorkflowTests(unittest.TestCase):
         lines = self.audit.read_text(encoding="utf-8").splitlines()
         payload = json.loads(lines[-1])
         self.assertTrue(payload["details"]["staged_only"])
+
+    def test_preflight_returns_structured_host_info(self) -> None:
+        code, output = self.run_cli("preflight")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("host", payload)
+        self.assertIn("commands", payload)
+        self.assertIn("safe_to_stage", payload)
+
+    def test_preflight_with_profile_does_not_crash(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("preflight", "--profile", "turkey-6221")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("port_availability", payload)
+
+    def test_preflight_marks_safe_to_real_apply_false(self) -> None:
+        code, output = self.run_cli("preflight")
+        self.assertEqual(code, 0)
+        self.assertFalse(json.loads(output)["safe_to_real_apply"])
+
+    def test_binary_list_includes_backhaul_and_rathole(self) -> None:
+        code, output = self.run_cli("binary", "list")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        adapters = {item["adapter"] for item in payload}
+        self.assertIn("backhaul", adapters)
+        self.assertIn("rathole", adapters)
+
+    def test_binary_plan_for_backhaul_shows_no_download(self) -> None:
+        code, output = self.run_cli("binary", "plan", "--adapter", "backhaul")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["download_performed"])
+
+    def test_binary_plan_for_rathole_shows_no_download(self) -> None:
+        code, output = self.run_cli("binary", "plan", "--adapter", "rathole")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["download_performed"])
+
+    def test_unknown_binary_adapter_is_rejected(self) -> None:
+        code, output = self.run_cli("binary", "plan", "--adapter", "missing")
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown binary adapter", output)
+
+    def test_staged_switch_output_includes_preflight_info(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("preflight", payload)
+        self.assertIn("warnings", payload["preflight"])

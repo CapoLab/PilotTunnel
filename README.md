@@ -65,6 +65,21 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile turkey-6221 --adapter backhaul --transport tcpmux
 ```
 
+## Host Preflight And Binary Planning
+
+- `preflight` is read-only.
+- `binary plan` does not download anything yet.
+- `real apply` is still not implemented.
+- `staged apply` remains the safest review mode.
+
+```bash
+python -m pilottunnel.cli preflight
+python -m pilottunnel.cli preflight --profile turkey-6221
+python -m pilottunnel.cli binary list
+python -m pilottunnel.cli binary plan --adapter backhaul
+python -m pilottunnel.cli binary plan --adapter rathole
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.

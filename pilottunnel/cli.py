@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .adapters import ADAPTERS
+from .binaries import get_binary_plan, list_binary_plans
 from .config import (
     AppConfig,
     Candidate,
@@ -22,6 +23,7 @@ from .config import (
     save_config,
     validate_profile_name,
 )
+from .preflight import run_preflight
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
@@ -109,6 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
     staged_show.add_argument("--profile", required=True)
     staged_show.add_argument("--adapter", required=True)
     staged_show.add_argument("--transport", required=True)
+
+    preflight = subparsers.add_parser("preflight")
+    preflight.add_argument("--profile")
+    preflight.add_argument("--json", action="store_true")
+
+    binary = subparsers.add_parser("binary")
+    binary_subparsers = binary.add_subparsers(dest="binary_command", required=True)
+    binary_subparsers.add_parser("list")
+    binary_plan = binary_subparsers.add_parser("plan")
+    binary_plan.add_argument("--adapter", required=True)
     return parser
 
 
@@ -457,6 +469,28 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(payload, indent=2))
         return 0 if payload["supported_in_v0_1"] else 1
+
+    if args.command == "preflight":
+        try:
+            profile = get_profile(config, args.profile) if args.profile else None
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        payload = run_preflight(switch_paths.staging_root, profile).to_dict()
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "binary" and args.binary_command == "list":
+        print(json.dumps(list_binary_plans(switch_paths.work_dir), indent=2))
+        return 0
+
+    if args.command == "binary" and args.binary_command == "plan":
+        try:
+            print(json.dumps(get_binary_plan(args.adapter, switch_paths.work_dir), indent=2))
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        return 0
 
     if args.command == "staged" and args.staged_command == "list":
         print(json.dumps(_staged_list(switch_paths), indent=2))

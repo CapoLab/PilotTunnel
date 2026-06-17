@@ -10,8 +10,10 @@ from typing import Callable
 from .adapters import ADAPTERS
 from .adapters.base import AdapterContext, BaseAdapter
 from .audit import write_audit_log
+from .binaries import get_binary_plan
 from .config import AppConfig, Profile, SUPPORTED_LAYERS, build_worker_stub
 from .locks import profile_lock
+from .preflight import run_preflight
 from .registry import PortRegistry, RegistryEntry
 from .state import AppState, RuntimeRecord
 
@@ -40,6 +42,7 @@ class SwitchResult:
     real_systemd_touched: bool = False
     real_firewall_touched: bool = False
     generated_files: list[str] = field(default_factory=list)
+    preflight: dict = field(default_factory=dict)
 
 
 class SwitchEngine:
@@ -88,6 +91,7 @@ class SwitchEngine:
         adapter = self.adapter_factory(adapter_name)
         self._ensure_layer_supported("layer4")
         context = self._build_context(profile, transport, apply_changes)
+        preflight = run_preflight(self.paths.staging_root, profile).to_dict()
         ok, reason = adapter.precheck(context)
         if not ok:
             return SwitchResult(
@@ -97,6 +101,7 @@ class SwitchEngine:
                 current={"adapter": profile.active_adapter, "transport": profile.active_transport},
                 target={"adapter": adapter_name, "transport": transport},
                 staged_only=apply_changes,
+                preflight=preflight,
             )
         actions = [
             "precheck",
@@ -138,6 +143,7 @@ class SwitchEngine:
             generated_service=adapter.service_name(context),
             staged_only=apply_changes,
             generated_files=generated_files,
+            preflight=preflight,
         )
 
     def switch(self, profile_name: str, adapter_name: str, transport: str, apply_changes: bool) -> SwitchResult:
@@ -152,6 +158,7 @@ class SwitchEngine:
             backup_registry = PortRegistry(owners=dict(self.registry.owners))
             record.rollback_snapshot = asdict(record)
             context = self._build_context(profile, transport, apply_changes)
+            preflight = run_preflight(self.paths.staging_root, profile).to_dict()
             from_adapter = record.active_adapter
             from_transport = record.active_transport
 
@@ -166,6 +173,7 @@ class SwitchEngine:
                     target={"adapter": adapter_name, "transport": transport},
                     generated_service=adapter.service_name(context),
                     staged_only=apply_changes,
+                    preflight=preflight,
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, raise_or_result)
                 return raise_or_result
@@ -174,6 +182,21 @@ class SwitchEngine:
             rendered_config = adapter.render_config(context)
             rendered_unit = adapter.render_systemd_unit(context)
             generated_files = [rendered_config.get("config_path", ""), rendered_unit["unit"].get("path", "")]
+            if apply_changes and not preflight["safe_to_stage"]:
+                result = SwitchResult(
+                    False,
+                    "Staging path is not writable or safe",
+                    actions=actions,
+                    dry_run=False,
+                    current={"adapter": from_adapter, "transport": from_transport},
+                    target={"adapter": adapter_name, "transport": transport},
+                    generated_service=adapter.service_name(context),
+                    staged_only=True,
+                    generated_files=generated_files,
+                    preflight=preflight,
+                )
+                self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
+                return result
             old_adapter_name = from_adapter
             old_transport = from_transport or transport
 
@@ -201,6 +224,7 @@ class SwitchEngine:
                     generated_service=adapter.service_name(context),
                     staged_only=apply_changes,
                     generated_files=generated_files,
+                    preflight=preflight,
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
                 return result
@@ -231,6 +255,7 @@ class SwitchEngine:
                     healthcheck={"result": False, "message": message},
                     staged_only=apply_changes,
                     generated_files=generated_files,
+                    preflight=preflight,
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
                 return result
@@ -258,6 +283,7 @@ class SwitchEngine:
                 committed=True,
                 staged_only=apply_changes,
                 generated_files=generated_files,
+                preflight=preflight,
             )
             self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
             return result
@@ -382,10 +408,12 @@ class SwitchEngine:
         profile = self._find_profile(profile_name)
         adapter = self.adapter_factory(adapter_name)
         context = self._build_context(profile, transport, apply_changes)
+        preflight = run_preflight(self.paths.staging_root, profile).to_dict()
         ok, reason = adapter.precheck(context)
         warnings: list[str] = []
         if not ok:
             warnings.append(reason)
+        warnings.extend(preflight["warnings"])
         rendered = adapter.render_config(context)
         unit = adapter.render_systemd_unit(context)
         return {
@@ -398,6 +426,7 @@ class SwitchEngine:
             "ports_used": profile.ports.owned_ports(),
             "generated_config_path": rendered.get("config_path", ""),
             "generated_service_path": unit["unit"]["path"],
+            "binary_plan": get_binary_plan(adapter_name, self.paths.work_dir),
             "future_apply_commands": [
                 f"systemctl daemon-reload",
                 f"systemctl enable {unit['unit']['unit_name']}",
@@ -406,4 +435,5 @@ class SwitchEngine:
             "staged_only": apply_changes,
             "real_systemd_touched": False,
             "real_firewall_touched": False,
+            "preflight": preflight,
         }
