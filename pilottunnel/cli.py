@@ -266,6 +266,12 @@ def _prompt_for_role() -> str:
     raise ValueError("Invalid role selection")
 
 
+def _interactive_console_available() -> bool:
+    stdin_tty = getattr(sys.stdin, "isatty", lambda: False)()
+    stdout_tty = getattr(sys.stdout, "isatty", lambda: False)()
+    return bool(stdin_tty and stdout_tty)
+
+
 def _save_runtime(
     config: AppConfig,
     state: AppState,
@@ -417,8 +423,9 @@ def main(argv: list[str] | None = None) -> int:
         if not role_value:
             if config.node.initialized and args.force:
                 role_value = config.node.normalized_role
-            elif not sys.stdin.isatty():
-                role_value = "controller"
+            elif not _interactive_console_available():
+                print(json.dumps({"ok": False, "message": "Role is required in non-interactive mode. Use --role controller or --role worker."}, indent=2))
+                return 1
             else:
                 try:
                     role_value = _prompt_for_role()

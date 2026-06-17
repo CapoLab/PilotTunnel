@@ -51,7 +51,7 @@ class CliWorkflowTests(unittest.TestCase):
         return code, output.getvalue()
 
     def test_profile_create_writes_valid_config(self) -> None:
-        self.run_cli("init")
+        self.run_cli("init", "--role", "controller")
         code, output = self.run_cli(
             "profile",
             "create",
@@ -100,6 +100,17 @@ class CliWorkflowTests(unittest.TestCase):
         code, output = self.run_cli("init", "--role", "kharej")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output)["normalized_role"], "worker")
+
+    def test_init_without_role_in_non_interactive_mode_fails_safely(self) -> None:
+        code, output = self.run_cli("init")
+        self.assertEqual(code, 1)
+        self.assertIn("Role is required in non-interactive mode", output)
+
+    @patch("pilottunnel.cli.input", side_effect=AssertionError("input should not be called"))
+    def test_init_without_role_does_not_call_input_in_non_interactive_mode(self, _mock_input) -> None:
+        code, output = self.run_cli("init")
+        self.assertEqual(code, 1)
+        self.assertIn("Role is required in non-interactive mode", output)
 
     def test_init_refuses_to_overwrite_role_without_force(self) -> None:
         self.run_cli("init", "--role", "controller")
@@ -187,7 +198,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("Unsupported role", output)
 
     def test_duplicate_profile_create_is_blocked(self) -> None:
-        self.run_cli("init")
+        self.run_cli("init", "--role", "controller")
         self.run_cli("profile", "create", "--name", "turkey-6221", "--main-port", "6221", "--target-port", "6221")
         code, output = self.run_cli("profile", "create", "--name", "turkey-6221", "--main-port", "6221", "--target-port", "6221")
         self.assertEqual(code, 1)
@@ -208,7 +219,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("Unknown adapter", output)
 
     def _create_profile(self) -> None:
-        self.run_cli("init")
+        self.run_cli("init", "--role", "controller")
         self.run_cli(
             "profile",
             "create",
@@ -470,7 +481,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(any("role = controller" in content for content in payload["configs"].values()))
 
     def test_path_traversal_staging_root_or_profile_name_is_blocked(self) -> None:
-        self.run_cli("init")
+        self.run_cli("init", "--role", "controller")
         code, output = self.run_cli("profile", "create", "--name", "../bad", "--main-port", "6221", "--target-port", "6221")
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", output)
