@@ -750,6 +750,322 @@ def stop_service(
     return payload
 
 
+def enable_service(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+    confirm: str | None,
+    real_systemd: bool,
+    timeout_seconds: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+) -> dict:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    attempt = {
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "real_systemd": real_systemd,
+        "confirm": confirm or "",
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    if not real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Refusing real service enable without --real-systemd. Use service plan --action enable for plan-only guidance.",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if confirm != "ENABLE_SERVICE":
+        payload = {
+            "ok": False,
+            "message": "Refusing real service enable without --confirm ENABLE_SERVICE",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_linux():
+        payload = {
+            "ok": False,
+            "message": "Real service enable is Linux-only",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _systemd_available():
+        payload = {
+            "ok": False,
+            "message": "systemd is unavailable on this host",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_root():
+        payload = {
+            "ok": False,
+            "message": "systemctl enable requires root/admin privileges",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    ownership = _verify_pilottunnel_unit_ownership(request=request)
+    if not ownership["ok"]:
+        payload = {
+            "ok": False,
+            "message": ownership["message"],
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    enable_command = ["systemctl", "enable", request.service_name]
+    enable_result = _run_command(enable_command, timeout_seconds=timeout_seconds)
+    status_payload = _service_status_payload(request=request, timeout_seconds=timeout_seconds)
+    if enable_result["returncode"] != 0 or enable_result["timed_out"]:
+        payload = {
+            "ok": False,
+            "message": "systemctl enable failed; review service status and logs",
+            "command_executed": " ".join(enable_command),
+            "exit_code": enable_result["returncode"],
+            "stdout": enable_result["stdout"],
+            "stderr": enable_result["stderr"],
+            "timed_out": enable_result["timed_out"],
+            "status": status_payload,
+            "real_systemd_touched": True,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "service_restarted": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+            "systemctl_executed": True,
+            "real_systemd": True,
+            "read_only": False,
+            "service_name": request.service_name,
+            "unit_path": request.unit_path,
+            "profile": request.profile,
+            "role": request.role,
+            "adapter": request.adapter,
+            "transport": request.transport,
+        }
+        _audit("service-enable", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    payload = {
+        "ok": True,
+        "message": "Service enable completed",
+        "command_executed": " ".join(enable_command),
+        "exit_code": enable_result["returncode"],
+        "stdout": enable_result["stdout"],
+        "stderr": enable_result["stderr"],
+        "timed_out": enable_result["timed_out"],
+        "status": status_payload,
+        "real_systemd_touched": True,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": True,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": True,
+        "real_systemd": True,
+        "read_only": False,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+    }
+    _audit("service-enable", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
+def disable_service(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+    confirm: str | None,
+    real_systemd: bool,
+    timeout_seconds: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+) -> dict:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    attempt = {
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "real_systemd": real_systemd,
+        "confirm": confirm or "",
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    if not real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Refusing real service disable without --real-systemd. Use service plan --action disable for plan-only guidance.",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if confirm != "DISABLE_SERVICE":
+        payload = {
+            "ok": False,
+            "message": "Refusing real service disable without --confirm DISABLE_SERVICE",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_linux():
+        payload = {
+            "ok": False,
+            "message": "Real service disable is Linux-only",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _systemd_available():
+        payload = {
+            "ok": False,
+            "message": "systemd is unavailable on this host",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_root():
+        payload = {
+            "ok": False,
+            "message": "systemctl disable requires root/admin privileges",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    ownership = _verify_pilottunnel_unit_ownership(request=request)
+    if not ownership["ok"]:
+        payload = {
+            "ok": False,
+            "message": ownership["message"],
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    disable_command = ["systemctl", "disable", request.service_name]
+    disable_result = _run_command(disable_command, timeout_seconds=timeout_seconds)
+    status_payload = _service_status_payload(request=request, timeout_seconds=timeout_seconds)
+    if disable_result["returncode"] != 0 or disable_result["timed_out"]:
+        payload = {
+            "ok": False,
+            "message": "systemctl disable failed; review service status and logs",
+            "command_executed": " ".join(disable_command),
+            "exit_code": disable_result["returncode"],
+            "stdout": disable_result["stdout"],
+            "stderr": disable_result["stderr"],
+            "timed_out": disable_result["timed_out"],
+            "status": status_payload,
+            "real_systemd_touched": True,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "service_restarted": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+            "systemctl_executed": True,
+            "real_systemd": True,
+            "read_only": False,
+            "service_name": request.service_name,
+            "unit_path": request.unit_path,
+            "profile": request.profile,
+            "role": request.role,
+            "adapter": request.adapter,
+            "transport": request.transport,
+        }
+        _audit("service-disable", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    payload = {
+        "ok": True,
+        "message": "Service disable completed",
+        "command_executed": " ".join(disable_command),
+        "exit_code": disable_result["returncode"],
+        "stdout": disable_result["stdout"],
+        "stderr": disable_result["stderr"],
+        "timed_out": disable_result["timed_out"],
+        "status": status_payload,
+        "real_systemd_touched": True,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": True,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": True,
+        "real_systemd": True,
+        "read_only": False,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+    }
+    _audit("service-disable", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
 def block_real_service_action(
     *,
     action: str,
@@ -768,11 +1084,9 @@ def block_real_service_action(
         paths=paths,
     )
     if real_systemd:
-        blocked_actions = {"restart", "enable", "disable"}
-        blocked_action_text = "/".join(sorted(blocked_actions, key=lambda item: ["restart", "enable", "disable"].index(item)))
         payload = {
             "ok": False,
-            "message": f"Real {blocked_action_text} is not implemented in this safety stage.",
+            "message": f"Real {action} is not implemented in this safety stage.",
             "action": action,
             "service_name": request.service_name,
             "unit_path": request.unit_path,
@@ -1081,8 +1395,10 @@ def _service_start_request(
 def _service_status_payload(*, request: ServiceStartRequest, timeout_seconds: float) -> dict[str, Any]:
     status_command = ["systemctl", "status", request.service_name, "--no-pager"]
     active_command = ["systemctl", "is-active", request.service_name]
+    enabled_command = ["systemctl", "is-enabled", request.service_name]
     status_result = _run_command(status_command, timeout_seconds=timeout_seconds)
     active_result = _run_command(active_command, timeout_seconds=timeout_seconds)
+    enabled_result = _run_command(enabled_command, timeout_seconds=timeout_seconds)
     return {
         "ok": status_result["returncode"] == 0 and not status_result["timed_out"],
         "service_name": request.service_name,
@@ -1098,6 +1414,7 @@ def _service_status_payload(*, request: ServiceStartRequest, timeout_seconds: fl
         "stderr": status_result["stderr"],
         "timed_out": status_result["timed_out"],
         "is_active": _sanitize_output(active_result["stdout"]) if active_result["stdout"] else "",
+        "is_enabled": _sanitize_output(enabled_result["stdout"]) if enabled_result["stdout"] else "",
         "read_only": True,
         "real_systemd": True,
         "real_systemd_touched": False,

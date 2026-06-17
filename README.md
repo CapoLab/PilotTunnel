@@ -129,7 +129,7 @@ python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backha
 - `service plan` shows the service action that would be taken, but it does not run `systemctl`.
 - `service status` and `service logs` are read-only inspection commands.
 - Windows hosts remain safe: these commands return warnings instead of crashing.
-- No real service start, stop, enable, disable, or journal changes are performed yet.
+- Real service lifecycle changes remain gated behind explicit `--real-systemd` confirmations.
 
 ```bash
 python -m pilottunnel.cli service plan --profile turkey-6221 --adapter backhaul --transport tcpmux --action start
@@ -144,9 +144,12 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 - `service daemon-reload` requires exact confirmation with `--confirm DAEMON_RELOAD`.
 - `service start` remains gated and requires exact confirmation with `--confirm START_SERVICE`.
 - `service stop` remains gated and requires exact confirmation with `--confirm STOP_SERVICE`.
+- `service enable` remains gated and requires exact confirmation with `--confirm ENABLE_SERVICE`.
+- `service disable` remains gated and requires exact confirmation with `--confirm DISABLE_SERVICE`.
 - Only PilotTunnel-owned unit files are eligible for real start.
 - Only PilotTunnel-owned unit files are eligible for real stop.
-- Real `restart`, `enable`, and `disable` remain blocked in this safety stage.
+- Only PilotTunnel-owned unit files are eligible for real enable and disable.
+- Real `restart` remains blocked in this safety stage.
 - Firewall rules, routes, and interfaces remain untouched.
 
 ```bash
@@ -161,7 +164,7 @@ python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_
 - Only PilotTunnel-owned unit files can be started.
 - After start, PilotTunnel runs read-only `systemctl is-active` and `systemctl status`.
 - Optional `--require-healthcheck` runs TCP healthchecks after start without stopping the service on failure.
-- Real `stop`, `restart`, `enable`, and `disable` are still blocked.
+- Real `restart` remains blocked, and `start` does not imply `enable`.
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
@@ -176,13 +179,29 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 - `service stop` requires `--real-systemd` and exact `--confirm STOP_SERVICE`.
 - Only PilotTunnel-owned unit files can be stopped.
 - After stop, PilotTunnel runs read-only `systemctl is-active` and `systemctl status`.
-- Real `restart`, `enable`, and `disable` are still blocked.
+- Real `restart` remains blocked, and `stop` does not imply `disable`.
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
 python -m pilottunnel.cli service stop --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm STOP_SERVICE
 python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
 python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+```
+
+## Controlled Real Service Enable/Disable Gates
+
+- `service enable` requires `--real-systemd` and exact `--confirm ENABLE_SERVICE`.
+- `service disable` requires `--real-systemd` and exact `--confirm DISABLE_SERVICE`.
+- Only PilotTunnel-owned unit files can be enabled or disabled.
+- `service enable` does not start the service.
+- `service disable` does not stop the service.
+- Real `restart` is still blocked.
+- Firewall rules, routes, interfaces, and downloads remain untouched.
+
+```bash
+python -m pilottunnel.cli service enable --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm ENABLE_SERVICE
+python -m pilottunnel.cli service disable --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm DISABLE_SERVICE
+python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Two-Sided Controller/Worker Bundles
