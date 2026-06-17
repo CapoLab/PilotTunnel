@@ -35,7 +35,7 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .readiness import build_readiness_report
 from .simulation import run_e2e_simulation
-from .service_lifecycle import block_real_service_action, build_service_plan, disable_service, enable_service, inspect_service_logs, inspect_service_status, run_daemon_reload, start_service, stop_service
+from .service_lifecycle import block_real_service_action, build_service_plan, disable_service, enable_service, inspect_service_logs, inspect_service_status, restart_service, run_daemon_reload, start_service, stop_service
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
@@ -180,7 +180,17 @@ def build_parser() -> argparse.ArgumentParser:
     service_start.add_argument("--require-healthcheck", action="store_true")
     service_start.add_argument("--healthcheck-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     service_start.add_argument("--json", action="store_true")
-    for blocked_action in ("stop", "restart", "enable", "disable"):
+    service_restart = service_subparsers.add_parser("restart")
+    service_restart.add_argument("--profile", required=True)
+    service_restart.add_argument("--adapter", required=True)
+    service_restart.add_argument("--transport", required=True)
+    service_restart.add_argument("--role")
+    service_restart.add_argument("--real-systemd", action="store_true")
+    service_restart.add_argument("--confirm")
+    service_restart.add_argument("--require-healthcheck", action="store_true")
+    service_restart.add_argument("--healthcheck-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    service_restart.add_argument("--json", action="store_true")
+    for blocked_action in ("stop", "enable", "disable"):
         blocked_parser = service_subparsers.add_parser(blocked_action)
         blocked_parser.add_argument("--profile", required=True)
         blocked_parser.add_argument("--adapter", required=True)
@@ -1035,14 +1045,18 @@ def main(argv: list[str] | None = None) -> int:
             requested_role = canonical_role(args.role) if args.role else None
             if requested_role and config.node.initialized and requested_role != config.node.normalized_role:
                 raise ValueError(f"Requested service role '{requested_role}' does not match initialized node role '{config.node.normalized_role}'")
-            payload = block_real_service_action(
-                action=args.service_command,
+            if not config.node.initialized:
+                raise ValueError("Real service restart requires an initialized node role")
+            payload = restart_service(
                 profile=profile,
                 adapter_name=args.adapter,
                 transport=args.transport,
                 role=requested_role or config.node.normalized_role or profile.role,
                 paths=switch_paths,
+                confirm=args.confirm,
                 real_systemd=args.real_systemd,
+                require_healthcheck=args.require_healthcheck,
+                healthcheck_timeout=args.healthcheck_timeout,
             )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))

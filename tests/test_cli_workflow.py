@@ -1476,9 +1476,56 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         self.assertTrue(json.loads(output)["healthcheck_ok"])
 
-    def test_real_restart_is_explicitly_blocked(self) -> None:
+    def test_service_restart_refuses_without_real_systemd(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "restart",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--confirm",
+            "RESTART_SERVICE",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--real-systemd", output)
+
+    def test_service_restart_requires_initialized_node_role(self) -> None:
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-port",
+            "6221",
+        )
+        self._prepare_real_systemd_unit()
+        with self._mock_real_systemd():
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("initialized node role", output)
+
+    def test_service_restart_refuses_without_confirm_restart_service(self) -> None:
         self.run_cli("init", "--role", "controller")
         self._create_profile()
+        self._prepare_real_systemd_unit()
         with self._mock_real_systemd():
             code, output = self.run_cli(
                 "service",
@@ -1492,7 +1539,516 @@ class CliWorkflowTests(unittest.TestCase):
                 "--real-systemd",
             )
         self.assertEqual(code, 1)
-        self.assertIn("Real restart is not implemented in this safety stage.", output)
+        self.assertIn("RESTART_SERVICE", output)
+
+    def test_service_restart_refuses_on_windows_mock_non_linux(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        with self._mock_real_systemd(is_linux=False):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("Linux-only", output)
+
+    def test_service_restart_refuses_when_systemd_unavailable(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        with self._mock_real_systemd(systemctl_available=False):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("unavailable", output)
+
+    def test_service_restart_refuses_without_root_mock(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        with self._mock_real_systemd(is_root=False):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("root/admin", output)
+
+    def test_service_restart_refuses_if_unit_file_missing(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        with self._mock_real_systemd():
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("unit is missing", output)
+
+    def test_service_restart_refuses_if_unit_is_not_pilottunnel_owned(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit(owned=False)
+        with self._mock_real_systemd():
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("not marked as PilotTunnel-owned", output)
+
+    def test_service_restart_executes_only_mocked_systemctl_restart_when_gates_pass(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+
+            class Completed:
+                returncode = 0
+                stdout = "active"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(calls[0], ["systemctl", "restart", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"])
+        self.assertTrue(payload["service_restarted"])
+        self.assertTrue(payload["real_systemd_touched"])
+
+    def test_service_restart_does_not_call_enable_disable_start_stop_separately(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+
+            class Completed:
+                returncode = 0
+                stdout = "active"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 0, msg=output)
+        self.assertEqual(calls[0][1], "restart")
+        self.assertTrue(all(command[1] not in {"enable", "disable", "start", "stop"} for command in calls[1:]))
+
+    def test_service_restart_runs_read_only_is_active_is_enabled_status_after_success(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+
+            class Completed:
+                returncode = 0
+                if command[1] == "is-enabled":
+                    stdout = "enabled"
+                elif command[1] == "is-active":
+                    stdout = "active"
+                else:
+                    stdout = "unit loaded"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertIn(["systemctl", "is-enabled", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "is-active", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "status", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", "--no-pager"], calls)
+        self.assertEqual(payload["status"]["is_enabled"], "enabled")
+        self.assertEqual(payload["status"]["is_active"], "active")
+        self.assertTrue(payload["status"]["read_only"])
+
+    @patch("pilottunnel.service_lifecycle.run_profile_healthchecks")
+    def test_service_restart_with_require_healthcheck_reports_failed_healthcheck_without_another_restart(self, mock_run_profile_healthchecks) -> None:
+        mock_run_profile_healthchecks.return_value = [
+            {
+                "ok": False,
+                "host": "127.0.0.1",
+                "port": 6221,
+                "timeout": 2.0,
+                "latency_ms": None,
+                "error": "failed",
+                "checked_at": "now",
+                "role": "controller",
+                "profile": "turkey-6221",
+                "label": "target",
+            }
+        ]
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+
+            class Completed:
+                returncode = 0
+                stdout = "active"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+                "--require-healthcheck",
+            )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["healthcheck_ok"])
+        self.assertTrue(payload["service_restarted"])
+        self.assertEqual(sum(1 for command in calls if command[1] == "restart"), 1)
+
+    @patch("pilottunnel.service_lifecycle.run_profile_healthchecks")
+    def test_service_restart_with_passing_mocked_healthcheck_reports_healthcheck_ok_true(self, mock_run_profile_healthchecks) -> None:
+        mock_run_profile_healthchecks.return_value = [
+            {
+                "ok": True,
+                "host": "127.0.0.1",
+                "port": 6221,
+                "timeout": 2.0,
+                "latency_ms": 1.0,
+                "error": "",
+                "checked_at": "now",
+                "role": "controller",
+                "profile": "turkey-6221",
+                "label": "target",
+            }
+        ]
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+
+        def fake_run(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "active"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+                "--require-healthcheck",
+            )
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(json.loads(output)["healthcheck_ok"])
+
+    def test_service_restart_unknown_adapter_rejected(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        with self._mock_real_systemd():
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "missing",
+                "--transport",
+                "tcp",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_service_restart_unsupported_backhaul_experimental_transport_rejected(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        with self._mock_real_systemd():
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcptun",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_service_restart_role_aware_service_names_correct_for_controller_worker(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-host",
+            "127.0.0.1",
+            "--target-port",
+            "6221",
+            "--role",
+            "iran",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+        self._prepare_real_systemd_unit(role="controller")
+
+        def fake_run(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "enabled" if command[1] == "is-enabled" else "active"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            controller_code, controller_output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(controller_code, 0)
+        self.assertTrue(json.loads(controller_output)["service_name"].endswith("controller.service"))
+
+        self.run_cli("init", "--force", "--role", "worker")
+        self._prepare_real_systemd_unit(role="worker")
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            worker_code, worker_output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        self.assertEqual(worker_code, 0)
+        self.assertTrue(json.loads(worker_output)["service_name"].endswith("worker.service"))
+
+    def test_audit_records_service_restart_attempts_success_and_failure(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+
+        def fake_run_success(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "enabled" if command[1] == "is-enabled" else "active"
+                stderr = ""
+
+            return Completed()
+
+        def fake_run_fail(command, **kwargs):
+            class Completed:
+                returncode = 1
+                stdout = ""
+                stderr = "failed"
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run_success):
+            self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        with self._mock_real_systemd(subprocess_side_effect=fake_run_fail):
+            self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+            )
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        actions = [item["action"] for item in lines]
+        self.assertIn("service-restart", actions)
+
+    def test_service_restart_json_output_is_valid(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self._create_profile()
+        self._prepare_real_systemd_unit()
+
+        def fake_run(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "enabled" if command[1] == "is-enabled" else "active"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "restart",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+                "--confirm",
+                "RESTART_SERVICE",
+                "--json",
+            )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["service_restarted"])
 
     def test_service_start_unknown_adapter_rejected(self) -> None:
         self.run_cli("init", "--role", "controller")

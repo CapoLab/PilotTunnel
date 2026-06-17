@@ -1066,6 +1066,197 @@ def disable_service(
     return payload
 
 
+def restart_service(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+    confirm: str | None,
+    real_systemd: bool,
+    require_healthcheck: bool = False,
+    healthcheck_timeout: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+) -> dict:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    attempt = {
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "real_systemd": real_systemd,
+        "confirm": confirm or "",
+        "require_healthcheck": require_healthcheck,
+        "healthcheck_timeout": healthcheck_timeout,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    if not real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Refusing real service restart without --real-systemd. Use service plan --action restart for plan-only guidance.",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+    if confirm != "RESTART_SERVICE":
+        payload = {
+            "ok": False,
+            "message": "Refusing real service restart without --confirm RESTART_SERVICE",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_linux():
+        payload = {
+            "ok": False,
+            "message": "Real service restart is Linux-only",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _systemd_available():
+        payload = {
+            "ok": False,
+            "message": "systemd is unavailable on this host",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+    if not _is_root():
+        payload = {
+            "ok": False,
+            "message": "systemctl restart requires root/admin privileges",
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    ownership = _verify_pilottunnel_unit_ownership(request=request)
+    if not ownership["ok"]:
+        payload = {
+            "ok": False,
+            "message": ownership["message"],
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    restart_command = ["systemctl", "restart", request.service_name]
+    restart_result = _run_command(restart_command, timeout_seconds=healthcheck_timeout)
+    status_payload = _service_status_payload(request=request, timeout_seconds=healthcheck_timeout)
+    if restart_result["returncode"] != 0 or restart_result["timed_out"]:
+        payload = {
+            "ok": False,
+            "message": "systemctl restart failed; review service status and logs",
+            "command_executed": " ".join(restart_command),
+            "exit_code": restart_result["returncode"],
+            "stdout": restart_result["stdout"],
+            "stderr": restart_result["stderr"],
+            "timed_out": restart_result["timed_out"],
+            "status": status_payload,
+            "healthcheck_ok": "skipped",
+            "real_systemd_touched": True,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "service_restarted": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+            "systemctl_executed": True,
+            "real_systemd": True,
+            "read_only": False,
+            "service_name": request.service_name,
+            "unit_path": request.unit_path,
+            "profile": request.profile,
+            "role": request.role,
+            "adapter": request.adapter,
+            "transport": request.transport,
+        }
+        _audit("service-restart", profile.name, payload, path=paths.audit_path)
+        return payload
+
+    healthcheck_ok: bool | str = "skipped"
+    healthcheck_summary: dict[str, Any] | None = None
+    ok = True
+    message = "Service restart completed"
+    if require_healthcheck:
+        healthcheck_summary = summarize_healthchecks(
+            run_profile_healthchecks(
+                profile=profile,
+                node_role=request.role,
+                timeout=healthcheck_timeout,
+                include_all=True,
+                role_aware=True,
+            ),
+            profile=profile.name,
+            role=request.role,
+        )
+        healthcheck_ok = healthcheck_summary["ok"]
+        if not healthcheck_summary["ok"]:
+            ok = False
+            message = "Service restarted but healthcheck failed; review service status and logs manually"
+
+    payload = {
+        "ok": ok,
+        "message": message,
+        "command_executed": " ".join(restart_command),
+        "exit_code": restart_result["returncode"],
+        "stdout": restart_result["stdout"],
+        "stderr": restart_result["stderr"],
+        "timed_out": restart_result["timed_out"],
+        "status": status_payload,
+        "healthcheck_ok": healthcheck_ok,
+        "healthcheck": healthcheck_summary,
+        "real_systemd_touched": True,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "service_restarted": True,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": True,
+        "real_systemd": True,
+        "read_only": False,
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+    }
+    _audit("service-restart", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
 def block_real_service_action(
     *,
     action: str,
