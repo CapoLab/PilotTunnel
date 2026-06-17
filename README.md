@@ -218,6 +218,23 @@ python -m pilottunnel.cli service restart --profile turkey-6221 --adapter backha
 python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
 ```
 
+## Controlled Deployment Workflow
+
+- `deploy plan` is read-only.
+- `deploy apply` is an orchestrator around existing guarded readiness, file apply, daemon-reload, service start, healthcheck, and optional enable steps.
+- `deploy apply` requires `--real-host` and exact `--confirm DEPLOY_APPLY`.
+- It does not touch firewall rules, routes, or network interfaces.
+- It does not download anything.
+- It does not auto-stop on healthcheck failure.
+- Enabling the service is optional through `--enable-after-start`.
+
+```bash
+python -m pilottunnel.cli deploy plan --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli deploy apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck
+python -m pilottunnel.cli deploy apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck --enable-after-start
+python -m pilottunnel.cli deploy status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+```
+
 ## Two-Sided Controller/Worker Bundles
 
 - One unified CLI is used on both sides.

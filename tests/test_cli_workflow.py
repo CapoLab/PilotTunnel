@@ -2050,6 +2050,517 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertTrue(payload["service_restarted"])
 
+    @patch("pilottunnel.deploy.build_readiness_report")
+    def test_deploy_plan_is_read_only(self, mock_readiness) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        mock_readiness.return_value = self._readiness_ok()
+        code, output = self.run_cli(
+            "deploy",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["plan_only"])
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["service_started"])
+        self.assertFalse(payload["service_enabled"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+        self.assertFalse(payload["downloads_performed"])
+
+    @patch("pilottunnel.deploy.build_readiness_report")
+    def test_deploy_plan_includes_readiness_install_daemon_reload_start_healthcheck_optional_enable_steps(self, mock_readiness) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        mock_readiness.return_value = self._readiness_ok()
+        code, output = self.run_cli(
+            "deploy",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--enable-after-start",
+            "--require-healthcheck",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        step_names = [item["name"] for item in payload["steps"]]
+        self.assertEqual(
+            step_names,
+            [
+                "readiness_report",
+                "staged_file_check",
+                "binary_imported_check",
+                "install_apply",
+                "daemon_reload",
+                "service_start",
+                "healthcheck",
+                "service_enable",
+            ],
+        )
+        self.assertTrue(any("deploy plan" not in command and "install apply" in command for command in payload["exact_commands"]))
+
+    def test_deploy_apply_refuses_without_real_host(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--real-host", output)
+
+    def test_deploy_apply_refuses_without_confirm_deploy_apply(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("DEPLOY_APPLY", output)
+
+    @patch("pilottunnel.deploy._is_linux_host", return_value=False)
+    def test_deploy_apply_refuses_on_windows_mock_non_linux(self, _mock_linux) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Linux-only", output)
+
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=False)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_refuses_without_root_mock(self, _mock_linux, _mock_root) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("root/admin", output)
+
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_refuses_when_readiness_blocked(self, _mock_linux, _mock_root, mock_readiness) -> None:
+        self._create_profile()
+        mock_readiness.return_value = {"readiness_level": "blocked", "blockers": ["blocked"], "staged_files_exist": False, "binary_imported": False}
+        code, output = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("readiness", output.lower())
+
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_stops_if_install_apply_fails(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_ownership) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": False, "message": "install failed"}
+        mock_ownership.return_value = {"ok": True}
+        with patch("pilottunnel.deploy.run_daemon_reload") as mock_reload, patch("pilottunnel.deploy.start_service") as mock_start:
+            code, output = self.run_cli(
+                "deploy",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host",
+                "--confirm",
+                "DEPLOY_APPLY",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("install failed", output)
+        mock_reload.assert_not_called()
+        mock_start.assert_not_called()
+
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.run_daemon_reload")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_stops_if_daemon_reload_fails(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_reload, mock_ownership) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": True, "manifest_path": "x"}
+        mock_ownership.return_value = {"ok": True, "message": "owned"}
+        mock_reload.return_value = {"ok": False, "message": "reload failed"}
+        with patch("pilottunnel.deploy.start_service") as mock_start:
+            code, output = self.run_cli(
+                "deploy",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host",
+                "--confirm",
+                "DEPLOY_APPLY",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("reload failed", output)
+        mock_start.assert_not_called()
+
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.start_service")
+    @patch("pilottunnel.deploy.run_daemon_reload")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_stops_if_service_start_fails(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_reload, mock_start, mock_ownership) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": True, "manifest_path": "x"}
+        mock_ownership.return_value = {"ok": True, "message": "owned"}
+        mock_reload.return_value = {"ok": True}
+        mock_start.return_value = {"ok": False, "message": "start failed", "service_started": False}
+        with patch("pilottunnel.deploy.enable_service") as mock_enable:
+            code, output = self.run_cli(
+                "deploy",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host",
+                "--confirm",
+                "DEPLOY_APPLY",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("start failed", output)
+        mock_enable.assert_not_called()
+
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.start_service")
+    @patch("pilottunnel.deploy.run_daemon_reload")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_does_not_enable_when_healthcheck_fails(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_reload, mock_start, mock_ownership) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": True}
+        mock_ownership.return_value = {"ok": True, "message": "owned"}
+        mock_reload.return_value = {"ok": True}
+        mock_start.return_value = {
+            "ok": False,
+            "message": "Service started but healthcheck failed; review service status and logs manually",
+            "service_started": True,
+            "healthcheck_ok": False,
+            "status": {"is_active": "active"},
+        }
+        with patch("pilottunnel.deploy.enable_service") as mock_enable:
+            code, output = self.run_cli(
+                "deploy",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host",
+                "--confirm",
+                "DEPLOY_APPLY",
+                "--require-healthcheck",
+                "--enable-after-start",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("healthcheck failed", output.lower())
+        mock_enable.assert_not_called()
+
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.enable_service")
+    @patch("pilottunnel.deploy.start_service")
+    @patch("pilottunnel.deploy.run_daemon_reload")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_enables_only_when_enable_after_start_is_set_and_earlier_steps_pass(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_reload, mock_start, mock_enable, mock_ownership) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": True}
+        mock_ownership.return_value = {"ok": True, "message": "owned"}
+        mock_reload.return_value = {"ok": True}
+        mock_start.return_value = {"ok": True, "service_started": True, "healthcheck_ok": True, "status": {"is_active": "active"}}
+        mock_enable.return_value = {"ok": True, "service_enabled": True, "status": {"is_enabled": "enabled"}}
+
+        code_without, _ = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.assertEqual(code_without, 0)
+        mock_enable.assert_not_called()
+
+        code_with, output_with = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+            "--enable-after-start",
+        )
+        self.assertEqual(code_with, 0, msg=output_with)
+        self.assertTrue(json.loads(output_with)["service_enabled"])
+        mock_enable.assert_called_once()
+
+    @patch("pilottunnel.service_lifecycle.restart_service")
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.start_service")
+    @patch("pilottunnel.deploy.run_daemon_reload")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_deploy_apply_does_not_call_firewall_routes_interfaces_downloads_or_restart(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_reload, mock_start, mock_ownership, mock_restart) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": True}
+        mock_ownership.return_value = {"ok": True, "message": "owned"}
+        mock_reload.return_value = {"ok": True}
+        mock_start.return_value = {"ok": True, "service_started": True, "healthcheck_ok": "skipped", "status": {"is_active": "active"}}
+        code, output = self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+        self.assertFalse(payload["downloads_performed"])
+        mock_restart.assert_not_called()
+
+    @patch("pilottunnel.deploy.run_profile_healthchecks")
+    @patch("pilottunnel.deploy.inspect_service_status")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    def test_deploy_status_is_read_only(self, mock_readiness, mock_status, mock_healthchecks) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
+        mock_healthchecks.return_value = [
+            {"ok": True, "host": "127.0.0.1", "port": 6221, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "turkey-6221", "label": "target"}
+        ]
+        code, output = self.run_cli(
+            "deploy",
+            "status",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-systemd",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+
+    @patch("pilottunnel.deploy.run_profile_healthchecks")
+    @patch("pilottunnel.deploy.inspect_service_status")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    def test_deploy_status_json_output_is_valid(self, mock_readiness, mock_status, mock_healthchecks) -> None:
+        self._create_profile()
+        mock_readiness.return_value = self._readiness_ok()
+        mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
+        mock_healthchecks.return_value = [
+            {"ok": True, "host": "127.0.0.1", "port": 6221, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "turkey-6221", "label": "target"}
+        ]
+        code, output = self.run_cli(
+            "deploy",
+            "status",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-systemd",
+            "--json",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertIn("service_status", payload)
+        self.assertIn("healthcheck", payload)
+
+    def test_deploy_unknown_adapter_rejected(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "deploy",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "missing",
+            "--transport",
+            "tcp",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_deploy_unsupported_backhaul_experimental_transport_rejected(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "deploy",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcptun",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    @patch("pilottunnel.deploy.run_profile_healthchecks")
+    @patch("pilottunnel.deploy.inspect_service_status")
+    @patch("pilottunnel.deploy.verify_service_ownership")
+    @patch("pilottunnel.deploy.start_service")
+    @patch("pilottunnel.deploy.run_daemon_reload")
+    @patch("pilottunnel.deploy.apply_install")
+    @patch("pilottunnel.deploy.build_readiness_report")
+    @patch("pilottunnel.deploy._is_admin_or_root", return_value=True)
+    @patch("pilottunnel.deploy._is_linux_host", return_value=True)
+    def test_audit_records_deploy_plan_apply_status_attempts(self, _mock_linux, _mock_root, mock_readiness, mock_install, mock_reload, mock_start, mock_ownership, mock_status, mock_healthchecks) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        mock_readiness.return_value = self._readiness_ok()
+        mock_install.return_value = {"ok": True}
+        mock_reload.return_value = {"ok": True}
+        mock_start.return_value = {"ok": True, "service_started": True, "healthcheck_ok": "skipped", "status": {"is_active": "active"}}
+        mock_ownership.return_value = {"ok": True, "message": "owned"}
+        mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
+        mock_healthchecks.return_value = [
+            {"ok": True, "host": "127.0.0.1", "port": 6221, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "turkey-6221", "label": "target"}
+        ]
+        self.run_cli("deploy", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.run_cli(
+            "deploy",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-host",
+            "--confirm",
+            "DEPLOY_APPLY",
+        )
+        self.run_cli(
+            "deploy",
+            "status",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--real-systemd",
+        )
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        actions = [item["action"] for item in lines]
+        self.assertIn("deploy-plan", actions)
+        self.assertIn("deploy-apply", actions)
+        self.assertIn("deploy-status", actions)
+
     def test_service_start_unknown_adapter_rejected(self) -> None:
         self.run_cli("init", "--role", "controller")
         self._create_profile()

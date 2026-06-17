@@ -29,6 +29,7 @@ from .config import (
     save_config,
     validate_profile_name,
 )
+from .deploy import apply_deploy, build_deploy_plan, build_deploy_status
 from .install_plan import apply_install, apply_uninstall, build_install_plan, build_uninstall_plan, rollback_install
 from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
@@ -225,6 +226,37 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--profile")
     logs.add_argument("--limit", type=int, default=20)
 
+    deploy = subparsers.add_parser("deploy")
+    deploy_subparsers = deploy.add_subparsers(dest="deploy_command", required=True)
+    deploy_plan = deploy_subparsers.add_parser("plan")
+    deploy_plan.add_argument("--profile", required=True)
+    deploy_plan.add_argument("--adapter", required=True)
+    deploy_plan.add_argument("--transport", required=True)
+    deploy_plan.add_argument("--role")
+    deploy_plan.add_argument("--enable-after-start", action="store_true")
+    deploy_plan.add_argument("--require-healthcheck", action="store_true")
+    deploy_plan.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
+    deploy_plan.add_argument("--json", action="store_true")
+    deploy_apply = deploy_subparsers.add_parser("apply")
+    deploy_apply.add_argument("--profile", required=True)
+    deploy_apply.add_argument("--adapter", required=True)
+    deploy_apply.add_argument("--transport", required=True)
+    deploy_apply.add_argument("--role")
+    deploy_apply.add_argument("--real-host", action="store_true")
+    deploy_apply.add_argument("--confirm")
+    deploy_apply.add_argument("--enable-after-start", action="store_true")
+    deploy_apply.add_argument("--require-healthcheck", action="store_true")
+    deploy_apply.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
+    deploy_apply.add_argument("--json", action="store_true")
+    deploy_status = deploy_subparsers.add_parser("status")
+    deploy_status.add_argument("--profile", required=True)
+    deploy_status.add_argument("--adapter", required=True)
+    deploy_status.add_argument("--transport", required=True)
+    deploy_status.add_argument("--role")
+    deploy_status.add_argument("--real-systemd", action="store_true")
+    deploy_status.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
+    deploy_status.add_argument("--json", action="store_true")
+
     registry = subparsers.add_parser("registry")
     registry.add_subparsers(dest="registry_command", required=True).add_parser("check")
 
@@ -360,6 +392,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return "node_status"
     if args.command == "readiness":
         return f"readiness_{args.readiness_command}"
+    if args.command == "deploy":
+        return f"deploy_{args.deploy_command}"
     if args.command in {"switch", "status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
         return args.command
     return None
@@ -1329,6 +1363,73 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_preflight(switch_paths.staging_root, profile).to_dict()
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "deploy" and args.deploy_command == "plan":
+        try:
+            payload = build_deploy_plan(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                enable_after_start=args.enable_after_start,
+                require_healthcheck=args.require_healthcheck,
+                staging_root=getattr(args, "command_staging_root", None) or args.staging_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "deploy" and args.deploy_command == "apply":
+        try:
+            payload = apply_deploy(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                real_host=args.real_host,
+                confirm=args.confirm,
+                enable_after_start=args.enable_after_start,
+                require_healthcheck=args.require_healthcheck,
+                staging_root=getattr(args, "command_staging_root", None) or args.staging_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "deploy" and args.deploy_command == "status":
+        try:
+            payload = build_deploy_status(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                real_systemd=args.real_systemd,
+                staging_root=getattr(args, "command_staging_root", None) or args.staging_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "readiness" and args.readiness_command == "report":
         try:

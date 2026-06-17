@@ -1257,6 +1257,36 @@ def restart_service(
     return payload
 
 
+def verify_service_ownership(
+    *,
+    profile: Profile,
+    adapter_name: str,
+    transport: str,
+    role: str | None,
+    paths: SwitchPaths,
+) -> dict[str, Any]:
+    request = _service_start_request(
+        profile=profile,
+        adapter_name=adapter_name,
+        transport=transport,
+        role=role,
+        paths=paths,
+    )
+    ownership = _verify_pilottunnel_unit_ownership(request=request)
+    return {
+        "ok": ownership["ok"],
+        "message": ownership["message"],
+        "service_name": request.service_name,
+        "unit_path": request.unit_path,
+        "profile": request.profile,
+        "role": request.role,
+        "adapter": request.adapter,
+        "transport": request.transport,
+        "real_systemd_touched": False,
+        "read_only": True,
+    }
+
+
 def block_real_service_action(
     *,
     action: str,
