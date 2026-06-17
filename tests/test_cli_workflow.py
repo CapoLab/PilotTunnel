@@ -493,6 +493,245 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(lines[-1])
         self.assertTrue(payload["details"]["staged_only"])
 
+    def test_service_plan_for_backhaul_start_is_read_only(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "start",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["action"], "start")
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertIn("systemctl start pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", payload["future_command"])
+        self.assertIn("systemctl start pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", payload["plan_steps"][0])
+
+    def test_service_plan_for_rathole_stop_is_read_only(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "rathole",
+            "--transport",
+            "tcp",
+            "--action",
+            "stop",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["action"], "stop")
+        self.assertIn("systemctl stop pilottunnel-turkey-6221-rathole-tcp-controller.service", payload["future_command"])
+
+    def test_service_plan_enable_and_disable_are_supported(self) -> None:
+        self._create_profile()
+        enable_code, enable_output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "enable",
+        )
+        disable_code, disable_output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "disable",
+        )
+        self.assertEqual(enable_code, 0)
+        self.assertEqual(disable_code, 0)
+        self.assertIn("systemctl enable", json.loads(enable_output)["future_command"])
+        self.assertIn("systemctl disable", json.loads(disable_output)["future_command"])
+
+    def test_service_plan_audits_attempts(self) -> None:
+        self._create_profile()
+        code, _ = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "restart",
+        )
+        self.assertEqual(code, 0)
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        service_events = [item for item in lines if item["action"] == "service-plan"]
+        self.assertTrue(service_events)
+        self.assertEqual(service_events[-1]["details"]["action"], "restart")
+
+    def test_service_plan_rejects_unknown_adapter(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "missing",
+            "--transport",
+            "tcp",
+            "--action",
+            "start",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_service_plan_rejects_unsupported_backhaul_transport(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcptun",
+            "--action",
+            "start",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_service_plan_blocks_path_traversal(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "start",
+            "--install-root",
+            str(Path(self.temp_dir.name) / ".." / "escape"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_service_plan_respects_controller_and_worker_roles(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-host",
+            "127.0.0.1",
+            "--target-port",
+            "6221",
+            "--role",
+            "iran",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+        controller_code, controller_output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "start",
+        )
+        self.assertEqual(controller_code, 0)
+        self.assertEqual(json.loads(controller_output)["role"], "controller")
+        self.run_cli("init", "--force", "--role", "worker")
+        worker_code, worker_output = self.run_cli(
+            "service",
+            "plan",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--action",
+            "start",
+        )
+        self.assertEqual(worker_code, 0)
+        self.assertEqual(json.loads(worker_output)["role"], "worker")
+
+    @patch("pilottunnel.service_lifecycle.platform.system", return_value="Windows")
+    @patch("pilottunnel.service_lifecycle.subprocess.run")
+    def test_service_status_is_read_only_and_windows_safe(self, mock_run, _mock_platform) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "status",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+        self.assertIn("Windows host detected", payload["warning"])
+        mock_run.assert_not_called()
+
+    @patch("pilottunnel.service_lifecycle.platform.system", return_value="Windows")
+    @patch("pilottunnel.service_lifecycle.subprocess.run")
+    def test_service_logs_is_read_only_and_windows_safe(self, mock_run, _mock_platform) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "logs",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--limit",
+            "10",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["limit"], 10)
+        self.assertIn("Windows host detected", payload["warning"])
+        mock_run.assert_not_called()
+
     def test_preflight_returns_structured_host_info(self) -> None:
         code, output = self.run_cli("preflight")
         self.assertEqual(code, 0)

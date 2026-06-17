@@ -30,6 +30,7 @@ from .install_plan import apply_install, apply_uninstall, build_install_plan, bu
 from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
+from .service_lifecycle import build_service_plan, inspect_service_logs, inspect_service_status
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
@@ -127,6 +128,32 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_apply.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
     uninstall_apply.add_argument("--install-root", type=Path, default=None)
     uninstall_apply.add_argument("--confirm")
+
+    service = subparsers.add_parser("service")
+    service_subparsers = service.add_subparsers(dest="service_command", required=True)
+    service_plan = service_subparsers.add_parser("plan")
+    service_plan.add_argument("--profile", required=True)
+    service_plan.add_argument("--adapter", required=True)
+    service_plan.add_argument("--transport", required=True)
+    service_plan.add_argument("--action", required=True, choices=["start", "stop", "restart", "enable", "disable"])
+    service_plan.add_argument("--role")
+    service_plan.add_argument("--install-root", type=Path, default=None)
+    service_plan.add_argument("--json", action="store_true")
+    service_status = service_subparsers.add_parser("status")
+    service_status.add_argument("--profile", required=True)
+    service_status.add_argument("--adapter", required=True)
+    service_status.add_argument("--transport", required=True)
+    service_status.add_argument("--role")
+    service_status.add_argument("--install-root", type=Path, default=None)
+    service_status.add_argument("--json", action="store_true")
+    service_logs = service_subparsers.add_parser("logs")
+    service_logs.add_argument("--profile", required=True)
+    service_logs.add_argument("--adapter", required=True)
+    service_logs.add_argument("--transport", required=True)
+    service_logs.add_argument("--role")
+    service_logs.add_argument("--install-root", type=Path, default=None)
+    service_logs.add_argument("--limit", type=int, default=50)
+    service_logs.add_argument("--json", action="store_true")
 
     switch = subparsers.add_parser("switch")
     switch.add_argument("--profile", required=True)
@@ -231,6 +258,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"install_{args.install_command}"
     if args.command == "uninstall":
         return f"uninstall_{args.uninstall_command}"
+    if args.command == "service":
+        return f"service_{args.service_command}"
     if args.command == "profile":
         return f"profile_{args.profile_command}"
     if args.command == "staged":
@@ -664,6 +693,66 @@ def main(argv: list[str] | None = None) -> int:
             payload = {"ok": False, "action": "uninstall-apply", "message": str(exc)}
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
+
+    if args.command == "service" and args.service_command == "plan":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            requested_role = canonical_role(args.role) if args.role else None
+            if requested_role and config.node.initialized and requested_role != config.node.normalized_role:
+                raise ValueError(f"Requested service role '{requested_role}' does not match initialized node role '{config.node.normalized_role}'")
+            payload = build_service_plan(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                action=args.action,
+                role=requested_role or config.node.normalized_role or profile.role,
+                paths=switch_paths,
+                state=state,
+                install_root=args.install_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "service" and args.service_command == "status":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = inspect_service_status(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                paths=switch_paths,
+                install_root=args.install_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "service" and args.service_command == "logs":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = inspect_service_logs(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                paths=switch_paths,
+                install_root=args.install_root,
+                limit=args.limit,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
 
     if args.command == "switch":
         try:

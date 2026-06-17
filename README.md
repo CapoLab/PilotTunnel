@@ -124,6 +124,20 @@ python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backh
 python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
 ```
 
+## Service Lifecycle Planning
+
+- `service plan` shows the service action that would be taken, but it does not run `systemctl`.
+- `service status` and `service logs` are read-only inspection commands.
+- Windows hosts remain safe: these commands return warnings instead of crashing.
+- No real service start, stop, enable, disable, or journal changes are performed yet.
+
+```bash
+python -m pilottunnel.cli service plan --profile turkey-6221 --adapter backhaul --transport tcpmux --action start
+python -m pilottunnel.cli service plan --profile turkey-6221 --adapter rathole --transport tcp --action stop
+python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --limit 50
+```
+
 ## Single Script, Two Roles
 
 - The same `pilottunnel` CLI is used on Iran and Foreign servers.
