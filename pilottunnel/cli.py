@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 
 from .adapters import ADAPTERS
@@ -16,10 +17,11 @@ from .config import (
     ProfileSafety,
     SUPPORTED_LAYERS,
     canonical_role,
+    get_profile,
     load_config,
     save_config,
 )
-from .registry import PortRegistry, load_registry, save_registry
+from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
 
@@ -50,10 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
     profile_create.add_argument("--check-port", type=int)
     profile_create.add_argument("--layer", default="layer4")
     profile_create.add_argument("--candidate", action="append", default=[], help="adapter:transport")
+    profile_create.add_argument("--force", action="store_true")
+    profile_create.add_argument("--update", action="store_true")
     profile_subparsers.add_parser("list")
+    profile_show = profile_subparsers.add_parser("show")
+    profile_show.add_argument("--name", required=True)
 
     subparsers.add_parser("layer").add_subparsers(dest="layer_command", required=True).add_parser("list")
-    subparsers.add_parser("adapter").add_subparsers(dest="adapter_command", required=True).add_parser("list")
+    adapter = subparsers.add_parser("adapter")
+    adapter_subparsers = adapter.add_subparsers(dest="adapter_command", required=True)
+    adapter_subparsers.add_parser("list")
+    adapter_show = adapter_subparsers.add_parser("show")
+    adapter_show.add_argument("--name", required=True)
 
     install = subparsers.add_parser("install")
     install.add_argument("--profile", required=True)
@@ -75,7 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--profile", required=True)
 
     logs = subparsers.add_parser("logs")
-    logs.add_argument("--profile", required=True)
+    logs.add_argument("--profile")
+    logs.add_argument("--limit", type=int, default=20)
 
     registry = subparsers.add_parser("registry")
     registry.add_subparsers(dest="registry_command", required=True).add_parser("check")
@@ -130,6 +141,100 @@ def _profile_candidates(values: list[str]) -> list[Candidate]:
     return items
 
 
+def _validate_port(value: int | None, label: str) -> None:
+    if value is None:
+        return
+    if value < 1 or value > 65535:
+        raise ValueError(f"{label} must be between 1 and 65535")
+
+
+def _validate_profile_ports(profile: Profile) -> None:
+    for label, value in [
+        ("main_port", profile.main_port),
+        ("target_port", profile.target_port),
+        ("control_port", profile.ports.control_port),
+        ("service_port", profile.ports.service_port),
+        ("check_port", profile.ports.check_port),
+    ]:
+        _validate_port(value, label)
+
+
+def _adapter_payload(name: str) -> dict:
+    if name not in ADAPTERS:
+        raise KeyError(f"Unknown adapter '{name}'")
+    meta = ADAPTERS[name]().metadata()
+    return {
+        "id": name,
+        "layer": meta.layer,
+        "status": "usable" if meta.supported else "listed-only",
+        "supported_transports": list(meta.all_transports()),
+        "usable_in_v0_1": list(meta.transports),
+        "experimental_blocked": list(meta.experimental_transports),
+        "notes": meta.notes,
+    }
+
+
+def _registry_view(config: AppConfig, state: AppState, registry: PortRegistry) -> tuple[PortRegistry, list[str]]:
+    computed = PortRegistry(owners=dict(registry.owners))
+    issues: list[str] = []
+    for index, profile in enumerate(config.profiles):
+        for other in config.profiles[index + 1 :]:
+            overlap = sorted(set(profile.ports.owned_ports()) & set(other.ports.owned_ports()))
+            if overlap:
+                issues.append(f"Profiles '{profile.name}' and '{other.name}' conflict on declared ports {overlap}")
+    for profile in config.profiles:
+        record = state.profiles.get(profile.name)
+        if not record or not record.active_adapter:
+            continue
+        if profile.name in computed.owners:
+            entry = computed.owners[profile.name]
+            if entry.transport != record.active_transport:
+                issues.append(
+                    f"State/registry mismatch for profile '{profile.name}': state transport={record.active_transport}, registry transport={entry.transport}"
+                )
+            continue
+        try:
+            computed.claim(
+                RegistryEntry(
+                    profile=profile.name,
+                    main_port=profile.ports.main_port,
+                    adapter=record.active_adapter,
+                    transport=record.active_transport,
+                    role=profile.role,
+                    owned_ports=profile.ports.owned_ports(),
+                    owned_services=[record.service_name] if record.service_name else [],
+                    owned_firewall_rule_tags=[],
+                    owned_routes=[],
+                )
+            )
+        except ValueError as exc:
+            issues.append(str(exc))
+    return computed, issues
+
+
+def _status_payload(config: AppConfig, state: AppState, registry: PortRegistry, profile_name: str) -> dict:
+    profile = get_profile(config, profile_name)
+    record = state.profiles.get(profile_name)
+    entry = registry.owners.get(profile_name)
+    return {
+        "profile": profile.name,
+        "main_port": profile.ports.main_port,
+        "role": profile.role,
+        "target_host": profile.target_host,
+        "target_port": profile.target_port,
+        "active_layer": record.active_layer if record else profile.active_layer,
+        "active_adapter": record.active_adapter if record else profile.active_adapter,
+        "active_transport": record.active_transport if record else profile.active_transport,
+        "owned_ports": entry.owned_ports if entry else profile.ports.owned_ports(),
+        "owned_services": entry.owned_services if entry else ([record.service_name] if record and record.service_name else []),
+        "last_switch_result": {
+            "healthy": record.healthy if record else False,
+            "last_error": record.last_error if record else "",
+            "last_switch_at": record.last_switch_at if record else "",
+        },
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -144,30 +249,67 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "profile" and args.profile_command == "create":
         if args.layer not in SUPPORTED_LAYERS:
             parser.error(f"Unknown layer: {args.layer}")
-        profile = Profile(
-            name=args.name,
-            main_port=args.main_port,
-            target_host=args.target_host,
-            target_port=args.target_port,
-            role=canonical_role(args.role),
-            active_layer=args.layer,
-            candidates=_profile_candidates(args.candidate),
-            ports=ProfilePorts(
+        existing = [item for item in config.profiles if item.name == args.name]
+        if existing and not (args.force or args.update):
+            print(json.dumps({"ok": False, "message": f"Profile '{args.name}' already exists. Use --force or --update."}, indent=2))
+            return 1
+        try:
+            profile = Profile(
+                name=args.name,
                 main_port=args.main_port,
-                control_port=args.control_port,
-                service_port=args.service_port,
-                check_port=args.check_port,
-            ),
-            safety=ProfileSafety(),
-        )
+                target_host=args.target_host,
+                target_port=args.target_port,
+                role=canonical_role(args.role),
+                active_layer=args.layer,
+                candidates=_profile_candidates(args.candidate),
+                ports=ProfilePorts(
+                    main_port=args.main_port,
+                    control_port=args.control_port,
+                    service_port=args.service_port,
+                    check_port=args.check_port,
+                ),
+                safety=ProfileSafety(),
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        try:
+            _validate_profile_ports(profile)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        for item in config.profiles:
+            if item.name == profile.name:
+                continue
+            overlap = set(item.ports.owned_ports()) & set(profile.ports.owned_ports())
+            if overlap:
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "message": f"Profile '{profile.name}' conflicts with '{item.name}' on ports {sorted(overlap)}",
+                        },
+                        indent=2,
+                    )
+                )
+                return 1
         config.profiles = [item for item in config.profiles if item.name != profile.name]
         config.profiles.append(profile)
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
-        print(json.dumps({"status": "created", "profile": profile.name}))
+        print(json.dumps({"ok": True, "status": "created" if not existing else "updated", "profile": asdict(profile)}, indent=2))
         return 0
 
     if args.command == "profile" and args.profile_command == "list":
-        print(json.dumps([profile.name for profile in config.profiles], indent=2))
+        print(json.dumps([{"name": profile.name, "role": profile.role, "main_port": profile.ports.main_port} for profile in config.profiles], indent=2))
+        return 0
+
+    if args.command == "profile" and args.profile_command == "show":
+        try:
+            profile = get_profile(config, args.name)
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(asdict(profile), indent=2))
         return 0
 
     if args.command == "layer" and args.layer_command == "list":
@@ -175,20 +317,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "adapter" and args.adapter_command == "list":
-        payload = []
-        for name, adapter_cls in ADAPTERS.items():
-            meta = adapter_cls().metadata()
-            payload.append(
-                {
-                    "name": name,
-                    "layer": meta.layer,
-                    "supported": meta.supported,
-                    "transports": list(meta.transports),
-                    "experimental_transports": list(meta.experimental_transports),
-                    "experimental": meta.experimental,
-                }
-            )
-        print(json.dumps(payload, indent=2))
+        print(json.dumps([_adapter_payload(name) for name in ADAPTERS], indent=2))
+        return 0
+
+    if args.command == "adapter" and args.adapter_command == "show":
+        try:
+            print(json.dumps(_adapter_payload(args.name), indent=2))
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         return 0
 
     if args.command == "install":
@@ -198,23 +335,47 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result.ok else 1
 
     if args.command == "switch":
-        result = engine.switch(args.profile, args.adapter, args.transport, args.apply)
+        try:
+            result = engine.switch(args.profile, args.adapter, args.transport, args.apply)
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         _save_runtime(engine.config, engine.state, engine.registry, config_path, state_path, registry_path)
         print(json.dumps(result.__dict__, indent=2))
         return 0 if result.ok else 1
 
     if args.command == "status":
-        print(json.dumps(engine.status(args.profile), indent=2))
+        try:
+            print(json.dumps(_status_payload(config, state, registry, args.profile), indent=2))
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         return 0
 
     if args.command == "healthcheck":
-        result = engine.healthcheck(args.profile)
+        try:
+            result = engine.healthcheck(args.profile)
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         _save_runtime(engine.config, engine.state, engine.registry, config_path, state_path, registry_path)
-        print(json.dumps(result.__dict__, indent=2))
+        payload = {
+            "profile": args.profile,
+            "adapter": result.current.get("adapter", ""),
+            "transport": result.current.get("transport", ""),
+            "dry_run": result.dry_run,
+            "result": "ok" if result.ok else "failed",
+            "message": result.healthcheck.get("message", result.message),
+        }
+        print(json.dumps(payload, indent=2))
         return 0 if result.ok else 1
 
     if args.command == "rollback":
-        result = engine.rollback(args.profile, args.apply)
+        try:
+            result = engine.rollback(args.profile, args.apply)
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         _save_runtime(engine.config, engine.state, engine.registry, config_path, state_path, registry_path)
         print(json.dumps(result.__dict__, indent=2))
         return 0 if result.ok else 1
@@ -225,16 +386,23 @@ def main(argv: list[str] | None = None) -> int:
             print("[]")
             return 0
         lines = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        print(json.dumps([item for item in lines if item["profile"] == args.profile], indent=2))
+        if args.profile:
+            lines = [item for item in lines if item["profile"] == args.profile]
+        print(json.dumps(lines[-args.limit :], indent=2))
         return 0
 
     if args.command == "registry" and args.registry_command == "check":
-        conflicts = registry.check_conflicts()
-        print(json.dumps({"ok": not conflicts, "conflicts": conflicts}, indent=2))
+        computed_registry, issues = _registry_view(config, state, registry)
+        conflicts = issues + computed_registry.check_conflicts()
+        print(json.dumps({"ok": not conflicts, "conflicts": conflicts, "owners": {k: asdict(v) for k, v in computed_registry.owners.items()}}, indent=2))
         return 0 if not conflicts else 1
 
     if args.command == "cleanup":
-        result = engine.cleanup(args.profile, args.apply, args.dry_run)
+        try:
+            result = engine.cleanup(args.profile, args.apply, args.dry_run)
+        except KeyError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         print(json.dumps(result.__dict__, indent=2))
         return 0 if result.ok else 1
 

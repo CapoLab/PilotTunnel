@@ -30,6 +30,11 @@ class SwitchResult:
     actions: list[str] = field(default_factory=list)
     dry_run: bool = True
     rollback_performed: bool = False
+    current: dict[str, str] = field(default_factory=dict)
+    target: dict[str, str] = field(default_factory=dict)
+    generated_service: str = ""
+    healthcheck: dict[str, str | bool] = field(default_factory=dict)
+    committed: bool = False
 
 
 class SwitchEngine:
@@ -80,7 +85,13 @@ class SwitchEngine:
         context = self._build_context(profile, transport, apply_changes)
         ok, reason = adapter.precheck(context)
         if not ok:
-            return SwitchResult(False, reason, dry_run=not apply_changes)
+            return SwitchResult(
+                False,
+                reason,
+                dry_run=not apply_changes,
+                current={"adapter": profile.active_adapter, "transport": profile.active_transport},
+                target={"adapter": adapter_name, "transport": transport},
+            )
         actions = [
             "precheck",
             "install",
@@ -107,7 +118,15 @@ class SwitchEngine:
             },
             self.paths.audit_path,
         )
-        return SwitchResult(True, "Adapter prepared", actions=actions, dry_run=not apply_changes)
+        return SwitchResult(
+            True,
+            "Adapter prepared",
+            actions=actions,
+            dry_run=not apply_changes,
+            current={"adapter": profile.active_adapter, "transport": profile.active_transport},
+            target={"adapter": adapter_name, "transport": transport},
+            generated_service=adapter.service_name(context),
+        )
 
     def switch(self, profile_name: str, adapter_name: str, transport: str, apply_changes: bool) -> SwitchResult:
         profile = self._find_profile(profile_name)
@@ -126,7 +145,15 @@ class SwitchEngine:
 
             ok, reason = adapter.precheck(context)
             if not ok:
-                raise_or_result = SwitchResult(False, reason, actions=["precheck"], dry_run=not apply_changes)
+                raise_or_result = SwitchResult(
+                    False,
+                    reason,
+                    actions=["precheck"],
+                    dry_run=not apply_changes,
+                    current={"adapter": from_adapter, "transport": from_transport},
+                    target={"adapter": adapter_name, "transport": transport},
+                    generated_service=adapter.service_name(context),
+                )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, raise_or_result)
                 return raise_or_result
 
@@ -150,7 +177,15 @@ class SwitchEngine:
             if conflicts:
                 self.state = backup_state
                 self.registry = backup_registry
-                result = SwitchResult(False, "; ".join(conflicts), actions=actions + ["registry_check"], dry_run=not apply_changes)
+                result = SwitchResult(
+                    False,
+                    "; ".join(conflicts),
+                    actions=actions + ["registry_check"],
+                    dry_run=not apply_changes,
+                    current={"adapter": from_adapter, "transport": from_transport},
+                    target={"adapter": adapter_name, "transport": transport},
+                    generated_service=adapter.service_name(context),
+                )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
                 return result
 
@@ -174,6 +209,10 @@ class SwitchEngine:
                     actions=actions + ["rollback"],
                     dry_run=not apply_changes,
                     rollback_performed=rollback_performed,
+                    current={"adapter": from_adapter, "transport": from_transport},
+                    target={"adapter": adapter_name, "transport": transport},
+                    generated_service=adapter.service_name(context),
+                    healthcheck={"result": False, "message": message},
                 )
                 self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
                 return result
@@ -189,7 +228,17 @@ class SwitchEngine:
             profile.active_adapter = adapter_name
             profile.active_transport = transport
             profile.active_layer = metadata.layer
-            result = SwitchResult(True, message, actions=actions + ["commit"], dry_run=not apply_changes)
+            result = SwitchResult(
+                True,
+                message,
+                actions=actions + ["commit"],
+                dry_run=not apply_changes,
+                current={"adapter": from_adapter, "transport": from_transport},
+                target={"adapter": adapter_name, "transport": transport},
+                generated_service=adapter.service_name(context),
+                healthcheck={"result": True, "message": message},
+                committed=True,
+            )
             self._write_switch_audit(profile.name, from_adapter, from_transport, adapter_name, transport, result)
             return result
 
@@ -199,7 +248,7 @@ class SwitchEngine:
             record = self._record_for(profile_name)
             snapshot = record.rollback_snapshot
             if not snapshot:
-                return SwitchResult(False, "No rollback snapshot available", dry_run=not apply_changes)
+                return SwitchResult(False, "No rollback snapshot available", dry_run=not apply_changes, committed=False)
             previous_adapter = snapshot.get("active_adapter", "")
             previous_transport = snapshot.get("active_transport", "")
             if not previous_adapter:
@@ -207,7 +256,7 @@ class SwitchEngine:
                 record.active_adapter = ""
                 record.active_transport = ""
                 record.healthy = False
-                return SwitchResult(True, "Rolled back to empty state", actions=["rollback"], dry_run=not apply_changes)
+                return SwitchResult(True, "Rolled back to empty state", actions=["rollback"], dry_run=not apply_changes, committed=True)
             return self.switch(profile_name, previous_adapter, previous_transport, apply_changes)
 
     def status(self, profile_name: str) -> dict:
@@ -218,13 +267,22 @@ class SwitchEngine:
         profile = self._find_profile(profile_name)
         record = self._record_for(profile_name)
         if not record.active_adapter:
-            return SwitchResult(False, "No active adapter")
+            return SwitchResult(False, "No active adapter", dry_run=True)
         adapter = self.adapter_factory(record.active_adapter)
         context = self._build_context(profile, record.active_transport, apply_changes=False)
         healthy, message = adapter.healthcheck(context)
         record.healthy = healthy
         record.last_error = "" if healthy else message
-        return SwitchResult(healthy, message)
+        return SwitchResult(
+            healthy,
+            message,
+            dry_run=not context.apply_changes,
+            current={"adapter": record.active_adapter, "transport": record.active_transport},
+            target={"adapter": record.active_adapter, "transport": record.active_transport},
+            generated_service=record.service_name,
+            healthcheck={"result": healthy, "message": message},
+            committed=healthy,
+        )
 
     def cleanup(self, profile_name: str, apply_changes: bool, dry_run: bool) -> SwitchResult:
         profile = self._find_profile(profile_name)
