@@ -14,6 +14,7 @@ SAFE_INSPECT_ACTIONS = {
     "logs",
     "node_status",
     "preflight",
+    "simulate_e2e",
     "status",
 }
 

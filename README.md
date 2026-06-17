@@ -154,6 +154,19 @@ python -m pilottunnel.cli bundle inspect --input .var/pilottunnel/bundles/turkey
 python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/turkey-6221-worker.json --staging-root .var/pilottunnel/staging --confirm IMPORT
 ```
 
+## End-to-End Local Simulation
+
+- This simulates both controller and worker locally.
+- It does not start services.
+- It does not touch systemd, firewall rules, or routes.
+- It is the recommended check before running on real servers.
+
+```bash
+python -m pilottunnel.cli simulate e2e --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli simulate e2e --profile turkey-6221 --adapter rathole --transport tcp --keep-files
+python -m pilottunnel.cli simulate e2e --profile turkey-6221 --adapter backhaul --transport tcpmux --json
+```
+
 ## Single Script, Two Roles
 
 - The same `pilottunnel` CLI is used on Iran and Foreign servers.

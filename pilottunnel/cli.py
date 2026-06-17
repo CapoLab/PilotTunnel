@@ -33,6 +33,7 @@ from .install_plan import apply_install, apply_uninstall, build_install_plan, bu
 from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
+from .simulation import run_e2e_simulation
 from .service_lifecycle import build_service_plan, inspect_service_logs, inspect_service_status
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
@@ -244,6 +245,16 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_import.add_argument("--dry-run", action="store_true")
     bundle_import.add_argument("--force", action="store_true")
     bundle_import.add_argument("--json", action="store_true")
+
+    simulate = subparsers.add_parser("simulate")
+    simulate_subparsers = simulate.add_subparsers(dest="simulate_command", required=True)
+    simulate_e2e = simulate_subparsers.add_parser("e2e")
+    simulate_e2e.add_argument("--profile", required=True)
+    simulate_e2e.add_argument("--adapter", required=True)
+    simulate_e2e.add_argument("--transport", required=True)
+    simulate_e2e.add_argument("--base-root", type=Path, default=None)
+    simulate_e2e.add_argument("--json", action="store_true")
+    simulate_e2e.add_argument("--keep-files", action="store_true")
     return parser
 
 
@@ -280,6 +291,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"binary_{args.binary_command}"
     if args.command == "bundle":
         return f"bundle_{args.bundle_command.replace('-', '_')}"
+    if args.command == "simulate":
+        return f"simulate_{args.simulate_command.replace('-', '_')}"
     if args.command == "install":
         return f"install_{args.install_command}"
     if args.command == "uninstall":
@@ -941,6 +954,21 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(result_payload, indent=2))
         return 0
+
+    if args.command == "simulate" and args.simulate_command == "e2e":
+        try:
+            payload = run_e2e_simulation(
+                profile=args.profile,
+                adapter=args.adapter,
+                transport=args.transport,
+                base_root=args.base_root,
+                keep_files=args.keep_files,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "switch":
         try:

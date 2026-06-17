@@ -260,6 +260,25 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(bundle_path.exists())
         return bundle_path
 
+    def _simulate_e2e(self, adapter: str, transport: str, *, base_root: Path | None = None, keep_files: bool = False, profile: str = "turkey-6221") -> tuple[int, str, dict]:
+        args = [
+            "simulate",
+            "e2e",
+            "--profile",
+            profile,
+            "--adapter",
+            adapter,
+            "--transport",
+            transport,
+        ]
+        if base_root is not None:
+            args.extend(["--base-root", str(base_root)])
+        if keep_files:
+            args.append("--keep-files")
+        code, output = self.run_cli(*args)
+        payload = json.loads(output)
+        return code, output, payload
+
     def _stage_switch(self, adapter: str, transport: str) -> None:
         self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", adapter, "--transport", transport)
 
@@ -1009,6 +1028,138 @@ class CliWorkflowTests(unittest.TestCase):
         actions = [item["action"] for item in lines]
         self.assertIn("bundle-export-worker", actions)
         self.assertIn("bundle-import", actions)
+
+    def test_simulate_e2e_backhaul_tcpmux_succeeds(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["adapter"], "backhaul")
+        self.assertEqual(payload["transport"], "tcpmux")
+        self.assertTrue(payload["healthcheck_summary"]["ok"])
+
+    def test_simulate_e2e_rathole_tcp_succeeds(self) -> None:
+        code, output, payload = self._simulate_e2e("rathole", "tcp")
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["adapter"], "rathole")
+        self.assertEqual(payload["transport"], "tcp")
+
+    def test_simulate_e2e_writes_only_under_base_root(self) -> None:
+        base_root = Path(self.temp_dir.name) / "simulation-base"
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux", base_root=base_root)
+        self.assertEqual(code, 0, msg=output)
+        run_root = Path(payload["controller_root"]).parent
+        self.assertFalse(run_root.exists())
+        self.assertFalse(Path(payload["bundle_path"]).exists())
+
+    def test_simulate_e2e_json_output_is_valid(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(json.loads(output)["ok"])
+        self.assertTrue(payload["ok"])
+
+    def test_simulate_e2e_blocks_path_traversal_base_root(self) -> None:
+        code, output = self.run_cli(
+            "simulate",
+            "e2e",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--base-root",
+            str(Path(self.temp_dir.name) / ".." / "escape"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_simulate_e2e_blocks_path_traversal_profile(self) -> None:
+        code, output = self.run_cli(
+            "simulate",
+            "e2e",
+            "--profile",
+            "../bad",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_simulate_e2e_rejects_unknown_adapter(self) -> None:
+        code, output = self.run_cli(
+            "simulate",
+            "e2e",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "missing",
+            "--transport",
+            "tcp",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_simulate_e2e_rejects_unsupported_backhaul_experimental_transport(self) -> None:
+        code, output = self.run_cli(
+            "simulate",
+            "e2e",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcptun",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_simulate_proves_worker_cannot_perform_controller_only_switch_decision(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        attempt = payload["worker_controller_switch_attempt"]
+        self.assertFalse(attempt["ok"])
+        self.assertIn("blocked for node role 'worker'", attempt["stdout"])
+
+    def test_simulate_output_includes_controller_and_worker_roots(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        self.assertIn("controller_root", payload)
+        self.assertIn("worker_root", payload)
+        self.assertTrue(payload["controller_root"])
+        self.assertTrue(payload["worker_root"])
+
+    def test_simulate_output_includes_bundle_path(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        self.assertIn("bundle_path", payload)
+        self.assertTrue(payload["bundle_path"].endswith("turkey-6221-worker.json"))
+
+    def test_simulate_output_confirms_no_system_changes(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["real_firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+        self.assertFalse(payload["services_started"])
+        self.assertFalse(payload["downloads_performed"])
+
+    def test_simulate_keep_files_preserves_simulation_files(self) -> None:
+        base_root = Path(self.temp_dir.name) / "keep-files"
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux", base_root=base_root, keep_files=True)
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(Path(payload["bundle_path"]).exists())
+        self.assertTrue(Path(payload["controller_root"]).exists())
+        self.assertTrue(Path(payload["worker_root"]).exists())
+
+    def test_simulate_default_cleanup_removes_temp_files(self) -> None:
+        code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
+        self.assertEqual(code, 0, msg=output)
+        self.assertFalse(Path(payload["bundle_path"]).exists())
+        self.assertFalse(Path(payload["controller_root"]).exists())
+        self.assertFalse(Path(payload["worker_root"]).exists())
 
     def test_staged_switch_output_includes_preflight_info(self) -> None:
         self._create_profile()
