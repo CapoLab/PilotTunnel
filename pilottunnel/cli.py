@@ -35,7 +35,7 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .readiness import build_readiness_report
 from .simulation import run_e2e_simulation
-from .service_lifecycle import build_service_plan, inspect_service_logs, inspect_service_status
+from .service_lifecycle import build_service_plan, inspect_service_logs, inspect_service_status, run_daemon_reload
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
@@ -155,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     service_status.add_argument("--transport", required=True)
     service_status.add_argument("--role")
     service_status.add_argument("--install-root", type=Path, default=None)
+    service_status.add_argument("--real-systemd", action="store_true")
     service_status.add_argument("--json", action="store_true")
     service_logs = service_subparsers.add_parser("logs")
     service_logs.add_argument("--profile", required=True)
@@ -163,7 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
     service_logs.add_argument("--role")
     service_logs.add_argument("--install-root", type=Path, default=None)
     service_logs.add_argument("--limit", type=int, default=50)
+    service_logs.add_argument("--real-systemd", action="store_true")
     service_logs.add_argument("--json", action="store_true")
+    service_daemon_reload = service_subparsers.add_parser("daemon-reload")
+    service_daemon_reload.add_argument("--real-systemd", action="store_true")
+    service_daemon_reload.add_argument("--confirm")
+    service_daemon_reload.add_argument("--json", action="store_true")
 
     switch = subparsers.add_parser("switch")
     switch.add_argument("--profile", required=True)
@@ -314,7 +320,7 @@ def _action_name(args: argparse.Namespace) -> str | None:
     if args.command == "uninstall":
         return f"uninstall_{args.uninstall_command}"
     if args.command == "service":
-        return f"service_{args.service_command}"
+        return f"service_{args.service_command.replace('-', '_')}"
     if args.command == "profile":
         return f"profile_{args.profile_command}"
     if args.command == "staged":
@@ -855,13 +861,17 @@ def main(argv: list[str] | None = None) -> int:
         try:
             profile_name = validate_profile_name(args.profile)
             profile = get_profile(config, profile_name)
+            requested_role = canonical_role(args.role) if args.role else None
+            if requested_role and config.node.initialized and requested_role != config.node.normalized_role:
+                raise ValueError(f"Requested service role '{requested_role}' does not match initialized node role '{config.node.normalized_role}'")
             payload = inspect_service_status(
                 profile=profile,
                 adapter_name=args.adapter,
                 transport=args.transport,
-                role=args.role,
+                role=requested_role or config.node.normalized_role or profile.role,
                 paths=switch_paths,
                 install_root=args.install_root,
+                real_systemd=args.real_systemd,
             )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
@@ -873,20 +883,33 @@ def main(argv: list[str] | None = None) -> int:
         try:
             profile_name = validate_profile_name(args.profile)
             profile = get_profile(config, profile_name)
+            requested_role = canonical_role(args.role) if args.role else None
+            if requested_role and config.node.initialized and requested_role != config.node.normalized_role:
+                raise ValueError(f"Requested service role '{requested_role}' does not match initialized node role '{config.node.normalized_role}'")
             payload = inspect_service_logs(
                 profile=profile,
                 adapter_name=args.adapter,
                 transport=args.transport,
-                role=args.role,
+                role=requested_role or config.node.normalized_role or profile.role,
                 paths=switch_paths,
                 install_root=args.install_root,
                 limit=args.limit,
+                real_systemd=args.real_systemd,
             )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "service" and args.service_command == "daemon-reload":
+        payload = run_daemon_reload(
+            paths=switch_paths,
+            confirm=args.confirm,
+            real_systemd=args.real_systemd,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "bundle" and args.bundle_command == "export-worker":
         try:

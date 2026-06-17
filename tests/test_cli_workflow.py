@@ -1,6 +1,7 @@
 import io
 import json
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -778,6 +779,7 @@ class CliWorkflowTests(unittest.TestCase):
             "backhaul",
             "--transport",
             "tcpmux",
+            "--real-systemd",
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -800,6 +802,7 @@ class CliWorkflowTests(unittest.TestCase):
             "tcpmux",
             "--limit",
             "10",
+            "--real-systemd",
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -807,6 +810,327 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["limit"], 10)
         self.assertIn("Windows host detected", payload["warning"])
         mock_run.assert_not_called()
+
+    def test_service_daemon_reload_refuses_without_real_systemd(self) -> None:
+        code, output = self.run_cli("service", "daemon-reload", "--confirm", "DAEMON_RELOAD")
+        self.assertEqual(code, 1)
+        self.assertIn("--real-systemd", output)
+
+    def test_service_daemon_reload_refuses_without_confirm_daemon_reload(self) -> None:
+        with self._mock_real_systemd():
+            code, output = self.run_cli("service", "daemon-reload", "--real-systemd")
+        self.assertEqual(code, 1)
+        self.assertIn("DAEMON_RELOAD", output)
+
+    def test_service_daemon_reload_refuses_on_windows_mock(self) -> None:
+        with self._mock_real_systemd(is_linux=False):
+            code, output = self.run_cli("service", "daemon-reload", "--real-systemd", "--confirm", "DAEMON_RELOAD")
+        self.assertEqual(code, 1)
+        self.assertIn("Linux-only", output)
+
+    def test_service_daemon_reload_refuses_when_systemd_unavailable(self) -> None:
+        with self._mock_real_systemd(systemctl_available=False):
+            code, output = self.run_cli("service", "daemon-reload", "--real-systemd", "--confirm", "DAEMON_RELOAD")
+        self.assertEqual(code, 1)
+        self.assertIn("unavailable", output)
+
+    def test_service_daemon_reload_executes_only_mocked_daemon_reload_when_gates_pass(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+
+            class Completed:
+                returncode = 0
+                stdout = "ok"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli("service", "daemon-reload", "--real-systemd", "--confirm", "DAEMON_RELOAD")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(calls, [["systemctl", "daemon-reload"]])
+        self.assertTrue(payload["daemon_reload_executed"])
+        self.assertTrue(payload["real_systemd_touched"])
+
+    def test_service_daemon_reload_does_not_start_stop_enable_disable_services(self) -> None:
+        def fake_run(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "ok"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli("service", "daemon-reload", "--real-systemd", "--confirm", "DAEMON_RELOAD")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertFalse(payload["service_started"])
+        self.assertFalse(payload["service_stopped"])
+        self.assertFalse(payload["service_enabled"])
+        self.assertFalse(payload["service_disabled"])
+
+    def test_service_status_real_systemd_is_read_only_and_timeout_safe(self) -> None:
+        self._create_profile()
+
+        def fake_run(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 2.0), output="partial", stderr="timed out")
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "status",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["timed_out"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["service_started"])
+
+    def test_service_logs_real_systemd_is_read_only_and_timeout_safe(self) -> None:
+        self._create_profile()
+
+        def fake_run(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 2.0), output="partial", stderr="timed out")
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            code, output = self.run_cli(
+                "service",
+                "logs",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["timed_out"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["service_enabled"])
+
+    def test_service_status_and_logs_sanitize_output(self) -> None:
+        self._create_profile()
+        responses = [
+            type("Completed", (), {"returncode": 0, "stdout": "status\x00line\r\n", "stderr": "warn\r\n"})(),
+            type("Completed", (), {"returncode": 0, "stdout": "active\r\n", "stderr": ""})(),
+            type("Completed", (), {"returncode": 0, "stdout": "enabled\r\n", "stderr": ""})(),
+            type("Completed", (), {"returncode": 0, "stdout": "log\x00entry\r\nnext", "stderr": "err\r\n"})(),
+        ]
+
+        def fake_run(command, **kwargs):
+            return responses.pop(0)
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            status_code, status_output = self.run_cli(
+                "service",
+                "status",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+            logs_code, logs_output = self.run_cli(
+                "service",
+                "logs",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+        self.assertEqual(status_code, 0)
+        self.assertEqual(logs_code, 0)
+        status_payload = json.loads(status_output)
+        logs_payload = json.loads(logs_output)
+        self.assertEqual(status_payload["stdout"], "statusline")
+        self.assertEqual(status_payload["stderr"], "warn")
+        self.assertEqual(status_payload["is_active"], "active")
+        self.assertEqual(status_payload["is_enabled"], "enabled")
+        self.assertEqual(logs_payload["entries"], ["logentry", "next"])
+        self.assertEqual(logs_payload["stderr"], "err")
+
+    def test_service_status_and_logs_return_warnings_when_systemd_unavailable(self) -> None:
+        self._create_profile()
+        with self._mock_real_systemd(systemctl_available=False, journalctl_available=False):
+            status_code, status_output = self.run_cli(
+                "service",
+                "status",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+            logs_code, logs_output = self.run_cli(
+                "service",
+                "logs",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+        self.assertEqual(status_code, 0)
+        self.assertEqual(logs_code, 0)
+        self.assertIn("unavailable", json.loads(status_output)["warning"])
+        self.assertIn("unavailable", json.loads(logs_output)["warning"])
+
+    def test_service_status_unknown_adapter_rejected(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "status",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "missing",
+            "--transport",
+            "tcp",
+            "--real-systemd",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_service_status_unsupported_backhaul_experimental_transport_rejected(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "service",
+            "status",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcptun",
+            "--real-systemd",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    def test_real_systemd_status_role_aware_service_names_still_correct_for_controller_worker(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-host",
+            "127.0.0.1",
+            "--target-port",
+            "6221",
+            "--role",
+            "iran",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+
+        def fake_run(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "ok"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            controller_code, controller_output = self.run_cli(
+                "service",
+                "status",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+        self.assertEqual(controller_code, 0)
+        self.assertTrue(json.loads(controller_output)["service_name"].endswith("controller.service"))
+
+        self.run_cli("init", "--force", "--role", "worker")
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            worker_code, worker_output = self.run_cli(
+                "service",
+                "status",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+        self.assertEqual(worker_code, 0)
+        self.assertTrue(json.loads(worker_output)["service_name"].endswith("worker.service"))
+
+    def test_audit_records_daemon_reload_status_and_logs_attempts(self) -> None:
+        self._create_profile()
+
+        def fake_run(command, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = "ok"
+                stderr = ""
+
+            return Completed()
+
+        with self._mock_real_systemd(subprocess_side_effect=fake_run):
+            self.run_cli(
+                "service",
+                "status",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+            self.run_cli(
+                "service",
+                "logs",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-systemd",
+            )
+            self.run_cli("service", "daemon-reload", "--real-systemd", "--confirm", "DAEMON_RELOAD")
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        actions = [item["action"] for item in lines]
+        self.assertIn("service-status", actions)
+        self.assertIn("service-logs", actions)
+        self.assertIn("service-daemon-reload", actions)
 
     def test_preflight_returns_structured_host_info(self) -> None:
         code, output = self.run_cli("preflight")
@@ -1366,6 +1690,35 @@ class CliWorkflowTests(unittest.TestCase):
         stack.enter_context(patch("pilottunnel.install_plan._is_linux_host", return_value=is_linux))
         stack.enter_context(patch("pilottunnel.install_plan._is_admin_or_root", return_value=is_root))
         stack.enter_context(patch("pilottunnel.cli.build_readiness_report", return_value=readiness_report or self._readiness_ok()))
+        return stack
+
+    def _mock_real_systemd(
+        self,
+        *,
+        is_linux: bool = True,
+        systemctl_available: bool = True,
+        journalctl_available: bool = True,
+        is_root: bool = True,
+        subprocess_side_effect=None,
+    ) -> ExitStack:
+        stack = ExitStack()
+        platform_name = "Linux" if is_linux else "Windows"
+        stack.enter_context(patch("pilottunnel.service_lifecycle.platform.system", return_value=platform_name))
+        stack.enter_context(patch("pilottunnel.service_lifecycle._is_linux", return_value=is_linux))
+        stack.enter_context(patch("pilottunnel.service_lifecycle._is_root", return_value=is_root))
+
+        def which_side_effect(command: str) -> str | None:
+            if command == "systemctl":
+                return "/usr/bin/systemctl" if systemctl_available else None
+            if command == "journalctl":
+                return "/usr/bin/journalctl" if journalctl_available else None
+            return f"/usr/bin/{command}"
+
+        stack.enter_context(patch("pilottunnel.service_lifecycle.shutil.which", side_effect=which_side_effect))
+        if subprocess_side_effect is not None:
+            stack.enter_context(patch("pilottunnel.service_lifecycle.subprocess.run", side_effect=subprocess_side_effect))
+        else:
+            stack.enter_context(patch("pilottunnel.service_lifecycle.subprocess.run"))
         return stack
 
     def test_binary_import_backhaul_from_local_temp_file(self) -> None:

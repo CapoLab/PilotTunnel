@@ -138,6 +138,19 @@ python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhau
 python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --limit 50
 ```
 
+## Real Systemd Read-Only And Daemon-Reload Gate
+
+- `service status` and `service logs` can read from real systemd only with `--real-systemd`.
+- `service daemon-reload` requires exact confirmation with `--confirm DAEMON_RELOAD`.
+- Service start, stop, restart, enable, and disable are still blocked.
+- Firewall rules, routes, and interfaces remain untouched.
+
+```bash
+python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_RELOAD
+```
+
 ## Two-Sided Controller/Worker Bundles
 
 - One unified CLI is used on both sides.

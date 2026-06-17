@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -112,6 +113,7 @@ def inspect_service_status(
     paths: SwitchPaths,
     install_root: Path | None = None,
     timeout_seconds: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+    real_systemd: bool = False,
 ) -> dict:
     planned_role = _resolve_role(profile, role)
     _validate_service_inputs(profile.name, adapter_name, transport, planned_role, install_root)
@@ -131,67 +133,63 @@ def inspect_service_status(
 
     service_name = adapter.service_name(context)
     unit_path = _service_unit_path(service_name, install_root)
-    if platform.system().lower().startswith("win"):
-        return {
-            "ok": False,
-            "warning": "Windows host detected; systemd status inspection is unavailable",
-            "service_name": service_name,
-            "unit_path": str(unit_path),
-            "profile": profile.name,
-            "role": planned_role,
-            "adapter": adapter_name,
-            "transport": transport,
-            "status_command": "",
-            "stdout": "",
-            "stderr": "",
-            "timed_out": False,
-            "checked_at": _checked_at(),
-            "real_systemd_touched": False,
-            "service_started": False,
-            "service_stopped": False,
-            "firewall_touched": False,
-            "routes_touched": False,
-        }
+    if not real_systemd:
+        payload = _inspection_disabled_payload(
+            action="service-status",
+            warning="Real systemd status inspection is disabled by default. Use --real-systemd.",
+            service_name=service_name,
+            unit_path=str(unit_path),
+            profile=profile.name,
+            role=planned_role,
+            adapter=adapter_name,
+            transport=transport,
+        )
+        _audit("service-status", profile.name, payload, path=paths.audit_path)
+        return payload
 
-    if not shutil.which("systemctl"):
-        return {
-            "ok": False,
-            "warning": "systemctl is unavailable on this host",
-            "service_name": service_name,
-            "unit_path": str(unit_path),
-            "profile": profile.name,
-            "role": planned_role,
-            "adapter": adapter_name,
-            "transport": transport,
-            "status_command": "",
-            "stdout": "",
-            "stderr": "",
-            "timed_out": False,
-            "checked_at": _checked_at(),
-            "real_systemd_touched": False,
-            "service_started": False,
-            "service_stopped": False,
-            "firewall_touched": False,
-            "routes_touched": False,
-        }
+    unavailable = _real_systemd_unavailable_payload(
+        action="service-status",
+        service_name=service_name,
+        unit_path=str(unit_path),
+        profile=profile.name,
+        role=planned_role,
+        adapter=adapter_name,
+        transport=transport,
+        require_journal=False,
+    )
+    if unavailable is not None:
+        _audit("service-status", profile.name, unavailable, path=paths.audit_path)
+        return unavailable
 
-    command = ["systemctl", "show", service_name, "--no-pager", "--property=Id,LoadState,ActiveState,SubState,FragmentPath"]
-    result = _run_command(command, timeout_seconds=timeout_seconds)
+    status_command = ["systemctl", "status", service_name, "--no-pager"]
+    active_command = ["systemctl", "is-active", service_name]
+    enabled_command = ["systemctl", "is-enabled", service_name]
+    status_result = _run_command(status_command, timeout_seconds=timeout_seconds)
+    active_result = _run_command(active_command, timeout_seconds=timeout_seconds)
+    enabled_result = _run_command(enabled_command, timeout_seconds=timeout_seconds)
     payload = {
-        "ok": result["returncode"] == 0 and not result.get("timed_out", False),
+        "ok": status_result["returncode"] == 0 and not status_result.get("timed_out", False),
         "service_name": service_name,
         "unit_path": str(unit_path),
         "profile": profile.name,
         "role": planned_role,
         "adapter": adapter_name,
         "transport": transport,
-        "status_command": " ".join(command),
-        "stdout": result["stdout"],
-        "stderr": result["stderr"],
-        "timed_out": result["timed_out"],
+        "status_command": " ".join(status_command),
+        "command_executed": " ".join(status_command),
+        "exit_code": status_result["returncode"],
+        "stdout": status_result["stdout"],
+        "stderr": status_result["stderr"],
+        "timed_out": status_result["timed_out"],
+        "is_active": _sanitize_output(active_result["stdout"]) if active_result["stdout"] else "",
+        "is_enabled": _sanitize_output(enabled_result["stdout"]) if enabled_result["stdout"] else "",
+        "read_only": True,
+        "real_systemd": True,
         "real_systemd_touched": False,
         "service_started": False,
         "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
         "firewall_touched": False,
         "routes_touched": False,
         "checked_at": _checked_at(),
@@ -210,6 +208,7 @@ def inspect_service_logs(
     install_root: Path | None = None,
     limit: int = 50,
     timeout_seconds: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+    real_systemd: bool = False,
 ) -> dict:
     planned_role = _resolve_role(profile, role)
     _validate_service_inputs(profile.name, adapter_name, transport, planned_role, install_root)
@@ -229,51 +228,35 @@ def inspect_service_logs(
 
     service_name = adapter.service_name(context)
     unit_path = _service_unit_path(service_name, install_root)
-    if platform.system().lower().startswith("win"):
-        return {
-            "ok": False,
-            "warning": "Windows host detected; journal inspection is unavailable",
-            "service_name": service_name,
-            "unit_path": str(unit_path),
-            "profile": profile.name,
-            "role": planned_role,
-            "adapter": adapter_name,
-            "transport": transport,
-            "limit": limit,
-            "entries": [],
-            "logs_command": "",
-            "stderr": "",
-            "timed_out": False,
-            "checked_at": _checked_at(),
-            "real_systemd_touched": False,
-            "service_started": False,
-            "service_stopped": False,
-            "firewall_touched": False,
-            "routes_touched": False,
-        }
+    if not real_systemd:
+        payload = _inspection_disabled_payload(
+            action="service-logs",
+            warning="Real systemd log inspection is disabled by default. Use --real-systemd.",
+            service_name=service_name,
+            unit_path=str(unit_path),
+            profile=profile.name,
+            role=planned_role,
+            adapter=adapter_name,
+            transport=transport,
+            limit=limit,
+        )
+        _audit("service-logs", profile.name, payload, path=paths.audit_path)
+        return payload
 
-    if not shutil.which("journalctl"):
-        return {
-            "ok": False,
-            "warning": "journalctl is unavailable on this host",
-            "service_name": service_name,
-            "unit_path": str(unit_path),
-            "profile": profile.name,
-            "role": planned_role,
-            "adapter": adapter_name,
-            "transport": transport,
-            "limit": limit,
-            "entries": [],
-            "logs_command": "",
-            "stderr": "",
-            "timed_out": False,
-            "checked_at": _checked_at(),
-            "real_systemd_touched": False,
-            "service_started": False,
-            "service_stopped": False,
-            "firewall_touched": False,
-            "routes_touched": False,
-        }
+    unavailable = _real_systemd_unavailable_payload(
+        action="service-logs",
+        service_name=service_name,
+        unit_path=str(unit_path),
+        profile=profile.name,
+        role=planned_role,
+        adapter=adapter_name,
+        transport=transport,
+        require_journal=True,
+        limit=limit,
+    )
+    if unavailable is not None:
+        _audit("service-logs", profile.name, unavailable, path=paths.audit_path)
+        return unavailable
 
     command = ["journalctl", "-u", service_name, "--no-pager", "-n", str(limit)]
     result = _run_command(command, timeout_seconds=timeout_seconds)
@@ -288,17 +271,119 @@ def inspect_service_logs(
         "transport": transport,
         "limit": limit,
         "logs_command": " ".join(command),
+        "command_executed": " ".join(command),
+        "exit_code": result["returncode"],
         "entries": entries,
         "stderr": result["stderr"],
         "timed_out": result["timed_out"],
+        "read_only": True,
+        "real_systemd": True,
         "real_systemd_touched": False,
         "service_started": False,
         "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
         "firewall_touched": False,
         "routes_touched": False,
         "checked_at": _checked_at(),
     }
     _audit("service-logs", profile.name, payload, path=paths.audit_path)
+    return payload
+
+
+def run_daemon_reload(
+    *,
+    paths: SwitchPaths,
+    confirm: str | None,
+    real_systemd: bool,
+    timeout_seconds: float = DEFAULT_SERVICE_TIMEOUT_SECONDS,
+) -> dict:
+    attempt = {
+        "real_systemd": real_systemd,
+        "confirm": confirm or "",
+        "read_only": False,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": False,
+    }
+    if not real_systemd:
+        payload = {
+            "ok": False,
+            "message": "Refusing daemon-reload without --real-systemd",
+            "daemon_reload_executed": False,
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-daemon-reload", "local-node", payload, path=paths.audit_path)
+        return payload
+    if confirm != "DAEMON_RELOAD":
+        payload = {
+            "ok": False,
+            "message": "Refusing daemon-reload without --confirm DAEMON_RELOAD",
+            "daemon_reload_executed": False,
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-daemon-reload", "local-node", payload, path=paths.audit_path)
+        return payload
+    if not _is_linux():
+        payload = {
+            "ok": False,
+            "message": "Real systemd daemon-reload is Linux-only",
+            "daemon_reload_executed": False,
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-daemon-reload", "local-node", payload, path=paths.audit_path)
+        return payload
+    if not _systemd_available():
+        payload = {
+            "ok": False,
+            "message": "systemd is unavailable on this host",
+            "daemon_reload_executed": False,
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-daemon-reload", "local-node", payload, path=paths.audit_path)
+        return payload
+    if not _is_root():
+        payload = {
+            "ok": False,
+            "message": "systemctl daemon-reload requires root/admin privileges",
+            "daemon_reload_executed": False,
+            "real_systemd_touched": False,
+            **attempt,
+        }
+        _audit("service-daemon-reload", "local-node", payload, path=paths.audit_path)
+        return payload
+
+    command = ["systemctl", "daemon-reload"]
+    result = _run_command(command, timeout_seconds=timeout_seconds)
+    payload = {
+        "ok": result["returncode"] == 0 and not result["timed_out"],
+        "command_executed": " ".join(command),
+        "exit_code": result["returncode"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "timed_out": result["timed_out"],
+        "real_systemd": True,
+        "read_only": False,
+        "daemon_reload_executed": result["returncode"] == 0 and not result["timed_out"],
+        "real_systemd_touched": True,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "systemctl_executed": True,
+        "checked_at": _checked_at(),
+    }
+    _audit("service-daemon-reload", "local-node", payload, path=paths.audit_path)
     return payload
 
 
@@ -392,22 +477,22 @@ def _run_command(command: list[str], *, timeout_seconds: float) -> dict[str, Any
         )
         return {
             "returncode": completed.returncode,
-            "stdout": completed.stdout or "",
-            "stderr": completed.stderr or "",
+            "stdout": _sanitize_output(completed.stdout or ""),
+            "stderr": _sanitize_output(completed.stderr or ""),
             "timed_out": False,
         }
     except subprocess.TimeoutExpired as exc:
         return {
             "returncode": None,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "command timed out",
+            "stdout": _sanitize_output(exc.stdout or ""),
+            "stderr": _sanitize_output(exc.stderr or "command timed out"),
             "timed_out": True,
         }
     except OSError as exc:
         return {
             "returncode": None,
             "stdout": "",
-            "stderr": str(exc),
+            "stderr": _sanitize_output(str(exc)),
             "timed_out": False,
         }
 
@@ -421,3 +506,121 @@ def _audit(action: str, profile: str, details: dict[str, Any], path: Path | None
 
 def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _inspection_disabled_payload(
+    *,
+    action: str,
+    warning: str,
+    service_name: str,
+    unit_path: str,
+    profile: str,
+    role: str,
+    adapter: str,
+    transport: str,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "ok": False,
+        "warning": warning,
+        "service_name": service_name,
+        "unit_path": unit_path,
+        "profile": profile,
+        "role": role,
+        "adapter": adapter,
+        "transport": transport,
+        "command_executed": "",
+        "exit_code": None,
+        "stdout": "",
+        "stderr": "",
+        "timed_out": False,
+        "read_only": True,
+        "real_systemd": False,
+        "real_systemd_touched": False,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+        "checked_at": _checked_at(),
+    }
+    if action == "service-status":
+        payload["status_command"] = ""
+        payload["is_active"] = ""
+        payload["is_enabled"] = ""
+    if action == "service-logs":
+        payload["limit"] = limit or 50
+        payload["logs_command"] = ""
+        payload["entries"] = []
+    return payload
+
+
+def _real_systemd_unavailable_payload(
+    *,
+    action: str,
+    service_name: str,
+    unit_path: str,
+    profile: str,
+    role: str,
+    adapter: str,
+    transport: str,
+    require_journal: bool,
+    limit: int | None = None,
+) -> dict[str, Any] | None:
+    if platform.system().lower().startswith("win"):
+        return _inspection_disabled_payload(
+            action=action,
+            warning="Windows host detected; real systemd inspection is unavailable",
+            service_name=service_name,
+            unit_path=unit_path,
+            profile=profile,
+            role=role,
+            adapter=adapter,
+            transport=transport,
+            limit=limit,
+        )
+    if not _systemd_available():
+        return _inspection_disabled_payload(
+            action=action,
+            warning="systemd is unavailable on this host",
+            service_name=service_name,
+            unit_path=unit_path,
+            profile=profile,
+            role=role,
+            adapter=adapter,
+            transport=transport,
+            limit=limit,
+        )
+    if require_journal and not shutil.which("journalctl"):
+        return _inspection_disabled_payload(
+            action=action,
+            warning="journalctl is unavailable on this host",
+            service_name=service_name,
+            unit_path=unit_path,
+            profile=profile,
+            role=role,
+            adapter=adapter,
+            transport=transport,
+            limit=limit,
+        )
+    return None
+
+
+def _sanitize_output(value: str) -> str:
+    return value.replace("\x00", "").replace("\r", "").strip()[:800]
+
+
+def _systemd_available() -> bool:
+    return bool(shutil.which("systemctl"))
+
+
+def _is_linux() -> bool:
+    return platform.system().lower().startswith("linux")
+
+
+def _is_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return False
+    return geteuid() == 0
