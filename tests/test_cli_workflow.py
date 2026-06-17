@@ -329,6 +329,11 @@ class CliWorkflowTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
+    def _import_binary(self, adapter: str, content: str = "binary") -> Path:
+        source = self._make_binary_source(adapter, content)
+        self.run_cli("binary", "import", "--adapter", adapter, "--source", str(source), "--version", "manual-v0.0.0")
+        return source
+
     def test_binary_import_backhaul_from_local_temp_file(self) -> None:
         source = self._make_binary_source("backhaul")
         code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
@@ -547,3 +552,415 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["action"], "install-plan")
+
+    def test_install_apply_refuses_without_confirm_apply(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(Path(self.temp_dir.name) / "install-root"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--confirm APPLY", output)
+
+    def test_install_apply_refuses_without_install_root(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--install-root", output)
+
+    def test_install_apply_refuses_dangerous_install_root(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        dangerous_root = Path(self.temp_dir.name).resolve().anchor
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            dangerous_root,
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("dangerous install-root", output)
+
+    def test_install_apply_copies_backhaul_staged_files_into_temp_install_root(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue((install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml").exists())
+        self.assertTrue((install_root / "etc" / "systemd" / "system" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+        self.assertTrue((install_root / "usr" / "local" / "bin" / "backhaul.exe").exists() or (install_root / "usr" / "local" / "bin" / "backhaul").exists())
+        self.assertFalse(payload["real_systemd_touched"])
+
+    def test_install_apply_copies_rathole_staged_files_into_temp_install_root(self) -> None:
+        self._create_profile()
+        self._stage_switch("rathole", "tcp")
+        self._import_binary("rathole")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "rathole",
+            "--transport",
+            "tcp",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue((install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
+
+    def test_install_apply_creates_backup_before_overwrite(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("old-config", encoding="utf-8")
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(any(item["target"].endswith("backhaul-controller.toml") for item in payload["backups_created"]))
+        self.assertEqual(target.with_name(target.name + ".bak.planned").read_text(encoding="utf-8"), "old-config")
+
+    def test_install_apply_writes_manifest(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        manifest_path = Path(payload["manifest_path"])
+        self.assertTrue(manifest_path.exists())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["profile"], "turkey-6221")
+        self.assertFalse(manifest["service_started"])
+
+    def test_install_apply_does_not_call_systemctl(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertFalse(payload["service_started"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+
+    def test_install_apply_does_not_touch_real_system_paths(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+
+    def test_install_rollback_refuses_without_confirm_rollback(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("install", "rollback", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux", "--install-root", str(Path(self.temp_dir.name) / "install-root"))
+        self.assertEqual(code, 1)
+        self.assertIn("--confirm ROLLBACK", output)
+
+    def test_install_rollback_restores_backup_and_removes_new_files(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        config_target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        config_target.parent.mkdir(parents=True, exist_ok=True)
+        config_target.write_text("old-config", encoding="utf-8")
+        self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        unit_target = install_root / "etc" / "systemd" / "system" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"
+        self.assertTrue(unit_target.exists())
+        code, output = self.run_cli(
+            "install",
+            "rollback",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "ROLLBACK",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(config_target.read_text(encoding="utf-8"), "old-config")
+        self.assertFalse(unit_target.exists())
+
+    def test_uninstall_apply_refuses_without_confirm_uninstall(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli("uninstall", "apply", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux", "--install-root", str(Path(self.temp_dir.name) / "install-root"))
+        self.assertEqual(code, 1)
+        self.assertIn("--confirm UNINSTALL", output)
+
+    def test_uninstall_apply_backs_up_and_removes_only_pilottunnel_owned_files(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        extra = install_root / "etc" / "pilottunnel" / "profiles" / "unowned.txt"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("keep", encoding="utf-8")
+        code, output = self.run_cli(
+            "uninstall",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "UNINSTALL",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["removed_files"])
+        self.assertTrue(extra.exists())
+        self.assertTrue(any(item["backup"].endswith(".bak.planned") for item in payload["backups_created"]))
+
+    def test_apply_fails_safely_when_staged_files_missing(self) -> None:
+        self._create_profile()
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("staged files are missing", output.lower())
+
+    def test_install_apply_path_traversal_is_blocked(self) -> None:
+        self._create_profile()
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "../bad",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(Path(self.temp_dir.name) / "install-root"),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_audit_records_apply_rollback_uninstall_attempts(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.run_cli(
+            "install",
+            "rollback",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "ROLLBACK",
+        )
+        self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.run_cli(
+            "uninstall",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "UNINSTALL",
+        )
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        actions = [item["action"] for item in lines]
+        self.assertIn("install-apply", actions)
+        self.assertIn("install-rollback", actions)
+        self.assertIn("uninstall-apply", actions)

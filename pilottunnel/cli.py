@@ -23,7 +23,7 @@ from .config import (
     save_config,
     validate_profile_name,
 )
-from .install_plan import build_install_plan, build_uninstall_plan
+from .install_plan import apply_install, apply_uninstall, build_install_plan, build_uninstall_plan, rollback_install
 from .preflight import run_preflight
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
@@ -78,9 +78,24 @@ def build_parser() -> argparse.ArgumentParser:
     install_plan.add_argument("--adapter", required=True)
     install_plan.add_argument("--transport", required=True)
     install_plan.add_argument("--role")
-    install_plan.add_argument("--staging-root", type=Path, default=None)
+    install_plan.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
     install_plan.add_argument("--install-root", type=Path, default=None)
     install_plan.add_argument("--json", action="store_true")
+    install_apply = install_subparsers.add_parser("apply")
+    install_apply.add_argument("--profile", required=True)
+    install_apply.add_argument("--adapter", required=True)
+    install_apply.add_argument("--transport", required=True)
+    install_apply.add_argument("--role")
+    install_apply.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
+    install_apply.add_argument("--install-root", type=Path, default=None)
+    install_apply.add_argument("--confirm")
+    install_apply.add_argument("--dry-run", action="store_true")
+    install_rollback = install_subparsers.add_parser("rollback")
+    install_rollback.add_argument("--profile", required=True)
+    install_rollback.add_argument("--adapter", required=True)
+    install_rollback.add_argument("--transport", required=True)
+    install_rollback.add_argument("--install-root", type=Path, default=None)
+    install_rollback.add_argument("--confirm")
 
     uninstall = subparsers.add_parser("uninstall")
     uninstall_subparsers = uninstall.add_subparsers(dest="uninstall_command", required=True)
@@ -89,9 +104,17 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_plan.add_argument("--adapter", required=True)
     uninstall_plan.add_argument("--transport", required=True)
     uninstall_plan.add_argument("--role")
-    uninstall_plan.add_argument("--staging-root", type=Path, default=None)
+    uninstall_plan.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
     uninstall_plan.add_argument("--install-root", type=Path, default=None)
     uninstall_plan.add_argument("--json", action="store_true")
+    uninstall_apply = uninstall_subparsers.add_parser("apply")
+    uninstall_apply.add_argument("--profile", required=True)
+    uninstall_apply.add_argument("--adapter", required=True)
+    uninstall_apply.add_argument("--transport", required=True)
+    uninstall_apply.add_argument("--role")
+    uninstall_apply.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
+    uninstall_apply.add_argument("--install-root", type=Path, default=None)
+    uninstall_apply.add_argument("--confirm")
 
     switch = subparsers.add_parser("switch")
     switch.add_argument("--profile", required=True)
@@ -162,7 +185,8 @@ def _paths(args: argparse.Namespace) -> tuple[Path, Path, Path, SwitchPaths]:
     lock_dir = args.lock_dir or Path("/var/lib/pilottunnel/locks")
     work_dir = args.work_dir or Path(tempfile.gettempdir()) / "pilottunnel"
     cache_root = args.cache_root or work_dir
-    staging_root = args.staging_root or (work_dir / ".var" / "pilottunnel" / "staging")
+    command_staging_root = getattr(args, "command_staging_root", None)
+    staging_root = command_staging_root or args.staging_root or (work_dir / ".var" / "pilottunnel" / "staging")
     return config_path, state_path, registry_path, SwitchPaths(lock_dir=lock_dir, work_dir=cache_root, audit_path=audit_path, staging_root=staging_root)
 
 
@@ -436,6 +460,43 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
+    if args.command == "install" and args.install_command == "apply":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = apply_install(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                paths=switch_paths,
+                state=state,
+                install_root=args.install_root,
+                confirm=args.confirm,
+                dry_run=args.dry_run,
+            )
+        except (KeyError, ValueError) as exc:
+            payload = {"ok": False, "action": "install-apply", "message": str(exc)}
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "install" and args.install_command == "rollback":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = rollback_install(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                paths=switch_paths,
+                install_root=args.install_root,
+                confirm=args.confirm,
+            )
+        except (KeyError, ValueError) as exc:
+            payload = {"ok": False, "action": "install-rollback", "message": str(exc)}
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
     if args.command == "uninstall" and args.uninstall_command == "plan":
         if args.apply:
             print(json.dumps({"ok": False, "message": "Real apply execution is not supported for uninstall planning"}, indent=2))
@@ -457,6 +518,25 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "uninstall" and args.uninstall_command == "apply":
+        try:
+            profile_name = validate_profile_name(args.profile)
+            profile = get_profile(config, profile_name)
+            payload = apply_uninstall(
+                profile=profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role=args.role,
+                paths=switch_paths,
+                state=state,
+                install_root=args.install_root,
+                confirm=args.confirm,
+            )
+        except (KeyError, ValueError) as exc:
+            payload = {"ok": False, "action": "uninstall-apply", "message": str(exc)}
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "switch":
         try:

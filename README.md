@@ -109,6 +109,21 @@ python -m pilottunnel.cli install plan --profile turkey-6221 --adapter rathole -
 python -m pilottunnel.cli uninstall plan --profile turkey-6221 --adapter backhaul --transport tcpmux
 ```
 
+## Controlled Install Apply Gate
+
+- Plan-only remains the default.
+- Staged apply still writes only staging files.
+- `install apply` in this stage copies files only into `--install-root`.
+- Services are still not started.
+- `systemctl`, firewall, routes, and interfaces are untouched.
+- Real host mode is still intentionally blocked.
+
+```bash
+python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY
+python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm ROLLBACK
+python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.
