@@ -124,6 +124,20 @@ python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backh
 python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
 ```
 
+## Single Script, Two Roles
+
+- The same `pilottunnel` CLI is used on Iran and Foreign servers.
+- First `init` asks which side this server is unless `--role` is provided.
+- Iran/controller nodes make switching and profile decisions.
+- Foreign/worker nodes prepare passive-side tasks with the same CLI.
+- No separate Iran or Foreign scripts are needed.
+
+```bash
+python -m pilottunnel.cli init --role controller
+python -m pilottunnel.cli init --role worker
+python -m pilottunnel.cli node status
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.

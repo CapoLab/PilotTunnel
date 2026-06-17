@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 DEFAULT_CONFIG_PATH = Path("/etc/pilottunnel/config.json")
 DEFAULT_STATE_PATH = Path("/var/lib/pilottunnel/state.json")
 DEFAULT_REGISTRY_PATH = Path("/var/lib/pilottunnel/registry.json")
 DEFAULT_AUDIT_PATH = Path("/var/log/pilottunnel/audit.log")
 
-Role = Literal["controller", "iran", "worker", "foreign"]
+Role = Literal["controller", "iran", "worker", "foreign", "kharej"]
 
 SUPPORTED_LAYERS = {
     "layer3": False,
@@ -28,7 +30,21 @@ ROLE_ALIASES = {
     "iran": "controller",
     "worker": "worker",
     "foreign": "worker",
+    "kharej": "worker",
 }
+
+
+@dataclass
+class NodeSettings:
+    node_id: str = ""
+    node_role: str = ""
+    initialized_at: str = ""
+    role_alias_used: str = ""
+    normalized_role: str = ""
+
+    @property
+    def initialized(self) -> bool:
+        return bool(self.normalized_role)
 
 
 @dataclass
@@ -88,6 +104,7 @@ class AppConfig:
     worker_role: str = "worker"
     pre_armed_configs: bool = False
     partition_mode: bool = False
+    node: NodeSettings = field(default_factory=NodeSettings)
     profiles: list[Profile] = field(default_factory=list)
 
 
@@ -105,6 +122,22 @@ def canonical_role(value: str) -> str:
     if normalized not in ROLE_ALIASES:
         raise ValueError(f"Unsupported role '{value}'")
     return ROLE_ALIASES[normalized]
+
+
+def normalize_role_alias(value: str) -> str:
+    return value.strip().lower()
+
+
+def build_node_settings(role_value: str, existing_node_id: str = "") -> NodeSettings:
+    alias = normalize_role_alias(role_value)
+    normalized = canonical_role(role_value)
+    return NodeSettings(
+        node_id=existing_node_id or f"node-{uuid4().hex[:12]}",
+        node_role=normalized,
+        initialized_at=datetime.now(timezone.utc).isoformat(),
+        role_alias_used=alias,
+        normalized_role=normalized,
+    )
 
 
 def validate_profile_name(value: str) -> str:
@@ -158,6 +191,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         worker_role=data.get("worker_role", "worker"),
         pre_armed_configs=data.get("pre_armed_configs", False),
         partition_mode=data.get("partition_mode", False),
+        node=NodeSettings(**(data.get("node") or {})),
         profiles=profiles,
     )
 

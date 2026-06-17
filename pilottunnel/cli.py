@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
 from .adapters import ADAPTERS
+from .audit import write_audit_log
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
 from .config import (
     AppConfig,
@@ -17,6 +19,7 @@ from .config import (
     ProfilePorts,
     ProfileSafety,
     SUPPORTED_LAYERS,
+    build_node_settings,
     canonical_role,
     get_profile,
     load_config,
@@ -24,6 +27,7 @@ from .config import (
     validate_profile_name,
 )
 from .install_plan import apply_install, apply_uninstall, build_install_plan, build_uninstall_plan, rollback_install
+from .node_role import action_allowed_for_role, node_status_payload
 from .preflight import run_preflight
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
@@ -43,7 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--apply", action="store_true", help="Allow dangerous operations to write runtime artifacts")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init")
+    init = subparsers.add_parser("init")
+    init.add_argument("--role")
+    init.add_argument("--force", action="store_true")
+
+    node = subparsers.add_parser("node")
+    node_subparsers = node.add_subparsers(dest="node_command", required=True)
+    node_subparsers.add_parser("status")
 
     profile = subparsers.add_parser("profile")
     profile_subparsers = profile.add_subparsers(dest="profile_command", required=True)
@@ -203,6 +213,50 @@ def _load_runtime(args: argparse.Namespace) -> tuple[AppConfig, AppState, PortRe
     )
 
 
+def _action_name(args: argparse.Namespace) -> str | None:
+    if args.command == "adapter":
+        return f"adapter_{args.adapter_command}"
+    if args.command == "binary":
+        return f"binary_{args.binary_command}"
+    if args.command == "install":
+        return f"install_{args.install_command}"
+    if args.command == "uninstall":
+        return f"uninstall_{args.uninstall_command}"
+    if args.command == "profile":
+        return f"profile_{args.profile_command}"
+    if args.command == "staged":
+        return f"staged_{args.staged_command}"
+    if args.command == "registry":
+        return f"registry_{args.registry_command}"
+    if args.command == "node":
+        return "node_status"
+    if args.command in {"switch", "status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
+        return args.command
+    return None
+
+
+def _guard_role(config: AppConfig, action: str | None) -> str | None:
+    role = config.node.normalized_role
+    if not role or action is None:
+        return None
+    if action_allowed_for_role(action, role):
+        return None
+    return f"Action '{action}' is blocked for node role '{role}'"
+
+
+def _prompt_for_role() -> str:
+    print("Select this server role:")
+    print("")
+    print("1. Iran / Controller")
+    print("2. Foreign / Worker")
+    choice = input("> ").strip()
+    if choice == "1":
+        return "controller"
+    if choice == "2":
+        return "worker"
+    raise ValueError("Invalid role selection")
+
+
 def _save_runtime(
     config: AppConfig,
     state: AppState,
@@ -347,8 +401,64 @@ def main(argv: list[str] | None = None) -> int:
     engine = SwitchEngine(config=config, state=state, registry=registry, paths=switch_paths)
 
     if args.command == "init":
+        role_value = args.role
+        if config.node.initialized and not args.force:
+            print(json.dumps({"ok": False, "message": f"Node role already initialized as '{config.node.normalized_role}'. Use --force to overwrite."}, indent=2))
+            return 1
+        if not role_value:
+            if config.node.initialized and args.force:
+                role_value = config.node.normalized_role
+            elif not sys.stdin.isatty():
+                role_value = "controller"
+            else:
+                try:
+                    role_value = _prompt_for_role()
+                except EOFError:
+                    role_value = "controller"
+                except ValueError as exc:
+                    print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+                    return 1
+        try:
+            node = build_node_settings(role_value, existing_node_id=config.node.node_id)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        old_role = config.node.normalized_role
+        config.node = node
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
-        print(json.dumps({"status": "initialized", "config": str(config_path)}))
+        write_audit_log(
+            "init_role",
+            "local-node",
+            {
+                "old_role": old_role,
+                "new_role": node.normalized_role,
+                "force": args.force,
+                "role_alias_used": node.role_alias_used,
+                "node_id": node.node_id,
+            },
+            switch_paths.audit_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "initialized",
+                    "config": str(config_path),
+                    "node_role": node.node_role,
+                    "normalized_role": node.normalized_role,
+                    "initialized": True,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    role_error = _guard_role(config, _action_name(args))
+    if role_error:
+        print(json.dumps({"ok": False, "message": role_error}, indent=2))
+        return 1
+
+    if args.command == "node" and args.node_command == "status":
+        print(json.dumps(node_status_payload(config, str(config_path)), indent=2))
         return 0
 
     if args.command == "profile" and args.profile_command == "create":

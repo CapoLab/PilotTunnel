@@ -76,6 +76,114 @@ class CliWorkflowTests(unittest.TestCase):
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(config_data["profiles"][0]["name"], "turkey-6221")
 
+    def test_init_with_role_controller_stores_normalized_controller_role(self) -> None:
+        code, output = self.run_cli("init", "--role", "controller")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["normalized_role"], "controller")
+        config_data = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(config_data["node"]["normalized_role"], "controller")
+
+    def test_init_with_role_iran_stores_normalized_controller_role(self) -> None:
+        code, output = self.run_cli("init", "--role", "iran")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["normalized_role"], "controller")
+
+    def test_init_with_role_worker_stores_normalized_worker_role(self) -> None:
+        code, output = self.run_cli("init", "--role", "worker")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["normalized_role"], "worker")
+
+    def test_init_with_role_kharej_stores_normalized_worker_role(self) -> None:
+        code, output = self.run_cli("init", "--role", "kharej")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["normalized_role"], "worker")
+
+    def test_init_refuses_to_overwrite_role_without_force(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        code, output = self.run_cli("init", "--role", "worker")
+        self.assertEqual(code, 1)
+        self.assertIn("Use --force", output)
+
+    def test_init_force_changes_role_and_audits_it(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        code, output = self.run_cli("init", "--force", "--role", "worker")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["normalized_role"], "worker")
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        init_role_events = [item for item in lines if item["action"] == "init_role"]
+        self.assertEqual(init_role_events[-1]["details"]["old_role"], "controller")
+        self.assertEqual(init_role_events[-1]["details"]["new_role"], "worker")
+        self.assertTrue(init_role_events[-1]["details"]["force"])
+
+    def test_node_status_shows_initialized_role(self) -> None:
+        self.run_cli("init", "--role", "iran")
+        code, output = self.run_cli("node", "status")
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["initialized"])
+        self.assertEqual(payload["normalized_role"], "controller")
+        self.assertIn("switch", payload["allowed_actions"])
+
+    def test_worker_role_blocks_controller_only_switch_action(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-port",
+            "6221",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+        self.run_cli("init", "--force", "--role", "worker")
+        code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 1)
+        self.assertIn("blocked for node role 'worker'", output)
+
+    def test_controller_role_allows_switch_action(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "profile",
+            "create",
+            "--name",
+            "turkey-6221",
+            "--main-port",
+            "6221",
+            "--target-port",
+            "6221",
+            "--control-port",
+            "49323",
+            "--service-port",
+            "2106",
+            "--check-port",
+            "3106",
+        )
+        code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(output)["ok"])
+
+    def test_safe_inspect_commands_are_allowed_for_both_roles(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        controller_code, _ = self.run_cli("adapter", "list")
+        self.assertEqual(controller_code, 0)
+        self.run_cli("init", "--force", "--role", "worker")
+        worker_code, worker_output = self.run_cli("adapter", "list")
+        self.assertEqual(worker_code, 0)
+        self.assertTrue(json.loads(worker_output))
+
+    def test_invalid_role_is_rejected(self) -> None:
+        code, output = self.run_cli("init", "--role", "boss")
+        self.assertEqual(code, 1)
+        self.assertIn("Unsupported role", output)
+
     def test_duplicate_profile_create_is_blocked(self) -> None:
         self.run_cli("init")
         self.run_cli("profile", "create", "--name", "turkey-6221", "--main-port", "6221", "--target-port", "6221")
