@@ -116,7 +116,7 @@ python -m pilottunnel.cli uninstall plan --profile turkey-6221 --adapter backhau
 - `install apply` in this stage copies files only into `--install-root`.
 - Services are still not started.
 - `systemctl`, firewall, routes, and interfaces are untouched.
-- Real host mode is still intentionally blocked.
+- Real-host file mode is Linux-only, requires `--real-host-files`, and still does not execute `systemctl`.
 
 ```bash
 python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY
@@ -207,6 +207,22 @@ python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter backh
 python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter rathole --transport tcp --json
 ```
 
+## Controlled Real-Host File Apply
+
+- This mode is Linux-only.
+- It requires explicit `--real-host-files` and exact confirmation.
+- It writes files only; it does not start, stop, enable, disable, or restart services.
+- Systemd unit files may be copied, but `systemctl` is not executed.
+- Firewall rules, routes, and interfaces remain untouched.
+- Backups and a manifest are created before and during real-host file apply.
+- Rollback restores backups and removes newly-created files from the manifest.
+
+```bash
+python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_APPLY
+python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_ROLLBACK
+python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_UNINSTALL
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.
@@ -219,6 +235,6 @@ python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter ratho
 ## What Is Still Dry-Run Only
 
 - Real Backhaul or Rathole binary install/execution.
-- Real systemd unit deployment outside explicit render targets.
+- Real service execution after file deployment.
 - Real firewall, route, interface, or SSH/API-based worker coordination.
 - Real tunnel health verification beyond local-only stubs.

@@ -105,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_apply.add_argument("--role")
     install_apply.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
     install_apply.add_argument("--install-root", type=Path, default=None)
+    install_apply.add_argument("--real-host-files", action="store_true")
     install_apply.add_argument("--confirm")
     install_apply.add_argument("--dry-run", action="store_true")
     install_apply.add_argument("--require-healthcheck", action="store_true")
@@ -113,7 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     install_rollback.add_argument("--adapter", required=True)
     install_rollback.add_argument("--transport", required=True)
     install_rollback.add_argument("--install-root", type=Path, default=None)
+    install_rollback.add_argument("--real-host-files", action="store_true")
     install_rollback.add_argument("--confirm")
+    install_rollback.add_argument("--dry-run", action="store_true")
 
     uninstall = subparsers.add_parser("uninstall")
     uninstall_subparsers = uninstall.add_subparsers(dest="uninstall_command", required=True)
@@ -132,7 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_apply.add_argument("--role")
     uninstall_apply.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
     uninstall_apply.add_argument("--install-root", type=Path, default=None)
+    uninstall_apply.add_argument("--real-host-files", action="store_true")
     uninstall_apply.add_argument("--confirm")
+    uninstall_apply.add_argument("--dry-run", action="store_true")
 
     service = subparsers.add_parser("service")
     service_subparsers = service.add_subparsers(dest="service_command", required=True)
@@ -727,6 +732,19 @@ def main(argv: list[str] | None = None) -> int:
         try:
             profile_name = validate_profile_name(args.profile)
             profile = get_profile(config, profile_name)
+            readiness_report = None
+            if args.real_host_files:
+                readiness_report = build_readiness_report(
+                    config=config,
+                    state=state,
+                    registry=registry,
+                    config_path=config_path,
+                    switch_paths=switch_paths,
+                    profile_name=profile_name,
+                    adapter_name=args.adapter,
+                    transport=args.transport,
+                    staging_root=switch_paths.staging_root,
+                )
             payload = apply_install(
                 profile=profile,
                 adapter_name=args.adapter,
@@ -738,6 +756,10 @@ def main(argv: list[str] | None = None) -> int:
                 confirm=args.confirm,
                 dry_run=args.dry_run,
                 require_healthcheck=args.require_healthcheck,
+                real_host_files=args.real_host_files,
+                node_initialized=config.node.initialized,
+                node_role=config.node.normalized_role,
+                readiness_report=readiness_report,
             )
         except (KeyError, ValueError) as exc:
             payload = {"ok": False, "action": "install-apply", "message": str(exc)}
@@ -755,6 +777,8 @@ def main(argv: list[str] | None = None) -> int:
                 paths=switch_paths,
                 install_root=args.install_root,
                 confirm=args.confirm,
+                real_host_files=args.real_host_files,
+                dry_run=args.dry_run,
             )
         except (KeyError, ValueError) as exc:
             payload = {"ok": False, "action": "install-rollback", "message": str(exc)}
@@ -796,6 +820,8 @@ def main(argv: list[str] | None = None) -> int:
                 state=state,
                 install_root=args.install_root,
                 confirm=args.confirm,
+                real_host_files=args.real_host_files,
+                dry_run=args.dry_run,
             )
         except (KeyError, ValueError) as exc:
             payload = {"ok": False, "action": "uninstall-apply", "message": str(exc)}

@@ -4,7 +4,7 @@ import socket
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1338,6 +1338,36 @@ class CliWorkflowTests(unittest.TestCase):
         thread.start()
         return server, port, thread
 
+    def _readiness_ok(self) -> dict:
+        return {
+            "ok": True,
+            "readiness_level": "service_plan_ready",
+            "role_initialized": True,
+            "node_role": "controller",
+            "blockers": [],
+            "warnings": [],
+            "staged_files_exist": True,
+            "binary_imported": True,
+            "install_plan_available": True,
+            "service_plan_available": True,
+        }
+
+    def _mock_real_host(
+        self,
+        *,
+        readiness_report: dict | None = None,
+        is_linux: bool = True,
+        is_root: bool = True,
+    ) -> ExitStack:
+        real_root = Path(self.temp_dir.name) / "real-host"
+        real_root.mkdir(parents=True, exist_ok=True)
+        stack = ExitStack()
+        stack.enter_context(patch("pilottunnel.install_plan.REAL_HOST_ROOT", real_root))
+        stack.enter_context(patch("pilottunnel.install_plan._is_linux_host", return_value=is_linux))
+        stack.enter_context(patch("pilottunnel.install_plan._is_admin_or_root", return_value=is_root))
+        stack.enter_context(patch("pilottunnel.cli.build_readiness_report", return_value=readiness_report or self._readiness_ok()))
+        return stack
+
     def test_binary_import_backhaul_from_local_temp_file(self) -> None:
         source = self._make_binary_source("backhaul")
         code, output = self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
@@ -1961,6 +1991,355 @@ class CliWorkflowTests(unittest.TestCase):
             "--confirm",
             "APPLY",
         )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_real_host_apply_refuses_without_real_host_files(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--confirm",
+            "REAL_FILES_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--real-host-files", output)
+
+    def test_real_host_apply_refuses_without_confirm_real_files_apply(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("REAL_FILES_APPLY", output)
+
+    def test_real_host_apply_refuses_on_windows_mock(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        with self._mock_real_host(is_linux=False):
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("Linux-only", output)
+
+    def test_real_host_apply_refuses_without_root_mock(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        with self._mock_real_host(is_root=False):
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("root/admin", output)
+
+    def test_real_host_apply_refuses_when_readiness_is_blocked(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        readiness = {"readiness_level": "blocked", "blockers": ["blocked"], "role_initialized": True}
+        with self._mock_real_host(readiness_report=readiness):
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("readiness report", output.lower())
+
+    def test_real_host_apply_writes_only_allowed_pilottunnel_paths_when_using_mocked_real_root(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        real_root = Path(self.temp_dir.name) / "real-host"
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        copied = [Path(item["destination"]) for item in payload["copied_files"]]
+        self.assertTrue(all(path.resolve().is_relative_to(real_root.resolve()) for path in copied))
+        self.assertTrue(any(str(path).endswith(".service") for path in copied))
+        self.assertTrue(payload["real_host_files"])
+
+    def test_real_host_apply_creates_backups_before_overwrite(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        real_root = Path(self.temp_dir.name) / "real-host"
+        target = real_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("old-config", encoding="utf-8")
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        backup_path = Path(next(item["backup"] for item in payload["backups_created"] if item["target"].endswith("backhaul-controller.toml")))
+        self.assertEqual(backup_path.read_text(encoding="utf-8"), "old-config")
+        self.assertIn(str(real_root / "var" / "backups" / "pilottunnel"), str(backup_path))
+
+    def test_real_host_apply_writes_manifest(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        manifest_path = Path(payload["manifest_path"])
+        self.assertTrue(manifest_path.exists())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertTrue(manifest["real_host_files"])
+        self.assertFalse(manifest["systemctl_executed"])
+
+    def test_real_host_apply_rollback_restores_backups_and_removes_new_files(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        real_root = Path(self.temp_dir.name) / "real-host"
+        config_target = real_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        config_target.parent.mkdir(parents=True, exist_ok=True)
+        config_target.write_text("old-config", encoding="utf-8")
+        with self._mock_real_host():
+            self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+            code, output = self.run_cli(
+                "install",
+                "rollback",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_ROLLBACK",
+            )
+        self.assertEqual(code, 0, msg=output)
+        self.assertEqual(config_target.read_text(encoding="utf-8"), "old-config")
+        unit_target = real_root / "etc" / "systemd" / "system" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"
+        self.assertFalse(unit_target.exists())
+
+    def test_real_host_uninstall_refuses_without_confirm_real_files_uninstall(self) -> None:
+        self._create_profile()
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "uninstall",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("REAL_FILES_UNINSTALL", output)
+
+    def test_real_host_uninstall_removes_only_pilottunnel_owned_files(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        real_root = Path(self.temp_dir.name) / "real-host"
+        with self._mock_real_host():
+            self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+            extra = real_root / "etc" / "pilottunnel" / "profiles" / "unowned.txt"
+            extra.parent.mkdir(parents=True, exist_ok=True)
+            extra.write_text("keep", encoding="utf-8")
+            code, output = self.run_cli(
+                "uninstall",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_UNINSTALL",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["removed_files"])
+        self.assertTrue(extra.exists())
+
+    def test_real_host_dry_run_writes_nothing(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        real_root = Path(self.temp_dir.name) / "real-host"
+        with self._mock_real_host(is_root=False):
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+                "--dry-run",
+            )
+        self.assertEqual(code, 0, msg=output)
+        self.assertFalse((real_root / "etc" / "pilottunnel").exists())
+        self.assertFalse((real_root / "var" / "lib" / "pilottunnel" / "apply-manifests").exists())
+        payload = json.loads(output)
+        self.assertTrue(payload["dry_run"])
+
+    def test_real_host_apply_does_not_call_systemctl_or_touch_firewall_routes(self) -> None:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "turkey-6221",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertFalse(payload["service_started"])
+        self.assertFalse(payload["service_enabled"])
+        self.assertFalse(payload["systemctl_executed"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+
+    def test_real_host_apply_path_traversal_remains_blocked(self) -> None:
+        with self._mock_real_host():
+            code, output = self.run_cli(
+                "install",
+                "apply",
+                "--profile",
+                "../bad",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--real-host-files",
+                "--confirm",
+                "REAL_FILES_APPLY",
+            )
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", output)
 

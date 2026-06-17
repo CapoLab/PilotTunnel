@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 from dataclasses import asdict
@@ -19,6 +20,8 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .state import AppState
 from .switch_engine import SwitchPaths
+
+REAL_HOST_ROOT = Path("/")
 
 
 def build_install_plan(
@@ -208,24 +211,56 @@ def apply_install(
     confirm: str | None,
     dry_run: bool,
     require_healthcheck: bool = False,
+    real_host_files: bool = False,
+    node_initialized: bool = False,
+    node_role: str | None = None,
+    readiness_report: dict[str, Any] | None = None,
 ) -> dict:
     profile_name = profile.name
     attempt = {
         "adapter": adapter_name,
         "transport": transport,
         "install_root": str(install_root.resolve()) if install_root else None,
-        "confirm": bool(confirm),
+        "confirm": confirm or "",
         "dry_run": dry_run,
         "require_healthcheck": require_healthcheck,
+        "real_host_files": real_host_files,
     }
-    if confirm != "APPLY":
-        _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm APPLY"}, path=paths.audit_path)
-        return _failure("install-apply", "Refusing to write files without --confirm APPLY")
-    if install_root is None:
-        _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "missing install-root"}, path=paths.audit_path)
-        return _failure("install-apply", "Refusing to write files without --install-root")
+    if real_host_files:
+        if confirm != "REAL_FILES_APPLY":
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm REAL_FILES_APPLY"}, path=paths.audit_path)
+            return _failure("install-apply", "Refusing real-host file apply without --confirm REAL_FILES_APPLY")
+        if install_root is not None:
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "install-root not allowed with real-host-files"}, path=paths.audit_path)
+            return _failure("install-apply", "Do not combine --install-root with --real-host-files")
+        if not _is_linux_host():
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "real-host-files requires Linux"}, path=paths.audit_path)
+            return _failure("install-apply", "Real-host file apply is Linux-only")
+        if not node_initialized:
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "node role not initialized"}, path=paths.audit_path)
+            return _failure("install-apply", "Real-host file apply requires an initialized node role")
+        if not dry_run and not _is_admin_or_root():
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "root/admin privileges required"}, path=paths.audit_path)
+            return _failure("install-apply", "Real-host file apply requires root/admin privileges")
+        if readiness_report is None:
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "readiness report unavailable"}, path=paths.audit_path)
+            return _failure("install-apply", "Readiness report is required for real-host file apply")
+        if readiness_report.get("readiness_level") == "blocked" or readiness_report.get("blockers"):
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "readiness blocked", "readiness": readiness_report}, path=paths.audit_path)
+            return _failure("install-apply", "Real-host file apply requires readiness report to be unblocked")
+    else:
+        if confirm == "REAL_FILES_APPLY":
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "real-host-files flag missing"}, path=paths.audit_path)
+            return _failure("install-apply", "Use --real-host-files with --confirm REAL_FILES_APPLY")
+        if confirm != "APPLY":
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm APPLY"}, path=paths.audit_path)
+            return _failure("install-apply", "Refusing to write files without --confirm APPLY")
+        if install_root is None:
+            _audit("install-apply", profile_name, {**attempt, "result": "failed", "reason": "missing install-root"}, path=paths.audit_path)
+            return _failure("install-apply", "Refusing to write files without --install-root")
 
     try:
+        operation_root = _real_host_root() if real_host_files else _validated_apply_root(install_root)
         plan = build_install_plan(
             profile=profile,
             adapter_name=adapter_name,
@@ -233,9 +268,8 @@ def apply_install(
             role=role,
             paths=paths,
             state=state,
-            install_root=install_root,
+            install_root=operation_root,
         )
-        root = _validated_apply_root(install_root)
         healthcheck_plan = build_profile_healthcheck_plan(
             profile=profile,
             node_role=plan["role"],
@@ -265,42 +299,54 @@ def apply_install(
         copied_files: list[dict[str, Any]] = []
         backups_created: list[dict[str, str]] = []
         skipped_files: list[dict[str, str]] = []
+        operation_id = _operation_id(profile_name, adapter_name, transport)
+        backup_root = _backup_root(operation_root, operation_id) if real_host_files else None
         destination_map = {item["kind"]: item["path"] for item in plan["planned_destination_files"]}
-        for kind in ("config", "systemd_unit"):
-            copied, backup = _copy_with_backup(
-                source=Path(source_map[kind]["path"]),
-                destination=Path(destination_map[kind]),
-                install_root=root,
-                dry_run=dry_run,
-            )
-            copied_files.append(copied)
-            if backup:
-                backups_created.append(backup)
-        copied, backup = _copy_with_backup(
-            source=Path(plan["binary"]["imported_path"]),
-            destination=Path(destination_map["binary"]),
-            install_root=root,
-            dry_run=dry_run,
-        )
-        copied_files.append(copied)
-        if backup:
-            backups_created.append(backup)
+        copy_sequence = [
+            ("config", Path(source_map["config"]["path"]), Path(destination_map["config"])),
+            ("systemd_unit", Path(source_map["systemd_unit"]["path"]), Path(destination_map["systemd_unit"])),
+            ("binary", Path(plan["binary"]["imported_path"]), Path(destination_map["binary"])),
+        ]
+        try:
+            for kind, source_path, destination_path in copy_sequence:
+                copied, backup = _copy_with_backup(
+                    source=source_path,
+                    destination=destination_path,
+                    install_root=operation_root,
+                    dry_run=dry_run,
+                    backup_root=backup_root,
+                )
+                copied["kind"] = kind
+                copied_files.append(copied)
+                if backup:
+                    backups_created.append(backup)
+        except OSError as exc:
+            if not dry_run:
+                _rollback_copied_files(operation_root, copied_files)
+            raise ValueError(f"Real-host file apply failed while writing files: {exc}") from exc
 
         manifest = {
             "profile": profile_name,
             "adapter": adapter_name,
             "transport": transport,
             "role": plan["role"],
+            "real_host_files": real_host_files,
+            "node_role": node_role or plan["role"],
+            "operation_id": operation_id,
+            "backup_root": str(backup_root) if backup_root else "",
             "copied_files": copied_files,
             "backups_created": backups_created,
             "skipped_files": skipped_files,
             "timestamp": _timestamp(),
+            "real_systemd_files_written": real_host_files and any(item["kind"] == "systemd_unit" for item in copied_files),
             "real_systemd_touched": False,
             "service_started": False,
+            "service_enabled": False,
+            "systemctl_executed": False,
             "firewall_touched": False,
             "routes_touched": False,
         }
-        manifest_path = _manifest_path(root, profile_name, adapter_name, transport)
+        manifest_path = _manifest_path(operation_root, profile_name, adapter_name, transport)
         if not dry_run:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -315,6 +361,7 @@ def apply_install(
                 "backups_created": backups_created,
                 "healthcheck": healthcheck_summary,
                 "healthcheck_plan": healthcheck_plan,
+                "readiness": readiness_report,
             },
             path=paths.audit_path,
         )
@@ -325,7 +372,7 @@ def apply_install(
             "adapter": adapter_name,
             "transport": transport,
             "role": plan["role"],
-            "install_root": str(root),
+            "install_root": str(operation_root) if not real_host_files else "",
             "copied_files": copied_files,
             "backups_created": backups_created,
             "skipped_files": skipped_files,
@@ -333,8 +380,12 @@ def apply_install(
             "dry_run": dry_run,
             "healthcheck": healthcheck_summary,
             "healthcheck_plan": healthcheck_plan,
+            "real_host_files": real_host_files,
+            "real_systemd_files_written": real_host_files and any(item["kind"] == "systemd_unit" for item in copied_files),
             "real_systemd_touched": False,
             "service_started": False,
+            "service_enabled": False,
+            "systemctl_executed": False,
             "firewall_touched": False,
             "routes_touched": False,
         }
@@ -351,23 +402,41 @@ def rollback_install(
     paths: SwitchPaths,
     install_root: Path | None,
     confirm: str | None,
+    real_host_files: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     profile_name = profile.name
     attempt = {
         "adapter": adapter_name,
         "transport": transport,
         "install_root": str(install_root.resolve()) if install_root else None,
-        "confirm": bool(confirm),
+        "confirm": confirm or "",
+        "real_host_files": real_host_files,
+        "dry_run": dry_run,
     }
-    if confirm != "ROLLBACK":
-        _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "missing confirm ROLLBACK"}, path=paths.audit_path)
-        return _failure("install-rollback", "Refusing rollback without --confirm ROLLBACK")
-    if install_root is None:
-        _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "missing install-root"}, path=paths.audit_path)
-        return _failure("install-rollback", "Refusing rollback without --install-root")
+    if real_host_files:
+        if confirm != "REAL_FILES_ROLLBACK":
+            _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "missing confirm REAL_FILES_ROLLBACK"}, path=paths.audit_path)
+            return _failure("install-rollback", "Refusing real-host rollback without --confirm REAL_FILES_ROLLBACK")
+        if install_root is not None:
+            _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "install-root not allowed with real-host-files"}, path=paths.audit_path)
+            return _failure("install-rollback", "Do not combine --install-root with --real-host-files")
+        if not _is_linux_host():
+            _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "real-host-files requires Linux"}, path=paths.audit_path)
+            return _failure("install-rollback", "Real-host rollback is Linux-only")
+        if not dry_run and not _is_admin_or_root():
+            _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "root/admin privileges required"}, path=paths.audit_path)
+            return _failure("install-rollback", "Real-host rollback requires root/admin privileges")
+    else:
+        if confirm != "ROLLBACK":
+            _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "missing confirm ROLLBACK"}, path=paths.audit_path)
+            return _failure("install-rollback", "Refusing rollback without --confirm ROLLBACK")
+        if install_root is None:
+            _audit("install-rollback", profile_name, {**attempt, "result": "failed", "reason": "missing install-root"}, path=paths.audit_path)
+            return _failure("install-rollback", "Refusing rollback without --install-root")
 
     try:
-        root = _validated_apply_root(install_root)
+        root = _real_host_root() if real_host_files else _validated_apply_root(install_root)
         manifest_path = _manifest_path(root, profile_name, adapter_name, transport)
         if not manifest_path.exists():
             raise ValueError("No apply manifest found for rollback")
@@ -378,17 +447,20 @@ def rollback_install(
             destination = _ensure_under_root(root, Path(item["destination"]))
             if item.get("newly_created"):
                 if destination.exists():
-                    destination.unlink()
+                    if not dry_run:
+                        destination.unlink()
                     removed_files.append(str(destination))
                 continue
             backup_path = item.get("backup_path")
             if backup_path:
                 backup = _ensure_under_root(root, Path(backup_path))
                 if backup.exists():
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(backup, destination)
+                    if not dry_run:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup, destination)
                     restored_files.append({"destination": str(destination), "restored_from": str(backup)})
-        manifest_path.unlink()
+        if not dry_run:
+            manifest_path.unlink()
         _audit(
             "install-rollback",
             profile_name,
@@ -401,11 +473,16 @@ def rollback_install(
             "profile": profile_name,
             "adapter": adapter_name,
             "transport": transport,
-            "install_root": str(root),
+            "install_root": str(root) if not real_host_files else "",
             "restored_files": restored_files,
             "removed_files": removed_files,
+            "dry_run": dry_run,
+            "real_host_files": real_host_files,
+            "real_systemd_files_written": real_host_files and any(path.endswith(".service") for path in removed_files + [item["destination"] for item in restored_files]),
             "real_systemd_touched": False,
             "service_started": False,
+            "service_enabled": False,
+            "systemctl_executed": False,
             "firewall_touched": False,
             "routes_touched": False,
         }
@@ -424,20 +501,38 @@ def apply_uninstall(
     state: AppState,
     install_root: Path | None,
     confirm: str | None,
+    real_host_files: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     profile_name = profile.name
     attempt = {
         "adapter": adapter_name,
         "transport": transport,
         "install_root": str(install_root.resolve()) if install_root else None,
-        "confirm": bool(confirm),
+        "confirm": confirm or "",
+        "real_host_files": real_host_files,
+        "dry_run": dry_run,
     }
-    if confirm != "UNINSTALL":
-        _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm UNINSTALL"}, path=paths.audit_path)
-        return _failure("uninstall-apply", "Refusing uninstall without --confirm UNINSTALL")
-    if install_root is None:
-        _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "missing install-root"}, path=paths.audit_path)
-        return _failure("uninstall-apply", "Refusing uninstall without --install-root")
+    if real_host_files:
+        if confirm != "REAL_FILES_UNINSTALL":
+            _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm REAL_FILES_UNINSTALL"}, path=paths.audit_path)
+            return _failure("uninstall-apply", "Refusing real-host uninstall without --confirm REAL_FILES_UNINSTALL")
+        if install_root is not None:
+            _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "install-root not allowed with real-host-files"}, path=paths.audit_path)
+            return _failure("uninstall-apply", "Do not combine --install-root with --real-host-files")
+        if not _is_linux_host():
+            _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "real-host-files requires Linux"}, path=paths.audit_path)
+            return _failure("uninstall-apply", "Real-host uninstall is Linux-only")
+        if not dry_run and not _is_admin_or_root():
+            _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "root/admin privileges required"}, path=paths.audit_path)
+            return _failure("uninstall-apply", "Real-host uninstall requires root/admin privileges")
+    else:
+        if confirm != "UNINSTALL":
+            _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "missing confirm UNINSTALL"}, path=paths.audit_path)
+            return _failure("uninstall-apply", "Refusing uninstall without --confirm UNINSTALL")
+        if install_root is None:
+            _audit("uninstall-apply", profile_name, {**attempt, "result": "failed", "reason": "missing install-root"}, path=paths.audit_path)
+            return _failure("uninstall-apply", "Refusing uninstall without --install-root")
 
     try:
         plan = build_uninstall_plan(
@@ -447,9 +542,9 @@ def apply_uninstall(
             role=role,
             paths=paths,
             state=state,
-            install_root=install_root,
+            install_root=_real_host_root() if real_host_files else install_root,
         )
-        root = _validated_apply_root(install_root)
+        root = _real_host_root() if real_host_files else _validated_apply_root(install_root)
         manifest_path = _manifest_path(root, profile_name, adapter_name, transport)
         if not manifest_path.exists():
             raise ValueError("No apply manifest found; refusing to remove files that are not recorded as PilotTunnel-owned")
@@ -457,16 +552,19 @@ def apply_uninstall(
         owned_paths = {item["destination"] for item in manifest.get("copied_files", [])}
         backups_created: list[dict[str, str]] = []
         removed_files: list[str] = []
+        backup_root = _backup_root(root, _operation_id(profile_name, adapter_name, transport)) if real_host_files else None
         for target in plan["files_that_would_be_removed"]:
             if target not in owned_paths:
                 continue
             destination = _ensure_under_root(root, Path(target))
             if destination.exists():
-                backup_path = _ensure_under_root(root, Path(_backup_path(str(destination))))
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(destination, backup_path)
+                backup_path = _backup_destination(root=root, backup_root=backup_root, destination=destination) if backup_root else _ensure_under_root(root, Path(_backup_path(str(destination))))
+                if not dry_run:
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(destination, backup_path)
                 backups_created.append({"target": str(destination), "backup": str(backup_path)})
-                destination.unlink()
+                if not dry_run:
+                    destination.unlink()
                 removed_files.append(str(destination))
         _audit(
             "uninstall-apply",
@@ -480,11 +578,16 @@ def apply_uninstall(
             "profile": profile_name,
             "adapter": adapter_name,
             "transport": transport,
-            "install_root": str(root),
+            "install_root": str(root) if not real_host_files else "",
             "removed_files": removed_files,
             "backups_created": backups_created,
+            "dry_run": dry_run,
+            "real_host_files": real_host_files,
+            "real_systemd_files_written": real_host_files and any(path.endswith(".service") for path in removed_files),
             "real_systemd_touched": False,
             "service_stopped": False,
+            "service_enabled": False,
+            "systemctl_executed": False,
             "firewall_touched": False,
             "routes_touched": False,
         }
@@ -548,17 +651,25 @@ def _install_destinations(
     return {"config_path": str(config_path), "unit_path": str(unit_path), "binary_path": str(binary_path)}
 
 
-def _copy_with_backup(*, source: Path, destination: Path, install_root: Path, dry_run: bool) -> tuple[dict[str, Any], dict[str, str] | None]:
+def _copy_with_backup(
+    *,
+    source: Path,
+    destination: Path,
+    install_root: Path,
+    dry_run: bool,
+    backup_root: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, str] | None]:
     src = source.resolve()
     dest = _ensure_under_root(install_root, destination)
-    backup_path = _ensure_under_root(install_root, Path(_backup_path(str(dest))))
     existed = dest.exists()
+    backup_path = _backup_destination(root=install_root, backup_root=backup_root, destination=dest) if backup_root else _ensure_under_root(install_root, Path(_backup_path(str(dest))))
     backup = None
     if existed:
         backup = {"target": str(dest), "backup": str(backup_path)}
     if not dry_run:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if existed:
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(dest, backup_path)
         shutil.copy2(src, dest)
     copied = {
@@ -593,6 +704,13 @@ def _validated_apply_root(install_root: Path) -> Path:
     return root
 
 
+def _real_host_root() -> Path:
+    root = REAL_HOST_ROOT.resolve()
+    if str(root) != root.anchor:
+        _guard_dangerous_root(root)
+    return root
+
+
 def _guard_dangerous_root(root: Path) -> None:
     if not str(root):
         raise ValueError("Invalid install-root")
@@ -614,6 +732,48 @@ def _under_root(root: Path, relative: Path) -> Path:
 def _manifest_path(root: Path, profile: str, adapter: str, transport: str) -> Path:
     filename = f"{profile}-{adapter}-{transport}.json"
     return _under_root(root, Path("var") / "lib" / "pilottunnel" / "apply-manifests" / filename)
+
+
+def _backup_root(root: Path, operation_id: str) -> Path:
+    return _under_root(root, Path("var") / "backups" / "pilottunnel" / operation_id)
+
+
+def _backup_destination(*, root: Path, backup_root: Path | None, destination: Path) -> Path:
+    if backup_root is None:
+        return _ensure_under_root(root, Path(_backup_path(str(destination))))
+    relative = _ensure_under_root(root, destination).relative_to(root)
+    return _ensure_under_root(root, backup_root / relative)
+
+
+def _rollback_copied_files(root: Path, copied_files: list[dict[str, Any]]) -> None:
+    for item in reversed(copied_files):
+        destination = _ensure_under_root(root, Path(item["destination"]))
+        if item.get("newly_created"):
+            if destination.exists():
+                destination.unlink()
+            continue
+        backup_path = item.get("backup_path")
+        if backup_path:
+            backup = _ensure_under_root(root, Path(backup_path))
+            if backup.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, destination)
+
+
+def _operation_id(profile: str, adapter: str, transport: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"{profile}-{adapter}-{transport}-{stamp}"
+
+
+def _is_linux_host() -> bool:
+    return platform.system().lower().startswith("linux")
+
+
+def _is_admin_or_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return False
+    return geteuid() == 0
 
 
 def _host_warnings() -> list[str]:
