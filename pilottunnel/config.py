@@ -14,7 +14,7 @@ DEFAULT_STATE_PATH = Path("/var/lib/pilottunnel/state.json")
 DEFAULT_REGISTRY_PATH = Path("/var/lib/pilottunnel/registry.json")
 DEFAULT_AUDIT_PATH = Path("/var/log/pilottunnel/audit.log")
 
-Role = Literal["controller", "iran", "worker", "foreign", "kharej"]
+Role = Literal["controller", "worker"]
 
 SUPPORTED_LAYERS = {
     "layer3": False,
@@ -24,15 +24,6 @@ SUPPORTED_LAYERS = {
     "xray_based": False,
     "experimental": False,
 }
-
-ROLE_ALIASES = {
-    "controller": "controller",
-    "iran": "controller",
-    "worker": "worker",
-    "foreign": "worker",
-    "kharej": "worker",
-}
-
 
 @dataclass
 class NodeSettings:
@@ -119,23 +110,18 @@ class RemoteWorkerStub:
 
 def canonical_role(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in ROLE_ALIASES:
+    if normalized not in {"controller", "worker"}:
         raise ValueError(f"Unsupported role '{value}'")
-    return ROLE_ALIASES[normalized]
-
-
-def normalize_role_alias(value: str) -> str:
-    return value.strip().lower()
+    return normalized
 
 
 def build_node_settings(role_value: str, existing_node_id: str = "") -> NodeSettings:
-    alias = normalize_role_alias(role_value)
     normalized = canonical_role(role_value)
     return NodeSettings(
         node_id=existing_node_id or f"node-{uuid4().hex[:12]}",
         node_role=normalized,
         initialized_at=datetime.now(timezone.utc).isoformat(),
-        role_alias_used=alias,
+        role_alias_used=normalized,
         normalized_role=normalized,
     )
 

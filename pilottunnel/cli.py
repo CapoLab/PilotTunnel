@@ -521,8 +521,8 @@ def _guard_role(config: AppConfig, action: str | None) -> str | None:
 def _prompt_for_role() -> str:
     print("Select this server role:")
     print("")
-    print("1. Iran / Controller")
-    print("2. Foreign / Worker")
+    print("1. Controller")
+    print("2. Worker")
     choice = input("> ").strip()
     if choice == "1":
         return "controller"

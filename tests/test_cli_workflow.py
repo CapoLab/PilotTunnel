@@ -65,7 +65,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
@@ -87,18 +87,13 @@ class CliWorkflowTests(unittest.TestCase):
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(config_data["node"]["normalized_role"], "controller")
 
-    def test_init_with_role_iran_stores_normalized_controller_role(self) -> None:
-        code, output = self.run_cli("init", "--role", "iran")
+    def test_init_with_role_controller_stores_normalized_controller_role(self) -> None:
+        code, output = self.run_cli("init", "--role", "controller")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output)["normalized_role"], "controller")
 
     def test_init_with_role_worker_stores_normalized_worker_role(self) -> None:
         code, output = self.run_cli("init", "--role", "worker")
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(output)["normalized_role"], "worker")
-
-    def test_init_with_role_kharej_stores_normalized_worker_role(self) -> None:
-        code, output = self.run_cli("init", "--role", "kharej")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output)["normalized_role"], "worker")
 
@@ -131,7 +126,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(init_role_events[-1]["details"]["force"])
 
     def test_node_status_shows_initialized_role(self) -> None:
-        self.run_cli("init", "--role", "iran")
+        self.run_cli("init", "--role", "controller")
         code, output = self.run_cli("node", "status")
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -728,7 +723,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
@@ -1043,7 +1038,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
@@ -1911,7 +1906,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
@@ -3053,7 +3048,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
@@ -3842,7 +3837,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
@@ -4091,7 +4086,7 @@ class CliWorkflowTests(unittest.TestCase):
             "--target-port",
             "38080",
             "--role",
-            "iran",
+            "controller",
             "--control-port",
             "39081",
             "--service-port",
