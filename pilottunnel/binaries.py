@@ -58,8 +58,8 @@ BINARY_SPECS: dict[str, BinarySpec] = {
     "chisel": BinarySpec("chisel", "chisel", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
     "realm": BinarySpec("realm", "realm", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
     "bore": BinarySpec("bore", "bore", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
-    "wstunnel": BinarySpec("wstunnel", "wstunnel", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
-    "udp2raw": BinarySpec("udp2raw", "udp2raw", ("linux-amd64", "linux-arm64"), "provider_required", "official_release"),
+    "wstunnel": BinarySpec("wstunnel", "wstunnel", ("linux-amd64", "linux-arm64", "windows-amd64"), "listed_only", "official_release", notes="Layer7 catalog entry only; not part of the v0.1 provider workflow"),
+    "udp2raw": BinarySpec("udp2raw", "udp2raw", ("linux-amd64", "linux-arm64"), "listed_only", "official_release", notes="Experimental catalog entry only; not part of the v0.1 provider workflow"),
     "ssh_reverse": BinarySpec("ssh_reverse", "ssh", ("linux-amd64", "linux-arm64", "windows-amd64"), "system_dependency", "system_dependency", system_command="ssh"),
 }
 

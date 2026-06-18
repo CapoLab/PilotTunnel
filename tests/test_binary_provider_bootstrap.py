@@ -1,8 +1,11 @@
 import hashlib
+import gzip
 import io
 import json
+import tarfile
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +13,7 @@ from unittest.mock import patch
 from pilottunnel import cli
 from pilottunnel.binaries import all_binary_adapters, binary_spec, current_platform_id, provider_required_adapters
 from pilottunnel.bootstrap import build_bootstrap_command
+from pilottunnel.upstream_sources import SOURCE_SUMMARY_FILENAME, upstream_source
 from testsupport import allocate_tcp_ports, static_http_server
 
 
@@ -149,6 +153,87 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "size_bytes": len(payload),
             }
         return source_root, metadata
+
+    def _sample_asset_name(self, adapter: str, platform_id: str) -> str:
+        sample_names = {
+            ("backhaul", "linux-amd64"): "backhaul_linux_amd64.tar.gz",
+            ("backhaul", "linux-arm64"): "backhaul_linux_arm64.tar.gz",
+            ("rathole", "linux-amd64"): "rathole-x86_64-unknown-linux-gnu.zip",
+            ("rathole", "linux-arm64"): "rathole-aarch64-unknown-linux-musl.zip",
+            ("rathole", "windows-amd64"): "rathole-x86_64-pc-windows-msvc.zip",
+            ("frp", "linux-amd64"): "frp_0.0.1_linux_amd64.tar.gz",
+            ("frp", "linux-arm64"): "frp_0.0.1_linux_arm64.tar.gz",
+            ("frp", "windows-amd64"): "frp_0.0.1_windows_amd64.zip",
+            ("gost", "linux-amd64"): "gost_0.0.1_linux_amd64.tar.gz",
+            ("gost", "linux-arm64"): "gost_0.0.1_linux_arm64.tar.gz",
+            ("gost", "windows-amd64"): "gost_0.0.1_windows_amd64.zip",
+            ("chisel", "linux-amd64"): "chisel_0.0.1_linux_amd64.gz",
+            ("chisel", "linux-arm64"): "chisel_0.0.1_linux_arm64.gz",
+            ("chisel", "windows-amd64"): "chisel_0.0.1_windows_amd64.zip",
+            ("realm", "linux-amd64"): "realm-x86_64-unknown-linux-gnu.tar.gz",
+            ("realm", "linux-arm64"): "realm-aarch64-unknown-linux-gnu.tar.gz",
+            ("realm", "windows-amd64"): "realm-x86_64-pc-windows-msvc.tar.gz",
+            ("bore", "linux-amd64"): "bore-v0.0.1-x86_64-unknown-linux-musl.tar.gz",
+            ("bore", "linux-arm64"): "bore-v0.0.1-aarch64-unknown-linux-musl.tar.gz",
+            ("bore", "windows-amd64"): "bore-v0.0.1-x86_64-pc-windows-msvc.zip",
+        }
+        return sample_names[(adapter, platform_id)]
+
+    def _sample_member_name(self, adapter: str, platform_id: str) -> str:
+        if platform_id.startswith("windows"):
+            executable = f"{binary_spec(adapter).binary_name}.exe"
+            if adapter == "frp":
+                return f"bundle/{executable}"
+            return f"bundle/{executable}"
+        executable = binary_spec(adapter).binary_name
+        if adapter == "frp":
+            return f"bundle/{executable}"
+        return f"bundle/{executable}"
+
+    def _archive_payload(self, archive_type: str, member_name: str, payload: bytes) -> bytes:
+        if archive_type == "raw":
+            return payload
+        if archive_type == "gz":
+            return gzip.compress(payload)
+        if archive_type == "tar.gz":
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+                info = tarfile.TarInfo(name=member_name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+            return buffer.getvalue()
+        if archive_type == "zip":
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, mode="w") as archive:
+                archive.writestr(member_name, payload)
+            return buffer.getvalue()
+        raise AssertionError(f"Unsupported archive type for test fixture: {archive_type}")
+
+    def _fake_release_fixtures(self, adapters: tuple[str, ...] | None = None) -> tuple[dict[str, dict[str, object]], dict[str, bytes]]:
+        platform_id = current_platform_id()
+        release_index: dict[str, dict[str, object]] = {}
+        asset_payloads: dict[str, bytes] = {}
+        selected = adapters or tuple(provider_required_adapters())
+        for adapter in selected:
+            source = upstream_source(adapter)
+            if source.category != "external_binary":
+                continue
+            if platform_id not in source.supported_platforms:
+                continue
+            asset_name = self._sample_asset_name(adapter, platform_id)
+            asset_url = f"https://github.com/{source.repo_slug}/releases/download/v0.0.1/{asset_name}"
+            binary_payload = f"{adapter}-{platform_id}-upstream".encode("utf-8")
+            archive_payload = self._archive_payload(
+                source.archive_handling[platform_id],
+                self._sample_member_name(adapter, platform_id),
+                binary_payload,
+            )
+            release_index[adapter] = {
+                "version": "v0.0.1",
+                "assets": [{"name": asset_name, "url": asset_url}],
+            }
+            asset_payloads[asset_url] = archive_payload
+        return release_index, asset_payloads
 
     def _forbidden_port_candidates(self) -> set[int]:
         return {
@@ -461,6 +546,164 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         help_text = self.capture_help("bootstrap", "apply", "--help")
         self.assertIn("--bundle-file", help_text)
         self.assertNotIn("--bundle-input", help_text)
+
+    def test_binary_source_list_includes_catalog_entries(self) -> None:
+        code, output = self.run_cli(self.base / "source-list", "binary", "source", "list")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        sources = {item["adapter"]: item for item in payload["sources"]}
+        self.assertIn("backhaul", sources)
+        self.assertIn("ssh_reverse", sources)
+        self.assertEqual(sources["ssh_reverse"]["category"], "system_dependency")
+
+    @patch("pilottunnel.upstream_sources._download_asset_bytes")
+    @patch("pilottunnel.upstream_sources._load_release_metadata")
+    def test_binary_source_fetch_dry_run_plans_downloads_without_writing_binaries(self, mock_release, mock_download) -> None:
+        release_index, _asset_payloads = self._fake_release_fixtures()
+        mock_release.side_effect = lambda source, version: release_index[source.adapter]
+        root = self.base / "source-fetch-dry-run"
+        source_dir = root / "provider-source"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "source",
+            "fetch",
+            "--source-dir",
+            str(source_dir),
+            "--dry-run",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertFalse(payload["downloads_performed"])
+        results = {item["adapter"]: item["result"] for item in payload["results"]}
+        self.assertEqual(results["ssh_reverse"], "skipped_system_dependency")
+        if current_platform_id() in upstream_source("backhaul").supported_platforms:
+            self.assertEqual(results["backhaul"], "planned_download")
+        self.assertFalse((source_dir / "rathole" / current_platform_id() / "rathole").exists())
+        self.assertFalse(mock_download.called)
+
+    def test_binary_source_fetch_refuses_without_confirm(self) -> None:
+        root = self.base / "source-fetch-no-confirm"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "source",
+            "fetch",
+            "--source-dir",
+            str(root / "provider-source"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("FETCH_UPSTREAM_BINARIES", output)
+
+    def test_binary_source_fetch_rejects_unknown_adapter(self) -> None:
+        root = self.base / "source-fetch-unknown"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "source",
+            "fetch",
+            "--source-dir",
+            str(root / "provider-source"),
+            "--adapter",
+            "unknown",
+            "--dry-run",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown upstream source adapter", output)
+
+    @patch("pilottunnel.upstream_sources._download_asset_bytes")
+    @patch("pilottunnel.upstream_sources._load_release_metadata")
+    def test_binary_source_fetch_downloads_supported_binaries_and_writes_summary(self, mock_release, mock_download) -> None:
+        release_index, asset_payloads = self._fake_release_fixtures()
+        mock_release.side_effect = lambda source, version: release_index[source.adapter]
+        mock_download.side_effect = lambda url, allowed_hosts: asset_payloads[url]
+        root = self.base / "source-fetch"
+        source_dir = root / "provider-source"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "source",
+            "fetch",
+            "--source-dir",
+            str(source_dir),
+            "--confirm",
+            "FETCH_UPSTREAM_BINARIES",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue((source_dir / SOURCE_SUMMARY_FILENAME).exists())
+        results = {item["adapter"]: item for item in payload["results"]}
+        self.assertEqual(results["ssh_reverse"]["result"], "skipped_system_dependency")
+        for adapter, source in ((adapter, upstream_source(adapter)) for adapter in provider_required_adapters()):
+            if current_platform_id() in source.supported_platforms:
+                self.assertEqual(results[adapter]["result"], "downloaded")
+                self.assertTrue((source_dir / adapter / current_platform_id() / source.binary_name).exists())
+            else:
+                self.assertEqual(results[adapter]["result"], "skipped_unsupported_platform")
+
+    @patch("pilottunnel.upstream_sources._download_asset_bytes")
+    @patch("pilottunnel.upstream_sources._load_release_metadata")
+    def test_binary_source_fetch_blocks_archive_path_traversal(self, mock_release, mock_download) -> None:
+        platform_id = current_platform_id()
+        source = upstream_source("frp")
+        if platform_id not in source.supported_platforms:
+            self.skipTest("Current platform does not support frp test fixture")
+        asset_name = self._sample_asset_name("frp", platform_id)
+        asset_url = f"https://github.com/{source.repo_slug}/releases/download/v0.0.1/{asset_name}"
+        mock_release.return_value = {"version": "v0.0.1", "assets": [{"name": asset_name, "url": asset_url}]}
+        bad_payload = self._archive_payload(source.archive_handling[platform_id], "../frpc", b"blocked")
+        mock_download.return_value = bad_payload
+        root = self.base / "source-fetch-bad-archive"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "source",
+            "fetch",
+            "--source-dir",
+            str(root / "provider-source"),
+            "--adapter",
+            "frp",
+            "--confirm",
+            "FETCH_UPSTREAM_BINARIES",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("path traversal", output.lower())
+
+    @patch("pilottunnel.upstream_sources._download_asset_bytes")
+    @patch("pilottunnel.upstream_sources._load_release_metadata")
+    def test_binary_provider_prepare_fetches_generates_and_verifies_manifest(self, mock_release, mock_download) -> None:
+        release_index, asset_payloads = self._fake_release_fixtures()
+        mock_release.side_effect = lambda source, version: release_index[source.adapter]
+        mock_download.side_effect = lambda url, allowed_hosts: asset_payloads[url]
+        root = self.base / "provider-prepare"
+        source_dir = root / "provider-source"
+        output_path = root / "provider-manifest.json"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "provider",
+            "prepare",
+            "--source-dir",
+            str(source_dir),
+            "--provider-name",
+            "generic-provider",
+            "--base-url",
+            "https://downloads.example.com/pilot",
+            "--platform",
+            current_platform_id(),
+            "--output",
+            str(output_path),
+            "--confirm",
+            "PREPARE_PROVIDER_BINARIES",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(output_path.exists())
+        self.assertTrue(payload["manifest_verification"]["ok"])
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+        self.assertFalse(payload["service_started"])
 
     def test_bootstrap_command_requires_core_inputs(self) -> None:
         with self.assertRaises(ValueError) as exc:

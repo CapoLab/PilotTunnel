@@ -43,6 +43,7 @@ from .service_lifecycle import block_real_service_action, build_service_plan, di
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
 from .state import AppState, load_state, save_state
 from .switch_engine import SwitchEngine, SwitchPaths
+from .upstream_sources import fetch_upstream_sources, list_upstream_sources, prepare_provider_binaries
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -372,6 +373,19 @@ def build_parser() -> argparse.ArgumentParser:
     binary_download_all.add_argument("--force", action="store_true")
     binary_download_all.add_argument("--run-version", action="store_true")
     binary_download_all.add_argument("--json", action="store_true")
+    binary_source = binary_subparsers.add_parser("source")
+    binary_source_subparsers = binary_source.add_subparsers(dest="binary_source_command", required=True)
+    binary_source_list = binary_source_subparsers.add_parser("list")
+    binary_source_list.add_argument("--json", action="store_true")
+    binary_source_fetch = binary_source_subparsers.add_parser("fetch")
+    binary_source_fetch.add_argument("--source-dir", type=Path, required=True)
+    binary_source_fetch.add_argument("--platform", default="auto")
+    binary_source_fetch.add_argument("--adapter", action="append", default=[])
+    binary_source_fetch.add_argument("--version", action="append", default=[])
+    binary_source_fetch.add_argument("--confirm")
+    binary_source_fetch.add_argument("--force", action="store_true")
+    binary_source_fetch.add_argument("--dry-run", action="store_true")
+    binary_source_fetch.add_argument("--json", action="store_true")
     binary_provider = binary_subparsers.add_parser("provider")
     binary_provider_subparsers = binary_provider.add_subparsers(dest="binary_provider_command", required=True)
     binary_provider_inspect = binary_provider_subparsers.add_parser("inspect")
@@ -389,6 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
     binary_provider_verify = binary_provider_subparsers.add_parser("verify-manifest")
     binary_provider_verify.add_argument("--manifest-file", type=Path, required=True)
     binary_provider_verify.add_argument("--json", action="store_true")
+    binary_provider_prepare = binary_provider_subparsers.add_parser("prepare")
+    binary_provider_prepare.add_argument("--source-dir", type=Path, required=True)
+    binary_provider_prepare.add_argument("--provider-name", required=True)
+    binary_provider_prepare.add_argument("--base-url", required=True)
+    binary_provider_prepare.add_argument("--platform", default="auto")
+    binary_provider_prepare.add_argument("--output", type=Path, required=True)
+    binary_provider_prepare.add_argument("--confirm")
+    binary_provider_prepare.add_argument("--json", action="store_true")
 
     bundle = subparsers.add_parser("bundle")
     bundle_subparsers = bundle.add_subparsers(dest="bundle_command", required=True)
@@ -495,6 +517,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
     if args.command == "adapter":
         return f"adapter_{args.adapter_command}"
     if args.command == "binary":
+        if args.binary_command == "source":
+            return f"binary_source_{args.binary_source_command}"
         if args.binary_command == "provider":
             return f"binary_provider_{args.binary_provider_command}"
         return f"binary_{args.binary_command}"
@@ -1787,6 +1811,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
 
+    if args.command == "binary" and args.binary_command == "source" and args.binary_source_command == "list":
+        print(json.dumps(list_upstream_sources(), indent=2))
+        return 0
+
+    if args.command == "binary" and args.binary_command == "source" and args.binary_source_command == "fetch":
+        try:
+            payload = fetch_upstream_sources(
+                source_dir=args.source_dir,
+                platform_id=args.platform,
+                cache_root=switch_paths.work_dir,
+                confirm=args.confirm,
+                force=args.force,
+                dry_run=args.dry_run,
+                adapter_filters=args.adapter,
+                version_filters=args.version,
+                audit_path=switch_paths.audit_path,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
     if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "inspect":
         try:
             payload = inspect_manifest(
@@ -1818,6 +1865,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "verify-manifest":
         try:
             payload = verify_manifest_file(manifest_file=args.manifest_file)
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "prepare":
+        try:
+            payload = prepare_provider_binaries(
+                source_dir=args.source_dir,
+                provider_name=args.provider_name,
+                base_url=args.base_url,
+                platform_id=args.platform,
+                output_path=args.output,
+                cache_root=switch_paths.work_dir,
+                confirm=args.confirm,
+                audit_path=switch_paths.audit_path,
+            )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1

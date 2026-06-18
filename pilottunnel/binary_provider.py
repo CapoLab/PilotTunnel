@@ -119,14 +119,23 @@ def generate_manifest(
     }
 
 
-def verify_manifest_file(*, manifest_file: Path) -> dict[str, Any]:
+def verify_manifest_file(
+    *,
+    manifest_file: Path,
+    required_platforms: tuple[str, ...] | None = None,
+    required_adapters: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     manifest = load_manifest(
         manifest_file=manifest_file,
         allow_provider_host=None,
         require_allowlisted_remote_host=False,
     )
     duplicates = _duplicate_manifest_keys(manifest.binaries)
-    missing_required = _missing_required_entries(manifest.binaries)
+    missing_required = _missing_required_entries(
+        manifest.binaries,
+        required_platforms=required_platforms,
+        required_adapters=required_adapters,
+    )
     warnings: list[str] = []
     if missing_required:
         warnings.append("Manifest is missing required provider binaries")
@@ -643,6 +652,9 @@ def _manifest_entries_from_source(source_root: Path, base_url: str) -> tuple[Pro
     for path in sorted(source_root.rglob("*")):
         if path.is_dir():
             continue
+        relative = path.relative_to(source_root)
+        if relative.as_posix() == "pilottunnel-source-summary.json":
+            continue
         if path.is_symlink():
             resolved = path.resolve()
             if not _is_relative_to(resolved, source_root):
@@ -650,7 +662,6 @@ def _manifest_entries_from_source(source_root: Path, base_url: str) -> tuple[Pro
         resolved_path = path.resolve()
         if not _is_relative_to(resolved_path, source_root):
             raise ValueError(f"Source file escapes source dir: {path}")
-        relative = path.relative_to(source_root)
         if len(relative.parts) != 3:
             raise ValueError(f"Unknown file layout under source dir: {relative.as_posix()}")
         adapter_name, platform_id, filename = relative.parts
@@ -694,12 +705,20 @@ def _duplicate_manifest_keys(entries: tuple[ProviderBinary, ...]) -> list[dict[s
     return duplicates
 
 
-def _missing_required_entries(entries: tuple[ProviderBinary, ...]) -> list[dict[str, str]]:
+def _missing_required_entries(
+    entries: tuple[ProviderBinary, ...],
+    *,
+    required_platforms: tuple[str, ...] | None = None,
+    required_adapters: tuple[str, ...] | None = None,
+) -> list[dict[str, str]]:
     present = {(entry.adapter, entry.platform) for entry in entries}
     missing: list[dict[str, str]] = []
-    for adapter_name in provider_required_adapters():
+    adapters = required_adapters or provider_required_adapters()
+    for adapter_name in adapters:
         spec = binary_spec(adapter_name)
         for platform_id in spec.supported_platforms:
+            if required_platforms and platform_id not in required_platforms:
+                continue
             if (adapter_name, platform_id) not in present:
                 missing.append({"adapter": adapter_name, "platform": platform_id})
     return missing
