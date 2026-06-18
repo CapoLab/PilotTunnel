@@ -101,17 +101,23 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - SHA256 verification is mandatory before any binary is imported.
 - Remote provider hosts must be allowlisted with `--allow-provider-host`.
 - `binary download-all` prepares every required Layer 4 provider-managed adapter in one run.
+- `binary provider generate-manifest` scans a local provider source tree and writes a manifest without downloading anything.
+- `binary provider verify-manifest` validates schema, URLs, checksums, and required adapter coverage without changing the host.
+- `bootstrap command` prints safe copy-paste prepare commands for controller and worker roles.
 - `bootstrap` prepares role, profile, bundle, staging, backup, and readiness state without real deployment.
 - Real deploy remains a separate gated workflow.
 
 ```bash
+python -m pilottunnel.cli binary provider generate-manifest --provider-name <PROVIDER_HOST> --base-url <MANIFEST_URL> --source-dir <SOURCE_DIR> --output <MANIFEST_FILE>
+python -m pilottunnel.cli binary provider verify-manifest --manifest-file <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider inspect --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
-python -m pilottunnel.cli binary provider inspect --manifest-file ./provider-manifest.json
+python -m pilottunnel.cli binary provider inspect --manifest-file <MANIFEST_FILE>
 python -m pilottunnel.cli binary download --adapter backhaul --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_BINARY
 python -m pilottunnel.cli binary download-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_ALL_BINARIES
-python -m pilottunnel.cli binary download-all --manifest-file ./provider-manifest.json --confirm DOWNLOAD_ALL_BINARIES
-python -m pilottunnel.cli bootstrap plan --role controller --profile <PROFILE> --adapter backhaul --transport tcpmux --create-profile --target-host <TARGET_HOST> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
-python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> --adapter backhaul --transport tcpmux --create-profile --target-host <TARGET_HOST> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm BOOTSTRAP_APPLY
+python -m pilottunnel.cli binary download-all --manifest-file <MANIFEST_FILE> --confirm DOWNLOAD_ALL_BINARIES
+python -m pilottunnel.cli bootstrap command --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --ports auto --manifest-url <MANIFEST_URL> --provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --bundle-file <BUNDLE_FILE>
+python -m pilottunnel.cli bootstrap plan --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
+python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --confirm BOOTSTRAP_APPLY
 ```
 
 ## Real-Host Install Planning

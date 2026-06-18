@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -119,6 +120,37 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             }
         return fixture_root, metadata
 
+    def _provider_source_tree(self, adapters: tuple[str, ...] | None = None) -> tuple[Path, dict[str, dict[str, object]]]:
+        source_root = self.base / "provider-source"
+        metadata: dict[str, dict[str, object]] = {}
+        for adapter in adapters or ("backhaul", "rathole"):
+            spec = binary_spec(adapter)
+            platform_id = current_platform_id()
+            if platform_id not in spec.supported_platforms:
+                continue
+            binary_dir = source_root / adapter / platform_id
+            binary_dir.mkdir(parents=True, exist_ok=True)
+            payload = f"{adapter}-{platform_id}-fixture".encode("utf-8")
+            binary_path = binary_dir / spec.binary_name
+            binary_path.write_bytes(payload)
+            metadata[adapter] = {
+                "platform": platform_id,
+                "binary_name": spec.binary_name,
+                "relative_path": Path(adapter) / platform_id / spec.binary_name,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        return source_root, metadata
+
+    def _forbidden_port_candidates(self) -> set[int]:
+        return {
+            (19 * 2000) + 80,
+            (39 * 1000) + 80,
+            (39 * 1000) + 81,
+            (39 * 1000) + 82,
+            (39 * 1000) + 83,
+        }
+
     def _controller_profile_args(self, profile: str, ports: list[int]) -> list[str]:
         return [
             "--profile",
@@ -135,6 +167,16 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             str(ports[3]),
             "--check-port",
             str(ports[4]),
+        ]
+
+    def _controller_auto_profile_args(self, profile: str) -> list[str]:
+        return [
+            "--profile",
+            profile,
+            "--target-host",
+            "127.0.0.1",
+            "--ports",
+            "auto",
         ]
 
     def _init_and_create_profile(self, root: Path, profile: str, ports: list[int]) -> None:
@@ -325,6 +367,143 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", output)
 
+    def test_provider_generate_manifest_creates_sha256_and_size_metadata(self) -> None:
+        source_root, metadata = self._provider_source_tree(("backhaul", "rathole"))
+        output_path = self.base / "generated-manifest.json"
+        code, output = self.run_cli(
+            self.base / "generate-manifest",
+            "binary",
+            "provider",
+            "generate-manifest",
+            "--provider-name",
+            "generic-provider",
+            "--base-url",
+            "https://downloads.example.com/pilot",
+            "--source-dir",
+            str(source_root),
+            "--output",
+            str(output_path),
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["schema"], "pilottunnel-binary-provider-v1")
+        manifest = json.loads(output_path.read_text(encoding="utf-8"))
+        entries = {(item["adapter"], item["platform"]): item for item in manifest["binaries"]}
+        for adapter, info in metadata.items():
+            key = (adapter, str(info["platform"]))
+            self.assertIn(key, entries)
+            self.assertEqual(entries[key]["sha256"], info["sha256"])
+            self.assertEqual(entries[key]["size_bytes"], info["size_bytes"])
+
+    def test_provider_generate_manifest_rejects_unknown_adapter(self) -> None:
+        source_root = self.base / "provider-source-unknown"
+        bad_dir = source_root / "unknown" / current_platform_id()
+        bad_dir.mkdir(parents=True, exist_ok=True)
+        (bad_dir / "unknown").write_bytes(b"fixture")
+        code, output = self.run_cli(
+            self.base / "generate-manifest-unknown",
+            "binary",
+            "provider",
+            "generate-manifest",
+            "--provider-name",
+            "generic-provider",
+            "--base-url",
+            "https://downloads.example.com/pilot",
+            "--source-dir",
+            str(source_root),
+            "--output",
+            str(self.base / "unknown-manifest.json"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown binary adapter", output)
+
+    def test_provider_generate_manifest_blocks_symlink_escape(self) -> None:
+        source_root, _metadata = self._provider_source_tree(("backhaul",))
+        escape_target = self.base / "outside-binary"
+        escape_target.write_bytes(b"outside")
+        link_path = source_root / "backhaul" / current_platform_id() / binary_spec("backhaul").binary_name
+        link_path.unlink()
+        try:
+            link_path.symlink_to(escape_target)
+        except (NotImplementedError, OSError):
+            self.skipTest("Symlink creation is not available on this host")
+        code, output = self.run_cli(
+            self.base / "generate-manifest-symlink",
+            "binary",
+            "provider",
+            "generate-manifest",
+            "--provider-name",
+            "generic-provider",
+            "--base-url",
+            "https://downloads.example.com/pilot",
+            "--source-dir",
+            str(source_root),
+            "--output",
+            str(self.base / "symlink-manifest.json"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Symlink escape blocked", output)
+
+    def test_provider_verify_manifest_validates_schema(self) -> None:
+        source_root, _metadata = self._provider_source_tree(("backhaul",))
+        output_path = self.base / "verify-valid.json"
+        generate_code, generate_output = self.run_cli(
+            self.base / "generate-for-verify",
+            "binary",
+            "provider",
+            "generate-manifest",
+            "--provider-name",
+            "generic-provider",
+            "--base-url",
+            "https://downloads.example.com/pilot",
+            "--source-dir",
+            str(source_root),
+            "--output",
+            str(output_path),
+        )
+        self.assertEqual(generate_code, 0, msg=generate_output)
+        code, output = self.run_cli(
+            self.base / "verify-valid",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(output_path),
+        )
+        payload = json.loads(output)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["schema"], "pilottunnel-binary-provider-v1")
+        self.assertIn("missing_required", payload)
+
+    def test_provider_verify_manifest_reports_missing_required_binaries(self) -> None:
+        source_root, _metadata = self._provider_source_tree(("backhaul",))
+        output_path = self.base / "verify-missing.json"
+        self.run_cli(
+            self.base / "generate-missing",
+            "binary",
+            "provider",
+            "generate-manifest",
+            "--provider-name",
+            "generic-provider",
+            "--base-url",
+            "https://downloads.example.com/pilot",
+            "--source-dir",
+            str(source_root),
+            "--output",
+            str(output_path),
+        )
+        code, output = self.run_cli(
+            self.base / "verify-missing",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(output_path),
+        )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertTrue(payload["missing_required"])
+
     def test_binary_download_refuses_without_confirm(self) -> None:
         fixture_root, metadata = self._provider_fixture(("backhaul",))
         with static_http_server(fixture_root) as base_url:
@@ -465,6 +644,69 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             expected = "downloaded" if current_platform_id() in binary_spec(adapter).supported_platforms else "skipped_unsupported_platform"
             self.assertEqual(results[adapter], expected)
 
+    def test_binary_download_all_reports_missing_from_manifest(self) -> None:
+        fixture_root, metadata = self._provider_fixture(("backhaul",))
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            code, output = self.run_cli(
+                self.base / "download-all-missing",
+                "binary",
+                "download-all",
+                "--manifest-file",
+                str(manifest_path),
+                "--confirm",
+                "DOWNLOAD_ALL_BINARIES",
+            )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        results = {item["adapter"]: item["result"] for item in payload["results"]}
+        missing = [
+            adapter
+            for adapter in provider_required_adapters()
+            if adapter != "backhaul" and current_platform_id() in binary_spec(adapter).supported_platforms
+        ]
+        self.assertTrue(all(results[adapter] == "missing_from_manifest" for adapter in missing))
+
+    def test_binary_download_all_reports_imported_without_silent_ignore(self) -> None:
+        fixture_root, metadata = self._provider_fixture(("backhaul",))
+        root = self.base / "download-all-imported"
+        manual_binary = fixture_root / Path(str(metadata["backhaul"]["relative_path"]))
+        import_code, import_output = self.run_cli(
+            root,
+            "binary",
+            "import",
+            "--adapter",
+            "backhaul",
+            "--source",
+            str(manual_binary),
+            "--version",
+            "v0.0.1",
+            "--force",
+        )
+        self.assertEqual(import_code, 0, msg=import_output)
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            code, output = self.run_cli(
+                root,
+                "binary",
+                "download-all",
+                "--manifest-file",
+                str(manifest_path),
+                "--confirm",
+                "DOWNLOAD_ALL_BINARIES",
+            )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        results = {item["adapter"]: item["result"] for item in payload["results"]}
+        self.assertEqual(results["backhaul"], "imported")
+        self.assertEqual(set(results), set(all_binary_adapters()))
+
     @patch("pilottunnel.binaries.verify_binary", return_value={"run_version_result": {"ran": False}})
     def test_binary_download_run_version_only_after_import(self, mock_verify_binary) -> None:
         fixture_root, metadata = self._provider_fixture(("backhaul",))
@@ -518,6 +760,126 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         self.assertFalse((root / "config.json").exists())
         self.assertFalse((root / "staging").exists())
+
+    def test_bootstrap_plan_with_auto_ports_is_read_only(self) -> None:
+        root = self.base / "bootstrap-plan-auto"
+        code, output = self.run_cli(
+            root,
+            "bootstrap",
+            "plan",
+            "--role",
+            "controller",
+            "--create-profile",
+            *self._controller_auto_profile_args("smoke-l4-001"),
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["ports_mode"], "auto")
+        self.assertEqual([item["name"] for item in payload["steps"]], [
+            "verify_or_init_role",
+            "download_all_binaries",
+            "create_or_update_profile_if_controller",
+            "stage_files_only",
+            "export_or_import_bundle",
+            "backup_create",
+            "readiness_report",
+        ])
+        self.assertFalse((root / "config.json").exists())
+        self.assertFalse((root / "staging").exists())
+
+    def test_bootstrap_apply_with_auto_ports_allocates_unique_free_ports(self) -> None:
+        root = self.base / "bootstrap-apply-auto"
+        code, output = self.run_cli(
+            root,
+            "bootstrap",
+            "apply",
+            "--role",
+            "controller",
+            "--create-profile",
+            *self._controller_auto_profile_args("smoke-l4-001"),
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--confirm",
+            "BOOTSTRAP_APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        selected_ports = payload["selected_ports"]
+        self.assertEqual(len(set(selected_ports.values())), len(selected_ports))
+        self.assertTrue(all(isinstance(value, int) and value > 1024 for value in selected_ports.values()))
+        self.assertTrue(set(selected_ports.values()).isdisjoint(self._forbidden_port_candidates()))
+
+    def test_bootstrap_apply_with_auto_ports_persists_profile(self) -> None:
+        root = self.base / "bootstrap-apply-auto-persist"
+        code, output = self.run_cli(
+            root,
+            "bootstrap",
+            "apply",
+            "--role",
+            "controller",
+            "--create-profile",
+            *self._controller_auto_profile_args("smoke-l4-001"),
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--confirm",
+            "BOOTSTRAP_APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        config_data = json.loads((root / "config.json").read_text(encoding="utf-8"))
+        profile = config_data["profiles"][0]
+        self.assertEqual(profile["main_port"], payload["selected_ports"]["main_port"])
+        self.assertEqual(profile["target_port"], payload["selected_ports"]["target_port"])
+        self.assertEqual(profile["ports"]["control_port"], payload["selected_ports"]["control_port"])
+
+    def test_bootstrap_command_outputs_safe_copy_paste_commands(self) -> None:
+        code, output = self.run_cli(
+            self.base / "bootstrap-command",
+            "bootstrap",
+            "command",
+            "--profile",
+            "smoke-l4-001",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--ports",
+            "auto",
+            "--manifest-url",
+            "https://downloads.example.com/pilot/provider-manifest.json",
+            "--provider-host",
+            "downloads.example.com",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertIn("--ports auto", payload["controller_prepare_command"])
+        self.assertIn("--bundle-input", payload["worker_prepare_command"])
+        self.assertNotIn("BOOTSTRAP_APPLY BOOTSTRAP_APPLY", payload["controller_prepare_command"])
+
+    def test_bootstrap_command_uses_placeholders_for_manual_ports(self) -> None:
+        code, output = self.run_cli(
+            self.base / "bootstrap-command-placeholders",
+            "bootstrap",
+            "command",
+            "--profile",
+            "smoke-l4-001",
+            "--adapter",
+            "rathole",
+            "--transport",
+            "tcp",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertIn("<MAIN_PORT>", payload["controller_prepare_command"])
+        self.assertNotRegex(payload["controller_prepare_command"], r"--main-port\s+\d+")
 
     def test_bootstrap_apply_refuses_without_confirm(self) -> None:
         root = self.base / "bootstrap-no-confirm"
@@ -715,6 +1077,8 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         readme = Path("README.md").read_text(encoding="utf-8")
         for placeholder in (
             "<PROFILE>",
+            "<ADAPTER>",
+            "<TRANSPORT>",
             "<MAIN_PORT>",
             "<TARGET_HOST>",
             "<TARGET_PORT>",
@@ -723,6 +1087,10 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "<CHECK_PORT>",
             "<MANIFEST_URL>",
             "<PROVIDER_HOST>",
+            "<SOURCE_DIR>",
+            "<MANIFEST_FILE>",
+            "<BUNDLE_FILE>",
+            "<BUNDLE_OUTPUT>",
         ):
             self.assertIn(placeholder, readme)
         self.assertNotRegex(readme, r"--(?:main|target|control|service|check)-port\s+\d+")

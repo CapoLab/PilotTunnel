@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,11 @@ from .audit import write_audit_log
 from .backup import create_backup
 from .binary_provider import download_all_binaries, inspect_manifest
 from .bundles import build_worker_bundle, import_bundle
-from .config import AppConfig, Candidate, Profile, ProfilePorts, ProfileSafety, build_node_settings, build_worker_stub, canonical_role, get_profile
+from .config import AppConfig, Candidate, Profile, ProfilePorts, ProfileSafety, build_node_settings, build_worker_stub, canonical_role, get_profile, validate_profile_name
 from .node_role import require_controller, require_worker
 from .readiness import build_readiness_report
 from .registry import PortRegistry
+from .runtime_ports import AUTO_PORT_KEYS, allocate_free_tcp_ports
 from .state import AppState
 from .switch_engine import SwitchEngine, SwitchPaths
 
@@ -33,12 +35,14 @@ def build_bootstrap_plan(
     transport: str | None,
     role_value: str | None,
     create_profile_flag: bool,
+    update_profile_flag: bool,
     target_host: str | None,
     main_port: int | None,
     target_port: int | None,
     control_port: int | None,
     service_port: int | None,
     check_port: int | None,
+    ports_mode: str | None,
     manifest_url: str | None,
     manifest_file: Path | None,
     allow_provider_host: str | None,
@@ -58,17 +62,33 @@ def build_bootstrap_plan(
             requested_platform=requested_platform,
         )
     profile_preview = None
-    if create_profile_flag:
-        profile_preview = _profile_payload(
-            name=profile_name,
-            target_host=target_host,
-            role=node_role or "controller",
+    selected_ports: dict[str, int] | None = None
+    if create_profile_flag or update_profile_flag:
+        selected_ports = _resolved_profile_ports(
             main_port=main_port,
             target_port=target_port,
             control_port=control_port,
             service_port=service_port,
             check_port=check_port,
+            ports_mode=ports_mode,
         )
+        profile_preview = _profile_payload(
+            name=profile_name,
+            target_host=target_host,
+            role=node_role or "controller",
+            selected_ports=selected_ports,
+        )
+    steps = _bootstrap_steps(
+        role=config.node.normalized_role or node_role,
+        create_profile_flag=create_profile_flag,
+        update_profile_flag=update_profile_flag,
+        manifest_enabled=bool(manifest),
+        adapter_name=adapter_name,
+        transport=transport,
+        bundle_output=bundle_output,
+        bundle_input=bundle_input,
+        profile_name=profile_name,
+    )
     readiness = build_readiness_report(
         config=config,
         state=state,
@@ -83,13 +103,13 @@ def build_bootstrap_plan(
     )
     actions = {
         "role_initialize": bool(role_value and not config.node.initialized),
-        "profile_create_or_update": create_profile_flag,
+        "profile_create_or_update": create_profile_flag or update_profile_flag,
         "binary_provider_inspect": bool(manifest),
         "binary_download_all": bool(manifest),
         "stage_files": bool(profile_name and adapter_name and transport and node_role == "controller"),
         "export_worker_bundle": bool(bundle_output),
         "import_worker_bundle": bool(bundle_input),
-        "backup_before_changes": bool(create_profile_flag or bundle_input or role_value),
+        "backup_before_changes": bool(create_profile_flag or update_profile_flag or bundle_input or role_value),
     }
     return {
         "ok": True,
@@ -100,6 +120,9 @@ def build_bootstrap_plan(
         "adapter": adapter_name,
         "transport": transport,
         "actions": actions,
+        "steps": steps,
+        "ports_mode": _normalized_ports_mode(ports_mode, selected_ports),
+        "selected_ports": selected_ports or {},
         "profile_preview": profile_preview,
         "manifest": manifest,
         "bundle_output": str(bundle_output) if bundle_output else "",
@@ -135,6 +158,7 @@ def apply_bootstrap(
     control_port: int | None,
     service_port: int | None,
     check_port: int | None,
+    ports_mode: str | None,
     manifest_url: str | None,
     manifest_file: Path | None,
     allow_provider_host: str | None,
@@ -152,6 +176,8 @@ def apply_bootstrap(
     node_role = _initialize_or_validate_role(config, role_value, switch_paths.audit_path)
     if create_profile_flag or update_profile_flag:
         require_controller("profile_create", node_role)
+    if ports_mode == "auto" and node_role != "controller":
+        raise ValueError("--ports auto is only supported for controller bootstrap profile operations")
     if bundle_input and node_role == "controller":
         require_worker("bundle_import", node_role)
     if bundle_output and node_role == "worker":
@@ -159,7 +185,7 @@ def apply_bootstrap(
 
     existing_profile = _resolve_profile(config, profile_name)
     backup_payload = None
-    if _should_backup(config, create_profile_flag, bundle_input, role_value):
+    if _should_backup(config, create_profile_flag, update_profile_flag, bundle_input, role_value):
         backup_payload = create_backup(
             config=config,
             switch_paths=switch_paths,
@@ -194,18 +220,23 @@ def apply_bootstrap(
 
     profile = existing_profile
     profile_created = False
+    selected_ports: dict[str, int] | None = None
     if create_profile_flag or update_profile_flag:
+        selected_ports = _resolved_profile_ports(
+            main_port=main_port,
+            target_port=target_port,
+            control_port=control_port,
+            service_port=service_port,
+            check_port=check_port,
+            ports_mode=ports_mode,
+        )
         profile = _upsert_profile(
             config=config,
             existing=profile,
             name=profile_name,
             target_host=target_host,
             role=node_role,
-            main_port=main_port,
-            target_port=target_port,
-            control_port=control_port,
-            service_port=service_port,
-            check_port=check_port,
+            selected_ports=selected_ports,
             update=update_profile_flag,
         )
         profile_created = True
@@ -265,6 +296,19 @@ def apply_bootstrap(
         "role": node_role,
         "profile": profile.name if profile else profile_name,
         "profile_created_or_updated": profile_created,
+        "ports_mode": _normalized_ports_mode(ports_mode, selected_ports),
+        "selected_ports": selected_ports or {},
+        "steps": _bootstrap_steps(
+            role=node_role,
+            create_profile_flag=create_profile_flag,
+            update_profile_flag=update_profile_flag,
+            manifest_enabled=bool(manifest_url or manifest_file),
+            adapter_name=adapter_name,
+            transport=transport,
+            bundle_output=bundle_output,
+            bundle_input=bundle_input,
+            profile_name=profile.name if profile else profile_name,
+        ),
         "backup": backup_payload,
         "binary_download_all": download_payload,
         "staged_switch": staged_payload,
@@ -279,6 +323,105 @@ def apply_bootstrap(
     }
     write_audit_log("bootstrap-apply", profile.name if profile else "bootstrap", payload, switch_paths.audit_path)
     return payload
+
+
+def build_bootstrap_command(
+    *,
+    profile_name: str | None,
+    adapter_name: str | None,
+    transport: str | None,
+    ports_mode: str | None,
+    manifest_url: str | None,
+    provider_host: str | None,
+    bundle_output: Path | None,
+    bundle_file: Path | None,
+) -> dict[str, Any]:
+    profile = profile_name or "<PROFILE>"
+    adapter = adapter_name or "<ADAPTER>"
+    transport_name = transport or "<TRANSPORT>"
+    manifest = manifest_url or "<MANIFEST_URL>"
+    provider = provider_host or "<PROVIDER_HOST>"
+    controller_bundle_output = str(bundle_output) if bundle_output else "<BUNDLE_OUTPUT>"
+    worker_bundle_file = str(bundle_file) if bundle_file else "<BUNDLE_FILE>"
+
+    controller_parts = [
+        "python",
+        "-m",
+        "pilottunnel.cli",
+        "bootstrap",
+        "apply",
+        "--role",
+        "controller",
+        "--profile",
+        profile,
+        "--adapter",
+        adapter,
+        "--transport",
+        transport_name,
+        "--create-profile",
+        "--target-host",
+        "<TARGET_HOST>",
+    ]
+    if ports_mode == "auto":
+        controller_parts.extend(["--ports", "auto"])
+    else:
+        controller_parts.extend(
+            [
+                "--main-port",
+                "<MAIN_PORT>",
+                "--target-port",
+                "<TARGET_PORT>",
+                "--control-port",
+                "<CONTROL_PORT>",
+                "--service-port",
+                "<SERVICE_PORT>",
+                "--check-port",
+                "<CHECK_PORT>",
+            ]
+        )
+    controller_parts.extend(
+        [
+            "--manifest-url",
+            manifest,
+            "--allow-provider-host",
+            provider,
+            "--bundle-output",
+            controller_bundle_output,
+            "--confirm",
+            "BOOTSTRAP_APPLY",
+        ]
+    )
+    worker_parts = [
+        "python",
+        "-m",
+        "pilottunnel.cli",
+        "bootstrap",
+        "apply",
+        "--role",
+        "worker",
+        "--bundle-input",
+        worker_bundle_file,
+        "--manifest-url",
+        manifest,
+        "--allow-provider-host",
+        provider,
+        "--confirm",
+        "BOOTSTRAP_APPLY",
+    ]
+    return {
+        "ok": True,
+        "profile": profile,
+        "adapter": adapter,
+        "transport": transport_name,
+        "ports_mode": "auto" if ports_mode == "auto" else "placeholders",
+        "controller_prepare_command": _shell_join(controller_parts),
+        "worker_prepare_command": _shell_join(worker_parts),
+        "downloads_performed": False,
+        "real_systemd_touched": False,
+        "service_started": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+    }
 
 
 def _initialize_or_validate_role(config: AppConfig, role_value: str | None, audit_path: Path) -> str:
@@ -406,22 +549,14 @@ def _upsert_profile(
     name: str | None,
     target_host: str | None,
     role: str,
-    main_port: int | None,
-    target_port: int | None,
-    control_port: int | None,
-    service_port: int | None,
-    check_port: int | None,
+    selected_ports: dict[str, int],
     update: bool,
 ) -> Profile:
     preview = _profile_payload(
         name=name,
         target_host=target_host,
         role=role,
-        main_port=main_port,
-        target_port=target_port,
-        control_port=control_port,
-        service_port=service_port,
-        check_port=check_port,
+        selected_ports=selected_ports,
     )
     profile = Profile(
         name=preview["name"],
@@ -448,28 +583,24 @@ def _profile_payload(
     name: str | None,
     target_host: str | None,
     role: str,
-    main_port: int | None,
-    target_port: int | None,
-    control_port: int | None,
-    service_port: int | None,
-    check_port: int | None,
+    selected_ports: dict[str, int],
 ) -> dict[str, Any]:
     if not name:
         raise ValueError("Bootstrap profile operations require --profile")
     if not target_host:
         raise ValueError("Bootstrap profile operations require --target-host")
-    ports = [main_port, target_port, control_port, service_port, check_port]
-    if any(value is None for value in ports):
+    missing = [key for key in AUTO_PORT_KEYS if key not in selected_ports]
+    if missing:
         raise ValueError("Bootstrap profile operations require --main-port, --target-port, --control-port, --service-port, and --check-port")
     return {
-        "name": name,
+        "name": validate_profile_name(name),
         "target_host": target_host,
         "role": canonical_role(role),
-        "main_port": main_port,
-        "target_port": target_port,
-        "control_port": control_port,
-        "service_port": service_port,
-        "check_port": check_port,
+        "main_port": selected_ports["main_port"],
+        "target_port": selected_ports["target_port"],
+        "control_port": selected_ports["control_port"],
+        "service_port": selected_ports["service_port"],
+        "check_port": selected_ports["check_port"],
     }
 
 
@@ -490,8 +621,14 @@ def _resolved_role(config: AppConfig, role_value: str | None) -> str:
     return ""
 
 
-def _should_backup(config: AppConfig, create_profile_flag: bool, bundle_input: Path | None, role_value: str | None) -> bool:
-    return bool(config.node.initialized or create_profile_flag or bundle_input or role_value)
+def _should_backup(
+    config: AppConfig,
+    create_profile_flag: bool,
+    update_profile_flag: bool,
+    bundle_input: Path | None,
+    role_value: str | None,
+) -> bool:
+    return bool(config.node.initialized or create_profile_flag or update_profile_flag or bundle_input or role_value)
 
 
 def _validate_output_path(path: Path) -> Path:
@@ -527,3 +664,69 @@ def _failure(message: str) -> dict[str, Any]:
         "firewall_touched": False,
         "routes_touched": False,
     }
+
+
+def _resolved_profile_ports(
+    *,
+    main_port: int | None,
+    target_port: int | None,
+    control_port: int | None,
+    service_port: int | None,
+    check_port: int | None,
+    ports_mode: str | None,
+) -> dict[str, int]:
+    if ports_mode == "auto":
+        return allocate_free_tcp_ports()
+    values = {
+        "main_port": main_port,
+        "target_port": target_port,
+        "control_port": control_port,
+        "service_port": service_port,
+        "check_port": check_port,
+    }
+    if any(value is None for value in values.values()):
+        raise ValueError("Bootstrap profile operations require either --ports auto or all explicit port flags")
+    normalized = {key: int(value) for key, value in values.items() if value is not None}
+    if len(set(normalized.values())) != len(normalized):
+        raise ValueError("Bootstrap profile ports must be unique")
+    for key, value in normalized.items():
+        if value < 1 or value > 65535:
+            raise ValueError(f"{key} must be between 1 and 65535")
+    return normalized
+
+
+def _normalized_ports_mode(ports_mode: str | None, selected_ports: dict[str, int] | None) -> str:
+    if ports_mode == "auto":
+        return "auto"
+    if selected_ports:
+        return "explicit"
+    return "unchanged"
+
+
+def _bootstrap_steps(
+    *,
+    role: str | None,
+    create_profile_flag: bool,
+    update_profile_flag: bool,
+    manifest_enabled: bool,
+    adapter_name: str | None,
+    transport: str | None,
+    bundle_output: Path | None,
+    bundle_input: Path | None,
+    profile_name: str | None,
+) -> list[dict[str, Any]]:
+    controller_stage = bool(profile_name and adapter_name and transport and (role or "") == "controller")
+    steps = [
+        {"step": 1, "name": "verify_or_init_role", "will_run": True},
+        {"step": 2, "name": "download_all_binaries", "will_run": manifest_enabled},
+        {"step": 3, "name": "create_or_update_profile_if_controller", "will_run": create_profile_flag or update_profile_flag},
+        {"step": 4, "name": "stage_files_only", "will_run": controller_stage or bool(bundle_input)},
+        {"step": 5, "name": "export_or_import_bundle", "will_run": bool(bundle_output or bundle_input)},
+        {"step": 6, "name": "backup_create", "will_run": True},
+        {"step": 7, "name": "readiness_report", "will_run": True},
+    ]
+    return steps
+
+
+def _shell_join(parts: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in parts)

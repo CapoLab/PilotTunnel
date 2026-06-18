@@ -13,8 +13,8 @@ from .adapters import ADAPTERS
 from .adapters.base import AdapterContext
 from .audit import write_audit_log
 from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
-from .binary_provider import download_all_binaries, download_binary, inspect_manifest
-from .bootstrap import apply_bootstrap, build_bootstrap_plan
+from .binary_provider import download_all_binaries, download_binary, generate_manifest, inspect_manifest, verify_manifest_file
+from .bootstrap import apply_bootstrap, build_bootstrap_command, build_bootstrap_plan
 from .bundles import build_worker_bundle, import_bundle, inspect_bundle
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
 from .config import (
@@ -380,6 +380,15 @@ def build_parser() -> argparse.ArgumentParser:
     binary_provider_inspect.add_argument("--allow-provider-host")
     binary_provider_inspect.add_argument("--platform", default="auto")
     binary_provider_inspect.add_argument("--json", action="store_true")
+    binary_provider_generate = binary_provider_subparsers.add_parser("generate-manifest")
+    binary_provider_generate.add_argument("--provider-name", required=True)
+    binary_provider_generate.add_argument("--base-url", required=True)
+    binary_provider_generate.add_argument("--source-dir", type=Path, required=True)
+    binary_provider_generate.add_argument("--output", type=Path, required=True)
+    binary_provider_generate.add_argument("--json", action="store_true")
+    binary_provider_verify = binary_provider_subparsers.add_parser("verify-manifest")
+    binary_provider_verify.add_argument("--manifest-file", type=Path, required=True)
+    binary_provider_verify.add_argument("--json", action="store_true")
 
     bundle = subparsers.add_parser("bundle")
     bundle_subparsers = bundle.add_subparsers(dest="bundle_command", required=True)
@@ -416,6 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_subparsers = bootstrap.add_subparsers(dest="bootstrap_command", required=True)
     bootstrap_plan = bootstrap_subparsers.add_parser("plan")
     bootstrap_apply = bootstrap_subparsers.add_parser("apply")
+    bootstrap_command = bootstrap_subparsers.add_parser("command")
     for bootstrap_parser in (bootstrap_plan, bootstrap_apply):
         bootstrap_parser.add_argument("--profile")
         bootstrap_parser.add_argument("--adapter")
@@ -423,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
         bootstrap_parser.add_argument("--role")
         bootstrap_parser.add_argument("--create-profile", action="store_true")
         bootstrap_parser.add_argument("--update-profile", action="store_true")
+        bootstrap_parser.add_argument("--ports", choices=("auto",))
         bootstrap_parser.add_argument("--target-host")
         bootstrap_parser.add_argument("--main-port", type=int)
         bootstrap_parser.add_argument("--target-port", type=int)
@@ -440,6 +451,15 @@ def build_parser() -> argparse.ArgumentParser:
         bootstrap_parser.add_argument("--json", action="store_true")
     bootstrap_apply.add_argument("--confirm")
     bootstrap_apply.add_argument("--run-version", action="store_true")
+    bootstrap_command.add_argument("--profile")
+    bootstrap_command.add_argument("--adapter")
+    bootstrap_command.add_argument("--transport")
+    bootstrap_command.add_argument("--ports", choices=("auto",))
+    bootstrap_command.add_argument("--manifest-url")
+    bootstrap_command.add_argument("--provider-host")
+    bootstrap_command.add_argument("--bundle-output", type=Path)
+    bootstrap_command.add_argument("--bundle-file", type=Path)
+    bootstrap_command.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1684,12 +1704,14 @@ def main(argv: list[str] | None = None) -> int:
                 transport=args.transport,
                 role_value=args.role,
                 create_profile_flag=args.create_profile,
+                update_profile_flag=args.update_profile,
                 target_host=args.target_host,
                 main_port=args.main_port,
                 target_port=args.target_port,
                 control_port=args.control_port,
                 service_port=args.service_port,
                 check_port=args.check_port,
+                ports_mode=args.ports,
                 manifest_url=args.manifest_url,
                 manifest_file=args.manifest_file,
                 allow_provider_host=args.allow_provider_host,
@@ -1726,6 +1748,7 @@ def main(argv: list[str] | None = None) -> int:
                 control_port=args.control_port,
                 service_port=args.service_port,
                 check_port=args.check_port,
+                ports_mode=args.ports,
                 manifest_url=args.manifest_url,
                 manifest_file=args.manifest_file,
                 allow_provider_host=args.allow_provider_host,
@@ -1744,6 +1767,24 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
 
+    if args.command == "bootstrap" and args.bootstrap_command == "command":
+        try:
+            payload = build_bootstrap_command(
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                ports_mode=args.ports,
+                manifest_url=args.manifest_url,
+                provider_host=args.provider_host,
+                bundle_output=args.bundle_output,
+                bundle_file=args.bundle_file,
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
     if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "inspect":
         try:
             payload = inspect_manifest(
@@ -1757,6 +1798,29 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "generate-manifest":
+        try:
+            payload = generate_manifest(
+                provider_name=args.provider_name,
+                base_url=args.base_url,
+                source_dir=args.source_dir,
+                output_path=args.output,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "verify-manifest":
+        try:
+            payload = verify_manifest_file(manifest_file=args.manifest_file)
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "binary" and args.binary_command == "list":
         print(json.dumps(list_binary_plans(switch_paths.work_dir, state), indent=2))
