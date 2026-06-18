@@ -6,7 +6,7 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 
 - Layer-first, adapter-based, and profile/port-based architecture is in place.
 - Only `layer4` is active in `v0.1`; other layers remain listed as metadata and are intentionally blocked.
-- Backhaul and Rathole now have richer dry-run planning for `controller/iran` and `worker/foreign` roles.
+- Backhaul and Rathole now have richer dry-run planning for `controller` and `worker` roles.
 - Real remote coordination, real systemd changes, firewall rules, and host networking changes are still not implemented.
 
 ## Dry-Run Safety Model
@@ -30,23 +30,23 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 
 ```bash
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name turkey-6221 --main-port 6221 --target-port 5201 --role controller --control-port 7001 --service-port 7002 --check-port 7003 --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name smoke-l4-001 --main-port 38080 --target-port 39080 --role controller --control-port 39081 --service-port 39082 --check-port 39083 --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile turkey-6221 --adapter rathole --transport tcp
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter rathole --transport tcp
 ```
 
 ## Dry-Run CLI Workflow
 
 ```bash
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name turkey-6221 --main-port 6221 --target-host 127.0.0.1 --target-port 6221 --role controller --control-port 49323 --service-port 2106 --check-port 3106
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name smoke-l4-001 --main-port 38080 --target-host 127.0.0.1 --target-port 39080 --role controller --control-port 39081 --service-port 39082 --check-port 39083
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter show --name backhaul
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile turkey-6221 --adapter rathole --transport tcp
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json status --profile turkey-6221
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log logs --profile turkey-6221 --limit 10
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter rathole --transport tcp
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json status --profile smoke-l4-001
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log logs --profile smoke-l4-001 --limit 10
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json registry check
 ```
 
@@ -59,10 +59,10 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 In this stage, `--apply` does not call `systemctl`, does not touch real systemd locations, does not modify firewall rules or routes, and does not download or execute tunnel binaries.
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging plan --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging --apply switch --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging --apply switch --profile smoke-l4-001 --adapter backhaul --transport tcpmux
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile smoke-l4-001 --adapter backhaul --transport tcpmux
 ```
 
 ## Host Preflight And Binary Planning
@@ -74,7 +74,7 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 
 ```bash
 python -m pilottunnel.cli preflight
-python -m pilottunnel.cli preflight --profile turkey-6221
+python -m pilottunnel.cli preflight --profile smoke-l4-001
 python -m pilottunnel.cli binary list
 python -m pilottunnel.cli binary plan --adapter backhaul
 python -m pilottunnel.cli binary plan --adapter rathole
@@ -104,9 +104,9 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - Future real apply will require explicit confirmation and backups.
 
 ```bash
-python -m pilottunnel.cli install plan --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli install plan --profile turkey-6221 --adapter rathole --transport tcp --install-root .var/pilottunnel/install-root
-python -m pilottunnel.cli uninstall plan --profile turkey-6221 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli install plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli install plan --profile smoke-l4-001 --adapter rathole --transport tcp --install-root .var/pilottunnel/install-root
+python -m pilottunnel.cli uninstall plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
 ```
 
 ## Controlled Install Apply Gate
@@ -119,9 +119,9 @@ python -m pilottunnel.cli uninstall plan --profile turkey-6221 --adapter backhau
 - Real-host file mode is Linux-only, requires `--real-host-files`, and still does not execute `systemctl`.
 
 ```bash
-python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY
-python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm ROLLBACK
-python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
+python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY
+python -m pilottunnel.cli install rollback --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm ROLLBACK
+python -m pilottunnel.cli uninstall apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
 ```
 
 ## Service Lifecycle Planning
@@ -132,10 +132,10 @@ python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backha
 - Real service lifecycle changes remain gated behind explicit `--real-systemd` confirmations.
 
 ```bash
-python -m pilottunnel.cli service plan --profile turkey-6221 --adapter backhaul --transport tcpmux --action start
-python -m pilottunnel.cli service plan --profile turkey-6221 --adapter rathole --transport tcp --action stop
-python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --limit 50
+python -m pilottunnel.cli service plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux --action start
+python -m pilottunnel.cli service plan --profile smoke-l4-001 --adapter rathole --transport tcp --action stop
+python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --limit 50
 ```
 
 ## Real Systemd Read-Only And Daemon-Reload Gate
@@ -154,8 +154,8 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 - Firewall rules, routes, and interfaces remain untouched.
 
 ```bash
-python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
-python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --limit 50
 python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_RELOAD
 ```
 
@@ -169,10 +169,10 @@ python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service start --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE
-python -m pilottunnel.cli service start --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE --require-healthcheck
-python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
-python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service start --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE
+python -m pilottunnel.cli service start --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE --require-healthcheck
+python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --limit 50
 ```
 
 ## Controlled Real Service Stop Gate
@@ -184,9 +184,9 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service stop --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm STOP_SERVICE
-python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
-python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service stop --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm STOP_SERVICE
+python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --limit 50
 ```
 
 ## Controlled Real Service Enable/Disable Gates
@@ -199,9 +199,9 @@ python -m pilottunnel.cli service logs --profile turkey-6221 --adapter backhaul 
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service enable --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm ENABLE_SERVICE
-python -m pilottunnel.cli service disable --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm DISABLE_SERVICE
-python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service enable --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm ENABLE_SERVICE
+python -m pilottunnel.cli service disable --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm DISABLE_SERVICE
+python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Controlled Real Service Restart Gate
@@ -213,9 +213,9 @@ python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhau
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service restart --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE
-python -m pilottunnel.cli service restart --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE --require-healthcheck
-python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service restart --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE
+python -m pilottunnel.cli service restart --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE --require-healthcheck
+python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Controlled Deployment Workflow
@@ -229,26 +229,26 @@ python -m pilottunnel.cli service status --profile turkey-6221 --adapter backhau
 - Enabling the service is optional through `--enable-after-start`.
 
 ```bash
-python -m pilottunnel.cli deploy plan --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli deploy apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck
-python -m pilottunnel.cli deploy apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck --enable-after-start
-python -m pilottunnel.cli deploy status --profile turkey-6221 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli deploy plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli deploy apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck
+python -m pilottunnel.cli deploy apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck --enable-after-start
+python -m pilottunnel.cli deploy status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Two-Sided Controller/Worker Bundles
 
 - One unified CLI is used on both sides.
-- The controller/Iran side exports a worker preparation bundle.
-- The worker/Foreign side inspects and imports that bundle to prepare local files.
+- The controller side exports a worker preparation bundle.
+- The worker side inspects and imports that bundle to prepare local files.
 - No real services are started.
 - No firewall, routes, or systemd changes are performed on the host.
 
 ```bash
 python -m pilottunnel.cli init --role controller
-python -m pilottunnel.cli bundle export-worker --profile turkey-6221 --adapter backhaul --transport tcpmux --output .var/pilottunnel/bundles/turkey-6221-worker.json
+python -m pilottunnel.cli bundle export-worker --profile smoke-l4-001 --adapter backhaul --transport tcpmux --output .var/pilottunnel/bundles/smoke-l4-001-worker.json
 python -m pilottunnel.cli init --role worker
-python -m pilottunnel.cli bundle inspect --input .var/pilottunnel/bundles/turkey-6221-worker.json
-python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/turkey-6221-worker.json --staging-root .var/pilottunnel/staging --confirm IMPORT
+python -m pilottunnel.cli bundle inspect --input .var/pilottunnel/bundles/smoke-l4-001-worker.json
+python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/smoke-l4-001-worker.json --staging-root .var/pilottunnel/staging --confirm IMPORT
 ```
 
 ## End-to-End Local Simulation
@@ -259,18 +259,18 @@ python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/turkey-
 - It is the recommended check before running on real servers.
 
 ```bash
-python -m pilottunnel.cli simulate e2e --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli simulate e2e --profile turkey-6221 --adapter rathole --transport tcp --keep-files
-python -m pilottunnel.cli simulate e2e --profile turkey-6221 --adapter backhaul --transport tcpmux --json
+python -m pilottunnel.cli simulate e2e --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli simulate e2e --profile smoke-l4-001 --adapter rathole --transport tcp --keep-files
+python -m pilottunnel.cli simulate e2e --profile smoke-l4-001 --adapter backhaul --transport tcpmux --json
 ```
 
 ## Single Script, Two Roles
 
-- The same `pilottunnel` CLI is used on Iran and Foreign servers.
-- First `init` asks which side this server is unless `--role` is provided.
-- Iran/controller nodes make switching and profile decisions.
-- Foreign/worker nodes prepare passive-side tasks with the same CLI.
-- No separate Iran or Foreign scripts are needed.
+- The same `pilottunnel` CLI is used on both controller and worker servers.
+- First `init` asks which role this server should use unless `--role` is provided.
+- Controller nodes make switching and profile decisions.
+- Worker nodes prepare passive-side tasks with the same CLI.
+- No separate controller or worker scripts are needed.
 
 ```bash
 python -m pilottunnel.cli init --role controller
@@ -286,10 +286,10 @@ python -m pilottunnel.cli node status
 - It does not modify firewall, routes, or systemd.
 
 ```bash
-python -m pilottunnel.cli healthcheck --host 127.0.0.1 --port 6221
-python -m pilottunnel.cli healthcheck --profile turkey-6221 --all
-python -m pilottunnel.cli healthcheck --profile turkey-6221 --all --json
-python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY --require-healthcheck
+python -m pilottunnel.cli healthcheck --host 127.0.0.1 --port 39080
+python -m pilottunnel.cli healthcheck --profile smoke-l4-001 --all
+python -m pilottunnel.cli healthcheck --profile smoke-l4-001 --all --json
+python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY --require-healthcheck
 ```
 
 ## Server Readiness Report
@@ -300,8 +300,8 @@ python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul
 
 ```bash
 python -m pilottunnel.cli readiness report
-python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter rathole --transport tcp --json
+python -m pilottunnel.cli readiness report --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli readiness report --profile smoke-l4-001 --adapter rathole --transport tcp --json
 ```
 
 ## Controlled Real-Host File Apply
@@ -315,9 +315,9 @@ python -m pilottunnel.cli readiness report --profile turkey-6221 --adapter ratho
 - Rollback restores backups and removes newly-created files from the manifest.
 
 ```bash
-python -m pilottunnel.cli install apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_APPLY
-python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_ROLLBACK
-python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_UNINSTALL
+python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_APPLY
+python -m pilottunnel.cli install rollback --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_ROLLBACK
+python -m pilottunnel.cli uninstall apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_UNINSTALL
 ```
 
 ## Backup and Restore Safety Layer
@@ -342,7 +342,7 @@ python -m pilottunnel.cli restore apply --backup-id BACKUP_ID --confirm RESTORE_
 
 ## What Is Implemented
 
-- Role-aware profile config with `controller/iran` and `worker/foreign` normalization.
+- Role-aware profile config with `controller` and `worker` normalization.
 - Profile safety settings and explicit `main/control/service/check` port ownership.
 - Port mapping parser and validation for common mapping shapes.
 - Dry-run Backhaul and Rathole config/systemd generation with deterministic service names.

@@ -57,27 +57,27 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["profile"]["role"], "controller")
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertEqual(config_data["profiles"][0]["name"], "turkey-6221")
+        self.assertEqual(config_data["profiles"][0]["name"], "smoke-l4-001")
 
     def test_init_with_role_controller_stores_normalized_controller_role(self) -> None:
         code, output = self.run_cli("init", "--role", "controller")
@@ -145,20 +145,20 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self.run_cli("init", "--force", "--role", "worker")
-        code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 1)
         self.assertIn("blocked for node role 'worker'", output)
 
@@ -168,19 +168,19 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
-        code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         self.assertTrue(json.loads(output)["ok"])
 
@@ -200,8 +200,8 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_duplicate_profile_create_is_blocked(self) -> None:
         self.run_cli("init", "--role", "controller")
-        self.run_cli("profile", "create", "--name", "turkey-6221", "--main-port", "6221", "--target-port", "6221")
-        code, output = self.run_cli("profile", "create", "--name", "turkey-6221", "--main-port", "6221", "--target-port", "6221")
+        self.run_cli("profile", "create", "--name", "smoke-l4-001", "--main-port", "38080", "--target-port", "39080")
+        code, output = self.run_cli("profile", "create", "--name", "smoke-l4-001", "--main-port", "38080", "--target-port", "39080")
         self.assertEqual(code, 1)
         self.assertIn("already exists", output)
 
@@ -225,17 +225,17 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
 
     def _create_profile_with_ports(
@@ -278,7 +278,7 @@ class CliWorkflowTests(unittest.TestCase):
             "bundle",
             "export-worker",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             adapter,
             "--transport",
@@ -295,7 +295,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(bundle_path.exists())
         return bundle_path
 
-    def _simulate_e2e(self, adapter: str, transport: str, *, base_root: Path | None = None, keep_files: bool = False, profile: str = "turkey-6221") -> tuple[int, str, dict]:
+    def _simulate_e2e(self, adapter: str, transport: str, *, base_root: Path | None = None, keep_files: bool = False, profile: str = "smoke-l4-001") -> tuple[int, str, dict]:
         args = [
             "simulate",
             "e2e",
@@ -315,11 +315,11 @@ class CliWorkflowTests(unittest.TestCase):
         return code, output, payload
 
     def _stage_switch(self, adapter: str, transport: str) -> None:
-        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", adapter, "--transport", transport)
+        self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", adapter, "--transport", transport)
 
     def test_cli_dry_run_switch_to_backhaul_tcpmux_works(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertTrue(payload["dry_run"])
@@ -329,7 +329,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_cli_dry_run_switch_to_rathole_tcp_works(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "rathole", "--transport", "tcp")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["target"]["adapter"], "rathole")
@@ -368,7 +368,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_profile_healthcheck_checks_expected_ports(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("healthcheck", "--profile", "turkey-6221", "--all")
+        code, output = self.run_cli("healthcheck", "--profile", "smoke-l4-001", "--all")
         self.assertEqual(code, 1)
         payload = json.loads(output)
         labels = {item["label"] for item in payload["results"]}
@@ -381,19 +381,19 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
-        code, output = self.run_cli("healthcheck", "--profile", "turkey-6221", "--role-aware")
+        code, output = self.run_cli("healthcheck", "--profile", "smoke-l4-001", "--role-aware")
         self.assertEqual(code, 1)
         labels = {item["label"] for item in json.loads(output)["results"]}
         self.assertIn("target", labels)
@@ -405,20 +405,20 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self.run_cli("init", "--force", "--role", "worker")
-        code, output = self.run_cli("healthcheck", "--profile", "turkey-6221", "--role-aware")
+        code, output = self.run_cli("healthcheck", "--profile", "smoke-l4-001", "--role-aware")
         self.assertEqual(code, 1)
         labels = {item["label"] for item in json.loads(output)["results"]}
         self.assertIn("worker_target_port", labels)
@@ -438,8 +438,8 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_status_output_includes_active_adapter_transport(self) -> None:
         self._create_profile()
-        self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
-        code, output = self.run_cli("status", "--profile", "turkey-6221")
+        self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("status", "--profile", "smoke-l4-001")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["active_adapter"], "backhaul")
@@ -447,23 +447,23 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_rollback_without_snapshot_fails_safely(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("rollback", "--profile", "turkey-6221")
+        code, output = self.run_cli("rollback", "--profile", "smoke-l4-001")
         self.assertEqual(code, 1)
         self.assertIn("No rollback snapshot available", output)
 
     def test_logs_command_filters_by_profile(self) -> None:
         self._create_profile()
-        self.run_cli("switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.audit.write_text(
             self.audit.read_text(encoding="utf-8")
             + json.dumps({"timestamp": "now", "profile": "other", "action": "switch", "details": {}})
             + "\n",
             encoding="utf-8",
         )
-        code, output = self.run_cli("logs", "--profile", "turkey-6221", "--limit", "5")
+        code, output = self.run_cli("logs", "--profile", "smoke-l4-001", "--limit", "5")
         self.assertEqual(code, 0)
         payload = json.loads(output)
-        self.assertTrue(all(item["profile"] == "turkey-6221" for item in payload))
+        self.assertTrue(all(item["profile"] == "smoke-l4-001" for item in payload))
 
     def test_registry_check_reports_no_conflict_on_valid_config(self) -> None:
         self._create_profile()
@@ -488,7 +488,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "candidates": [],
                 "ports": {
                     "main_port": 7443,
-                    "control_port": 49323,
+                    "control_port": 39081,
                     "service_port": 2206,
                     "check_port": 3206,
                 },
@@ -506,7 +506,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_plan_command_for_backhaul_tcpmux(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["adapter"], "backhaul")
@@ -515,7 +515,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_plan_command_for_rathole_tcp(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("plan", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        code, output = self.run_cli("plan", "--profile", "smoke-l4-001", "--adapter", "rathole", "--transport", "tcp")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["adapter"], "rathole")
@@ -523,27 +523,27 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_apply_writes_backhaul_staged_files_only_under_staging_root(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertTrue(payload["staged_only"])
         self.assertFalse(payload["real_systemd_touched"])
-        self.assertTrue((self.staging_root / "configs" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml").exists())
-        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
-        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+        self.assertTrue((self.staging_root / "configs" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml").exists())
+        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service").exists())
+        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service").exists())
 
     def test_apply_writes_rathole_staged_files_only_under_staging_root(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        code, output = self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "rathole", "--transport", "tcp")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertTrue(payload["staged_only"])
-        self.assertTrue((self.staging_root / "configs" / "turkey-6221" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
-        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-turkey-6221-rathole-tcp-controller.service").exists())
+        self.assertTrue((self.staging_root / "configs" / "smoke-l4-001" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
+        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-smoke-l4-001-rathole-tcp-controller.service").exists())
 
     def test_staged_list_shows_generated_files(self) -> None:
         self._create_profile()
-        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         code, output = self.run_cli("staged", "list")
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -551,21 +551,21 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_staged_show_displays_generated_file_content(self) -> None:
         self._create_profile()
-        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
-        code, output = self.run_cli("staged", "show", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("staged", "show", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertTrue(any("role = controller" in content for content in payload["configs"].values()))
 
     def test_path_traversal_staging_root_or_profile_name_is_blocked(self) -> None:
         self.run_cli("init", "--role", "controller")
-        code, output = self.run_cli("profile", "create", "--name", "../bad", "--main-port", "6221", "--target-port", "6221")
+        code, output = self.run_cli("profile", "create", "--name", "../bad", "--main-port", "38080", "--target-port", "39080")
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", output)
 
     def test_audit_records_staged_only_true(self) -> None:
         self._create_profile()
-        self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         lines = self.audit.read_text(encoding="utf-8").splitlines()
         payload = json.loads(lines[-1])
         self.assertTrue(payload["details"]["staged_only"])
@@ -576,7 +576,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -588,8 +588,8 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["action"], "start")
         self.assertFalse(payload["real_systemd_touched"])
-        self.assertIn("systemctl start pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", payload["future_command"])
-        self.assertIn("systemctl start pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", payload["plan_steps"][0])
+        self.assertIn("systemctl start pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", payload["future_command"])
+        self.assertIn("systemctl start pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", payload["plan_steps"][0])
 
     def test_service_plan_for_rathole_stop_is_read_only(self) -> None:
         self._create_profile()
@@ -597,7 +597,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "rathole",
             "--transport",
@@ -608,7 +608,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["action"], "stop")
-        self.assertIn("systemctl stop pilottunnel-turkey-6221-rathole-tcp-controller.service", payload["future_command"])
+        self.assertIn("systemctl stop pilottunnel-smoke-l4-001-rathole-tcp-controller.service", payload["future_command"])
 
     def test_service_plan_enable_and_disable_are_supported(self) -> None:
         self._create_profile()
@@ -616,7 +616,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -628,7 +628,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -647,7 +647,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -667,7 +667,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "missing",
             "--transport",
@@ -684,7 +684,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -701,7 +701,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -720,27 +720,27 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         controller_code, controller_output = self.run_cli(
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -755,7 +755,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -774,7 +774,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "status",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -795,7 +795,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "logs",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -884,7 +884,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "status",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -908,7 +908,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "logs",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -938,7 +938,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "status",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -949,7 +949,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "logs",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -974,7 +974,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "status",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -985,7 +985,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "logs",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1003,7 +1003,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "status",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "missing",
             "--transport",
@@ -1019,7 +1019,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "status",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -1035,21 +1035,21 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
 
         def fake_run(command, **kwargs):
@@ -1065,7 +1065,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "status",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1081,7 +1081,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "status",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1107,7 +1107,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "status",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1118,7 +1118,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "logs",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1138,7 +1138,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "start",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -1158,7 +1158,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1177,7 +1177,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1198,7 +1198,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1219,7 +1219,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1239,7 +1239,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1260,7 +1260,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1293,7 +1293,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1304,7 +1304,7 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertEqual(calls[0], ["systemctl", "start", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"])
+        self.assertEqual(calls[0], ["systemctl", "start", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"])
         self.assertTrue(payload["service_started"])
         self.assertTrue(payload["real_systemd_touched"])
 
@@ -1329,7 +1329,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1362,7 +1362,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1373,8 +1373,8 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertIn(["systemctl", "is-active", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
-        self.assertIn(["systemctl", "status", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", "--no-pager"], calls)
+        self.assertIn(["systemctl", "is-active", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "status", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", "--no-pager"], calls)
         self.assertEqual(payload["status"]["is_active"], "active")
         self.assertTrue(payload["status"]["read_only"])
 
@@ -1384,13 +1384,13 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": False,
                 "host": "127.0.0.1",
-                "port": 6221,
+                "port": 38080,
                 "timeout": 2.0,
                 "latency_ms": None,
                 "error": "failed",
                 "checked_at": "now",
                 "role": "controller",
-                "profile": "turkey-6221",
+                "profile": "smoke-l4-001",
                 "label": "target",
             }
         ]
@@ -1414,7 +1414,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1436,13 +1436,13 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": True,
                 "host": "127.0.0.1",
-                "port": 6221,
+                "port": 38080,
                 "timeout": 2.0,
                 "latency_ms": 1.0,
                 "error": "",
                 "checked_at": "now",
                 "role": "controller",
-                "profile": "turkey-6221",
+                "profile": "smoke-l4-001",
                 "label": "target",
             }
         ]
@@ -1463,7 +1463,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1482,7 +1482,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "restart",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -1498,11 +1498,11 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
         )
         self._prepare_real_systemd_unit()
         with self._mock_real_systemd():
@@ -1510,7 +1510,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1531,7 +1531,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1550,7 +1550,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1571,7 +1571,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1592,7 +1592,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1612,7 +1612,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1633,7 +1633,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1666,7 +1666,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1677,7 +1677,7 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertEqual(calls[0], ["systemctl", "restart", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"])
+        self.assertEqual(calls[0], ["systemctl", "restart", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"])
         self.assertTrue(payload["service_restarted"])
         self.assertTrue(payload["real_systemd_touched"])
 
@@ -1702,7 +1702,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1741,7 +1741,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1752,9 +1752,9 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertIn(["systemctl", "is-enabled", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
-        self.assertIn(["systemctl", "is-active", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
-        self.assertIn(["systemctl", "status", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", "--no-pager"], calls)
+        self.assertIn(["systemctl", "is-enabled", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "is-active", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "status", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", "--no-pager"], calls)
         self.assertEqual(payload["status"]["is_enabled"], "enabled")
         self.assertEqual(payload["status"]["is_active"], "active")
         self.assertTrue(payload["status"]["read_only"])
@@ -1765,13 +1765,13 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": False,
                 "host": "127.0.0.1",
-                "port": 6221,
+                "port": 38080,
                 "timeout": 2.0,
                 "latency_ms": None,
                 "error": "failed",
                 "checked_at": "now",
                 "role": "controller",
-                "profile": "turkey-6221",
+                "profile": "smoke-l4-001",
                 "label": "target",
             }
         ]
@@ -1795,7 +1795,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1817,13 +1817,13 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": True,
                 "host": "127.0.0.1",
-                "port": 6221,
+                "port": 38080,
                 "timeout": 2.0,
                 "latency_ms": 1.0,
                 "error": "",
                 "checked_at": "now",
                 "role": "controller",
-                "profile": "turkey-6221",
+                "profile": "smoke-l4-001",
                 "label": "target",
             }
         ]
@@ -1844,7 +1844,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1865,7 +1865,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "missing",
                 "--transport",
@@ -1885,7 +1885,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1903,21 +1903,21 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -1934,7 +1934,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1953,7 +1953,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -1991,7 +1991,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2005,7 +2005,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2036,7 +2036,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "restart",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2060,7 +2060,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2086,7 +2086,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2118,7 +2118,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2135,7 +2135,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2152,7 +2152,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2172,7 +2172,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2194,7 +2194,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2221,7 +2221,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "deploy",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2252,7 +2252,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "deploy",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2284,7 +2284,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "deploy",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2322,7 +2322,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "deploy",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -2358,7 +2358,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2374,7 +2374,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2407,7 +2407,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2431,13 +2431,13 @@ class CliWorkflowTests(unittest.TestCase):
         mock_readiness.return_value = self._readiness_ok()
         mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
         mock_healthchecks.return_value = [
-            {"ok": True, "host": "127.0.0.1", "port": 6221, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "turkey-6221", "label": "target"}
+            {"ok": True, "host": "127.0.0.1", "port": 39080, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
         ]
         code, output = self.run_cli(
             "deploy",
             "status",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2459,13 +2459,13 @@ class CliWorkflowTests(unittest.TestCase):
         mock_readiness.return_value = self._readiness_ok()
         mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
         mock_healthchecks.return_value = [
-            {"ok": True, "host": "127.0.0.1", "port": 6221, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "turkey-6221", "label": "target"}
+            {"ok": True, "host": "127.0.0.1", "port": 39080, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
         ]
         code, output = self.run_cli(
             "deploy",
             "status",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2484,7 +2484,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "missing",
             "--transport",
@@ -2499,7 +2499,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2528,14 +2528,14 @@ class CliWorkflowTests(unittest.TestCase):
         mock_ownership.return_value = {"ok": True, "message": "owned"}
         mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
         mock_healthchecks.return_value = [
-            {"ok": True, "host": "127.0.0.1", "port": 6221, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "turkey-6221", "label": "target"}
+            {"ok": True, "host": "127.0.0.1", "port": 39080, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
         ]
-        self.run_cli("deploy", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        self.run_cli("deploy", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.run_cli(
             "deploy",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2548,7 +2548,7 @@ class CliWorkflowTests(unittest.TestCase):
             "deploy",
             "status",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -2763,7 +2763,7 @@ class CliWorkflowTests(unittest.TestCase):
             "BACKUP_CREATE",
         )
         backup_id = json.loads(create_output)["backup_id"]
-        target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target = install_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
         original = target.read_text(encoding="utf-8")
         target.write_text("modified", encoding="utf-8")
         code, output = self.run_cli(
@@ -2794,7 +2794,7 @@ class CliWorkflowTests(unittest.TestCase):
             "BACKUP_CREATE",
         )
         backup_id = json.loads(create_output)["backup_id"]
-        target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target = install_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
         target.write_text("modified", encoding="utf-8")
         code, output = self.run_cli(
             "restore",
@@ -3007,7 +3007,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "missing",
                 "--transport",
@@ -3027,7 +3027,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3045,21 +3045,21 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -3076,7 +3076,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3095,7 +3095,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3133,7 +3133,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3147,7 +3147,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3178,7 +3178,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "start",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3198,7 +3198,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "stop",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -3214,11 +3214,11 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-port",
-            "6221",
+            "38080",
         )
         self._prepare_real_systemd_unit()
         with self._mock_real_systemd():
@@ -3226,7 +3226,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3247,7 +3247,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3266,7 +3266,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3287,7 +3287,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3308,7 +3308,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3328,7 +3328,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3349,7 +3349,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3382,7 +3382,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3393,7 +3393,7 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertEqual(calls[0], ["systemctl", "stop", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"])
+        self.assertEqual(calls[0], ["systemctl", "stop", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"])
         self.assertTrue(payload["service_stopped"])
         self.assertTrue(payload["real_systemd_touched"])
 
@@ -3418,7 +3418,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3452,7 +3452,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3463,8 +3463,8 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertIn(["systemctl", "is-active", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
-        self.assertIn(["systemctl", "status", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", "--no-pager"], calls)
+        self.assertIn(["systemctl", "is-active", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "status", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", "--no-pager"], calls)
         self.assertEqual(payload["status"]["is_active"], "inactive")
         self.assertTrue(payload["status"]["read_only"])
 
@@ -3474,7 +3474,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "enable",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -3494,7 +3494,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3513,7 +3513,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3534,7 +3534,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3555,7 +3555,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3575,7 +3575,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3596,7 +3596,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3629,7 +3629,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3640,7 +3640,7 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertEqual(calls[0], ["systemctl", "enable", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"])
+        self.assertEqual(calls[0], ["systemctl", "enable", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"])
         self.assertTrue(payload["service_enabled"])
         self.assertTrue(payload["real_systemd_touched"])
 
@@ -3665,7 +3665,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3704,7 +3704,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3715,9 +3715,9 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertIn(["systemctl", "is-enabled", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
-        self.assertIn(["systemctl", "is-active", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"], calls)
-        self.assertIn(["systemctl", "status", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", "--no-pager"], calls)
+        self.assertIn(["systemctl", "is-enabled", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "is-active", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"], calls)
+        self.assertIn(["systemctl", "status", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", "--no-pager"], calls)
         self.assertEqual(payload["status"]["is_enabled"], "enabled")
         self.assertEqual(payload["status"]["is_active"], "inactive")
         self.assertTrue(payload["status"]["read_only"])
@@ -3728,7 +3728,7 @@ class CliWorkflowTests(unittest.TestCase):
             "service",
             "disable",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -3748,7 +3748,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3779,7 +3779,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3790,7 +3790,7 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
-        self.assertEqual(calls[0], ["systemctl", "disable", "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"])
+        self.assertEqual(calls[0], ["systemctl", "disable", "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"])
         self.assertTrue(payload["service_disabled"])
         self.assertTrue(payload["real_systemd_touched"])
 
@@ -3815,7 +3815,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3834,21 +3834,21 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -3865,7 +3865,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3884,7 +3884,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3904,7 +3904,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "missing",
                 "--transport",
@@ -3924,7 +3924,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3962,7 +3962,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -3976,7 +3976,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4008,7 +4008,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "enable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4022,7 +4022,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "disable",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4045,7 +4045,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "missing",
                 "--transport",
@@ -4065,7 +4065,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4083,21 +4083,21 @@ class CliWorkflowTests(unittest.TestCase):
             "profile",
             "create",
             "--name",
-            "turkey-6221",
+            "smoke-l4-001",
             "--main-port",
-            "6221",
+            "38080",
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "6221",
+            "38080",
             "--role",
             "iran",
             "--control-port",
-            "49323",
+            "39081",
             "--service-port",
-            "2106",
+            "39082",
             "--check-port",
-            "3106",
+            "39083",
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -4114,7 +4114,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4133,7 +4133,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4171,7 +4171,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4185,7 +4185,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4216,7 +4216,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "service",
                 "stop",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -4240,7 +4240,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_preflight_with_profile_does_not_crash(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("preflight", "--profile", "turkey-6221")
+        code, output = self.run_cli("preflight", "--profile", "smoke-l4-001")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertIn("port_availability", payload)
@@ -4286,7 +4286,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_readiness_report_with_missing_binary_shows_warning_and_blocker(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("readiness", "report", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 1)
         payload = json.loads(output)
         self.assertFalse(payload["binary_imported"])
@@ -4295,17 +4295,17 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_readiness_report_with_existing_profile_shows_profile_exists(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221")
+        code, output = self.run_cli("readiness", "report", "--profile", "smoke-l4-001")
         self.assertEqual(code, 1)
         payload = json.loads(output)
         self.assertTrue(payload["profile_exists"])
-        self.assertEqual(payload["profile"], "turkey-6221")
+        self.assertEqual(payload["profile"], "smoke-l4-001")
 
     def test_readiness_report_with_staged_files_shows_staged_ready_or_higher(self) -> None:
         ports, listeners = self._allocate_tcp_ports(5)
         try:
             self._create_profile_with_ports(
-                name="turkey-6221",
+                name="smoke-l4-001",
                 main_port=ports[0],
                 target_port=ports[1],
                 control_port=ports[2],
@@ -4314,8 +4314,8 @@ class CliWorkflowTests(unittest.TestCase):
             )
             source = self._make_binary_source("backhaul")
             self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
-            self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
-            code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+            self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
+            code, output = self.run_cli("readiness", "report", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
             self.assertEqual(code, 0, msg=output)
             payload = json.loads(output)
             self.assertIn(payload["readiness_level"], {"staged_ready", "install_plan_ready", "service_plan_ready"})
@@ -4331,19 +4331,19 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("ok", payload)
 
     def test_readiness_report_rejects_path_traversal(self) -> None:
-        code, output = self.run_cli("readiness", "report", "--profile", "../turkey-6221")
+        code, output = self.run_cli("readiness", "report", "--profile", "../smoke-l4-001")
         self.assertEqual(code, 1)
         self.assertIn("Path traversal blocked", output)
 
     def test_readiness_report_unknown_adapter_rejected(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "missing", "--transport", "tcp")
+        code, output = self.run_cli("readiness", "report", "--profile", "smoke-l4-001", "--adapter", "missing", "--transport", "tcp")
         self.assertEqual(code, 1)
         self.assertIn("Unknown adapter", output)
 
     def test_readiness_report_unsupported_transport_rejected(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("readiness", "report", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcptun")
+        code, output = self.run_cli("readiness", "report", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcptun")
         self.assertEqual(code, 1)
         self.assertIn("blocked in v0.1", output)
 
@@ -4407,7 +4407,7 @@ class CliWorkflowTests(unittest.TestCase):
             "bundle",
             "export-worker",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -4424,7 +4424,7 @@ class CliWorkflowTests(unittest.TestCase):
             "bundle",
             "export-worker",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "missing",
             "--transport",
@@ -4441,7 +4441,7 @@ class CliWorkflowTests(unittest.TestCase):
             "bundle",
             "export-worker",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -4459,7 +4459,7 @@ class CliWorkflowTests(unittest.TestCase):
             "bundle",
             "export-worker",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -4521,8 +4521,8 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(payload["config_written"])
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(config_data["profiles"][0]["role"], "worker")
-        self.assertTrue((self.staging_root / "configs" / "turkey-6221" / "backhaul" / "tcpmux" / "worker" / "backhaul-worker.toml").exists())
-        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-turkey-6221-backhaul-tcpmux-worker.service").exists())
+        self.assertTrue((self.staging_root / "configs" / "smoke-l4-001" / "backhaul" / "tcpmux" / "worker" / "backhaul-worker.toml").exists())
+        self.assertTrue((self.staging_root / "systemd" / "pilottunnel-smoke-l4-001-backhaul-tcpmux-worker.service").exists())
         mock_run.assert_not_called()
 
     def test_controller_bundle_import_refuses_unless_force(self) -> None:
@@ -4548,17 +4548,17 @@ class CliWorkflowTests(unittest.TestCase):
                     "bundle_type": "worker_prepare",
                     "created_at": "2024-01-01T00:00:00Z",
                     "profile": {
-                        "name": "turkey-6221",
-                        "main_port": 6221,
+                        "name": "smoke-l4-001",
+                        "main_port": 38080,
                         "target_host": "127.0.0.1",
-                        "target_port": 6221,
+                        "target_port": 39080,
                         "role": "worker",
                     },
                     "adapter": "backhaul",
                     "transport": "tcpmux",
                     "controller_role": "controller",
                     "worker_role": "worker",
-                    "service_names": {"worker": "pilottunnel-turkey-6221-backhaul-tcpmux-worker.service"},
+                    "service_names": {"worker": "pilottunnel-smoke-l4-001-backhaul-tcpmux-worker.service"},
                     "config_filenames": {"worker": "backhaul-worker.toml"},
                     "healthcheck_expectations": [],
                     "warnings": [],
@@ -4626,7 +4626,7 @@ class CliWorkflowTests(unittest.TestCase):
             "simulate",
             "e2e",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -4656,7 +4656,7 @@ class CliWorkflowTests(unittest.TestCase):
             "simulate",
             "e2e",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "missing",
             "--transport",
@@ -4670,7 +4670,7 @@ class CliWorkflowTests(unittest.TestCase):
             "simulate",
             "e2e",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -4698,7 +4698,7 @@ class CliWorkflowTests(unittest.TestCase):
         code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
         self.assertEqual(code, 0, msg=output)
         self.assertIn("bundle_path", payload)
-        self.assertTrue(payload["bundle_path"].endswith("turkey-6221-worker.json"))
+        self.assertTrue(payload["bundle_path"].endswith("smoke-l4-001-worker.json"))
 
     def test_simulate_output_confirms_no_system_changes(self) -> None:
         code, output, payload = self._simulate_e2e("backhaul", "tcpmux")
@@ -4726,7 +4726,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_staged_switch_output_includes_preflight_info(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("--apply", "switch", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertIn("preflight", payload)
@@ -4752,7 +4752,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -4848,7 +4848,7 @@ class CliWorkflowTests(unittest.TestCase):
     def _prepare_real_systemd_unit(
         self,
         *,
-        profile: str = "turkey-6221",
+        profile: str = "smoke-l4-001",
         adapter: str = "backhaul",
         transport: str = "tcpmux",
         role: str = "controller",
@@ -4985,12 +4985,12 @@ class CliWorkflowTests(unittest.TestCase):
         self._stage_switch("backhaul", "tcpmux")
         source = self._make_binary_source("backhaul")
         self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         destinations = {item["kind"]: item["path"] for item in payload["planned_destination_files"]}
-        self.assertIn("/etc/pilottunnel/profiles/turkey-6221/backhaul/tcpmux/controller/backhaul-controller.toml", destinations["config"])
-        self.assertIn("/etc/systemd/system/pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", destinations["systemd_unit"])
+        self.assertIn("/etc/pilottunnel/profiles/smoke-l4-001/backhaul/tcpmux/controller/backhaul-controller.toml", destinations["config"])
+        self.assertIn("/etc/systemd/system/pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", destinations["systemd_unit"])
         self.assertIn("/usr/local/bin/backhaul", destinations["binary"])
 
     def test_install_plan_for_rathole_tcp_includes_expected_destinations(self) -> None:
@@ -4998,22 +4998,22 @@ class CliWorkflowTests(unittest.TestCase):
         self._stage_switch("rathole", "tcp")
         source = self._make_binary_source("rathole")
         self.run_cli("binary", "import", "--adapter", "rathole", "--source", str(source), "--version", "manual-v0.0.0")
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "rathole", "--transport", "tcp")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "rathole", "--transport", "tcp")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         destinations = {item["kind"]: item["path"] for item in payload["planned_destination_files"]}
-        self.assertIn("/etc/pilottunnel/profiles/turkey-6221/rathole/tcp/controller/rathole-controller.toml", destinations["config"])
-        self.assertIn("/etc/systemd/system/pilottunnel-turkey-6221-rathole-tcp-controller.service", destinations["systemd_unit"])
+        self.assertIn("/etc/pilottunnel/profiles/smoke-l4-001/rathole/tcp/controller/rathole-controller.toml", destinations["config"])
+        self.assertIn("/etc/systemd/system/pilottunnel-smoke-l4-001-rathole-tcp-controller.service", destinations["systemd_unit"])
         self.assertIn("/usr/local/bin/rathole", destinations["binary"])
 
     def test_install_plan_does_not_touch_real_system_paths(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertFalse(payload["real_systemd_touched"])
         self.assertFalse(payload["service_started"])
-        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service").exists())
 
     def test_install_plan_with_test_install_root_stays_inside_temp_root(self) -> None:
         self._create_profile()
@@ -5023,7 +5023,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5038,7 +5038,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_install_plan_reports_missing_staged_files_with_warnings(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertTrue(any("run staged apply first" in item.lower() for item in payload["warnings"]))
@@ -5048,22 +5048,22 @@ class CliWorkflowTests(unittest.TestCase):
         self._stage_switch("backhaul", "tcpmux")
         source = self._make_binary_source("backhaul")
         self.run_cli("binary", "import", "--adapter", "backhaul", "--source", str(source), "--version", "manual-v0.0.0")
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertTrue(payload["binary"]["imported_binary_exists"])
 
     def test_uninstall_plan_includes_service_and_file_cleanup_steps(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("uninstall", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("uninstall", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
-        self.assertIn("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service", payload["services_that_would_be_stopped_disabled"][0])
+        self.assertIn("pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service", payload["services_that_would_be_stopped_disabled"][0])
         self.assertTrue(any(path.endswith("backhaul-controller.toml") for path in payload["files_that_would_be_removed"]))
 
     def test_uninstall_plan_does_not_stop_real_services(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("uninstall", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux")
+        code, output = self.run_cli("uninstall", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertFalse(payload["real_systemd_touched"])
@@ -5078,7 +5078,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "plan",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5091,19 +5091,19 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_install_plan_blocks_unsupported_backhaul_experimental_transport(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcptun")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcptun")
         self.assertEqual(code, 1)
         self.assertIn("blocked in v0.1", output)
 
     def test_install_plan_rejects_unknown_adapter(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "missing", "--transport", "tcp")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "missing", "--transport", "tcp")
         self.assertEqual(code, 1)
         self.assertIn("Unknown adapter", output)
 
     def test_install_plan_json_output_is_valid(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("install", "plan", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux", "--json")
+        code, output = self.run_cli("install", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux", "--json")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["action"], "install-plan")
@@ -5116,7 +5116,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5136,7 +5136,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5157,13 +5157,13 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": True,
                 "host": "127.0.0.1",
-                "port": 6221,
+                "port": 38080,
                 "timeout": 2.0,
                 "latency_ms": 1.0,
                 "error": "",
                 "checked_at": "now",
                 "role": "controller",
-                "profile": "turkey-6221",
+                "profile": "smoke-l4-001",
                 "label": "target",
             }
         ]
@@ -5175,7 +5175,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5197,7 +5197,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5217,7 +5217,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5239,7 +5239,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5251,8 +5251,8 @@ class CliWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
-        self.assertTrue((install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml").exists())
-        self.assertTrue((install_root / "etc" / "systemd" / "system" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+        self.assertTrue((install_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml").exists())
+        self.assertTrue((install_root / "etc" / "systemd" / "system" / "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service").exists())
         self.assertTrue((install_root / "usr" / "local" / "bin" / "backhaul.exe").exists() or (install_root / "usr" / "local" / "bin" / "backhaul").exists())
         self.assertFalse(payload["real_systemd_touched"])
 
@@ -5265,7 +5265,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "rathole",
             "--transport",
@@ -5276,21 +5276,21 @@ class CliWorkflowTests(unittest.TestCase):
             "APPLY",
         )
         self.assertEqual(code, 0)
-        self.assertTrue((install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
+        self.assertTrue((install_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
 
     def test_install_apply_creates_backup_before_overwrite(self) -> None:
         self._create_profile()
         self._stage_switch("backhaul", "tcpmux")
         self._import_binary("backhaul")
         install_root = Path(self.temp_dir.name) / "install-root"
-        target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target = install_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("old-config", encoding="utf-8")
         code, output = self.run_cli(
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5314,7 +5314,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5329,7 +5329,7 @@ class CliWorkflowTests(unittest.TestCase):
         manifest_path = Path(payload["manifest_path"])
         self.assertTrue(manifest_path.exists())
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["profile"], "turkey-6221")
+        self.assertEqual(manifest["profile"], "smoke-l4-001")
         self.assertFalse(manifest["service_started"])
 
     def test_install_apply_does_not_call_systemctl(self) -> None:
@@ -5341,7 +5341,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5366,7 +5366,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5377,11 +5377,11 @@ class CliWorkflowTests(unittest.TestCase):
             "APPLY",
         )
         self.assertEqual(code, 0)
-        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-turkey-6221-backhaul-tcpmux-controller.service").exists())
+        self.assertFalse(Path("/etc/systemd/system").joinpath("pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service").exists())
 
     def test_install_rollback_refuses_without_confirm_rollback(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("install", "rollback", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux", "--install-root", str(Path(self.temp_dir.name) / "install-root"))
+        code, output = self.run_cli("install", "rollback", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux", "--install-root", str(Path(self.temp_dir.name) / "install-root"))
         self.assertEqual(code, 1)
         self.assertIn("--confirm ROLLBACK", output)
 
@@ -5390,14 +5390,14 @@ class CliWorkflowTests(unittest.TestCase):
         self._stage_switch("backhaul", "tcpmux")
         self._import_binary("backhaul")
         install_root = Path(self.temp_dir.name) / "install-root"
-        config_target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        config_target = install_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
         config_target.parent.mkdir(parents=True, exist_ok=True)
         config_target.write_text("old-config", encoding="utf-8")
         self.run_cli(
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5407,13 +5407,13 @@ class CliWorkflowTests(unittest.TestCase):
             "--confirm",
             "APPLY",
         )
-        unit_target = install_root / "etc" / "systemd" / "system" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"
+        unit_target = install_root / "etc" / "systemd" / "system" / "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"
         self.assertTrue(unit_target.exists())
         code, output = self.run_cli(
             "install",
             "rollback",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5429,7 +5429,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_uninstall_apply_refuses_without_confirm_uninstall(self) -> None:
         self._create_profile()
-        code, output = self.run_cli("uninstall", "apply", "--profile", "turkey-6221", "--adapter", "backhaul", "--transport", "tcpmux", "--install-root", str(Path(self.temp_dir.name) / "install-root"))
+        code, output = self.run_cli("uninstall", "apply", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux", "--install-root", str(Path(self.temp_dir.name) / "install-root"))
         self.assertEqual(code, 1)
         self.assertIn("--confirm UNINSTALL", output)
 
@@ -5442,7 +5442,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5459,7 +5459,7 @@ class CliWorkflowTests(unittest.TestCase):
             "uninstall",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5483,7 +5483,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5523,7 +5523,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5543,7 +5543,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5562,7 +5562,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5583,7 +5583,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5605,7 +5605,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5627,7 +5627,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5648,7 +5648,7 @@ class CliWorkflowTests(unittest.TestCase):
         self._stage_switch("backhaul", "tcpmux")
         self._import_binary("backhaul")
         real_root = Path(self.temp_dir.name) / "real-host"
-        target = real_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target = real_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("old-config", encoding="utf-8")
         with self._mock_real_host():
@@ -5656,7 +5656,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5680,7 +5680,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5702,7 +5702,7 @@ class CliWorkflowTests(unittest.TestCase):
         self._stage_switch("backhaul", "tcpmux")
         self._import_binary("backhaul")
         real_root = Path(self.temp_dir.name) / "real-host"
-        config_target = real_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        config_target = real_root / "etc" / "pilottunnel" / "profiles" / "smoke-l4-001" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
         config_target.parent.mkdir(parents=True, exist_ok=True)
         config_target.write_text("old-config", encoding="utf-8")
         with self._mock_real_host():
@@ -5710,7 +5710,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5723,7 +5723,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "rollback",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5734,7 +5734,7 @@ class CliWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, msg=output)
         self.assertEqual(config_target.read_text(encoding="utf-8"), "old-config")
-        unit_target = real_root / "etc" / "systemd" / "system" / "pilottunnel-turkey-6221-backhaul-tcpmux-controller.service"
+        unit_target = real_root / "etc" / "systemd" / "system" / "pilottunnel-smoke-l4-001-backhaul-tcpmux-controller.service"
         self.assertFalse(unit_target.exists())
 
     def test_real_host_uninstall_refuses_without_confirm_real_files_uninstall(self) -> None:
@@ -5744,7 +5744,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "uninstall",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5764,7 +5764,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5780,7 +5780,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "uninstall",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5804,7 +5804,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5829,7 +5829,7 @@ class CliWorkflowTests(unittest.TestCase):
                 "install",
                 "apply",
                 "--profile",
-                "turkey-6221",
+                "smoke-l4-001",
                 "--adapter",
                 "backhaul",
                 "--transport",
@@ -5873,7 +5873,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5887,7 +5887,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "rollback",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5901,7 +5901,7 @@ class CliWorkflowTests(unittest.TestCase):
             "install",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",
@@ -5915,7 +5915,7 @@ class CliWorkflowTests(unittest.TestCase):
             "uninstall",
             "apply",
             "--profile",
-            "turkey-6221",
+            "smoke-l4-001",
             "--adapter",
             "backhaul",
             "--transport",

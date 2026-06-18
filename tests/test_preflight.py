@@ -38,9 +38,9 @@ class PreflightTests(unittest.TestCase):
 
     def test_preflight_ports_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            profile = Profile(name="turkey-6221", main_port=6221, target_host="127.0.0.1", target_port=6221)
+            profile = Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)
             result = run_preflight(Path(temp_dir), profile).to_dict()
-            self.assertIn(6221, {int(key) for key in result["port_availability"].keys()})
+            self.assertIn(38080, {int(key) for key in result["port_availability"].keys()})
 
     @patch("pilottunnel.binaries.subprocess.run")
     def test_verify_run_version_is_timeout_safe(self, mock_run) -> None:

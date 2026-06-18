@@ -17,7 +17,7 @@ class SafetyTests(unittest.TestCase):
             log_path = Path(temp_dir) / "audit.log"
             write_audit_log(
                 "switch",
-                "turkey-6221",
+                "smoke-l4-001",
                 {"token": "123", "dry_run": True, "nested": {"password": "abc"}},
                 log_path,
             )
@@ -28,7 +28,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_unsupported_layers_are_listed_but_blocked(self) -> None:
         self.assertIn("layer7", SUPPORTED_LAYERS)
-        config = AppConfig(profiles=[Profile(name="turkey-6221", main_port=6221, target_host="127.0.0.1", target_port=6221)])
+        config = AppConfig(profiles=[Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)])
         engine = SwitchEngine(
             config=config,
             state=AppState(),
@@ -41,11 +41,11 @@ class SafetyTests(unittest.TestCase):
             ),
         )
         with self.assertRaises(ValueError):
-            engine.switch("turkey-6221", "wstunnel", "ws", apply_changes=False)
+            engine.switch("smoke-l4-001", "wstunnel", "ws", apply_changes=False)
 
     def test_unsupported_backhaul_experimental_tun_transports_blocked(self) -> None:
         adapter = ADAPTERS["backhaul"]()
-        profile = Profile(name="turkey-6221", main_port=6221, target_host="127.0.0.1", target_port=6221)
+        profile = Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)
         ok, reason = adapter.precheck(
             __import__("pilottunnel.adapters.base", fromlist=["AdapterContext"]).AdapterContext(
                 profile=profile,
@@ -63,11 +63,11 @@ class SafetyTests(unittest.TestCase):
             owners={
                 "a": RegistryEntry(
                     profile="a",
-                    main_port=6221,
+                    main_port=38080,
                     adapter="backhaul",
                     transport="tcp",
                     role="controller",
-                    owned_ports=[6221, 7001, 7002, 7003],
+                    owned_ports=[38080, 39081, 39082, 39083],
                     owned_services=["svc-a"],
                 ),
                 "b": RegistryEntry(
@@ -76,7 +76,7 @@ class SafetyTests(unittest.TestCase):
                     adapter="rathole",
                     transport="tcp",
                     role="worker",
-                    owned_ports=[7443, 7003],
+                    owned_ports=[7443, 39083],
                     owned_services=["svc-b"],
                 ),
             }

@@ -73,14 +73,14 @@ class SwitchEngineTests(unittest.TestCase):
         config = AppConfig(
             profiles=[
                 Profile(
-                    name="turkey-6221",
-                    main_port=6221,
+                    name="smoke-l4-001",
+                    main_port=38080,
                     target_host="127.0.0.1",
-                    target_port=6221,
+                    target_port=39080,
                     role="controller",
                     active_adapter="backhaul",
                     active_transport="tcp",
-                    ports=ProfilePorts(main_port=6221, control_port=7001, service_port=7002, check_port=7003),
+                    ports=ProfilePorts(main_port=38080, control_port=39081, service_port=39082, check_port=39083),
                 )
             ]
         )
@@ -93,8 +93,8 @@ class SwitchEngineTests(unittest.TestCase):
         if state is None:
             state = AppState(
                 profiles={
-                    "turkey-6221": RuntimeRecord(
-                        profile="turkey-6221",
+                    "smoke-l4-001": RuntimeRecord(
+                        profile="smoke-l4-001",
                         active_adapter="backhaul",
                         active_transport="tcp",
                         role="controller",
@@ -108,13 +108,13 @@ class SwitchEngineTests(unittest.TestCase):
             state=state,
             registry=PortRegistry(
                 owners={
-                    "turkey-6221": RegistryEntry(
-                        profile="turkey-6221",
-                        main_port=6221,
+                    "smoke-l4-001": RegistryEntry(
+                        profile="smoke-l4-001",
+                        main_port=38080,
                         adapter="backhaul",
                         transport="tcp",
                         role="controller",
-                        owned_ports=[6221, 7001, 7002, 7003],
+                        owned_ports=[38080, 39081, 39082, 39083],
                         owned_services=["svc-backhaul-tcp-controller"],
                     )
                 }
@@ -132,10 +132,10 @@ class SwitchEngineTests(unittest.TestCase):
             "rathole": StubAdapter("rathole", events, transports=("tcp",)),
         }
         engine, _ = self._engine(adapters)
-        result = engine.switch("turkey-6221", "backhaul", "tcpmux", apply_changes=False)
+        result = engine.switch("smoke-l4-001", "backhaul", "tcpmux", apply_changes=False)
         self.assertTrue(result.ok)
         self.assertTrue(result.dry_run)
-        self.assertEqual(engine.registry.owners["turkey-6221"].transport, "tcpmux")
+        self.assertEqual(engine.registry.owners["smoke-l4-001"].transport, "tcpmux")
 
     def test_manual_switch_to_rathole_tcp_dry_run(self) -> None:
         events: list[str] = []
@@ -144,9 +144,9 @@ class SwitchEngineTests(unittest.TestCase):
             "rathole": StubAdapter("rathole", events, transports=("tcp",)),
         }
         engine, _ = self._engine(adapters)
-        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
+        result = engine.switch("smoke-l4-001", "rathole", "tcp", apply_changes=False)
         self.assertTrue(result.ok)
-        self.assertEqual(engine.registry.owners["turkey-6221"].adapter, "rathole")
+        self.assertEqual(engine.registry.owners["smoke-l4-001"].adapter, "rathole")
 
     def test_old_tunnel_stop_happens_before_new_commit(self) -> None:
         events: list[str] = []
@@ -155,7 +155,7 @@ class SwitchEngineTests(unittest.TestCase):
             "rathole": StubAdapter("rathole", events, transports=("tcp",)),
         }
         engine, _ = self._engine(adapters)
-        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
+        result = engine.switch("smoke-l4-001", "rathole", "tcp", apply_changes=False)
         self.assertTrue(result.ok)
         self.assertLess(events.index("backhaul:stop"), events.index("rathole:start"))
 
@@ -166,10 +166,10 @@ class SwitchEngineTests(unittest.TestCase):
             "rathole": StubAdapter("rathole", events, transports=("tcp",), healthy=False),
         }
         engine, _ = self._engine(adapters)
-        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
+        result = engine.switch("smoke-l4-001", "rathole", "tcp", apply_changes=False)
         self.assertFalse(result.ok)
         self.assertTrue(result.rollback_performed)
-        self.assertEqual(engine.registry.owners["turkey-6221"].adapter, "backhaul")
+        self.assertEqual(engine.registry.owners["smoke-l4-001"].adapter, "backhaul")
         self.assertIn("backhaul:start", events)
 
     def test_audit_records_dry_run_switch_metadata(self) -> None:
@@ -179,7 +179,7 @@ class SwitchEngineTests(unittest.TestCase):
             "rathole": StubAdapter("rathole", events, transports=("tcp",)),
         }
         engine, temp_dir = self._engine(adapters)
-        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=False)
+        result = engine.switch("smoke-l4-001", "rathole", "tcp", apply_changes=False)
         self.assertTrue(result.ok)
         lines = (temp_dir / "audit.log").read_text(encoding="utf-8").splitlines()
         payload = json.loads(lines[-1])
@@ -199,7 +199,7 @@ class SwitchEngineTests(unittest.TestCase):
             audit_path=engine.paths.audit_path,
             staging_root=temp_dir / "staging",
         )
-        result = engine.switch("turkey-6221", "rathole", "tcp", apply_changes=True)
+        result = engine.switch("smoke-l4-001", "rathole", "tcp", apply_changes=True)
         self.assertFalse(result.ok)
         self.assertTrue(result.rollback_performed)
-        self.assertEqual(engine.registry.owners["turkey-6221"].adapter, "backhaul")
+        self.assertEqual(engine.registry.owners["smoke-l4-001"].adapter, "backhaul")

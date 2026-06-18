@@ -8,24 +8,24 @@ class RegistryTests(unittest.TestCase):
         registry = PortRegistry()
         registry.claim(
             RegistryEntry(
-                profile="turkey-6221",
-                main_port=6221,
+                profile="smoke-l4-001",
+                main_port=38080,
                 adapter="backhaul",
                 transport="tcp",
                 role="controller",
-                owned_ports=[6221, 7001, 7002, 7003],
+                owned_ports=[38080, 39081, 39082, 39083],
                 owned_services=["svc-a"],
             )
         )
         with self.assertRaises(ValueError):
             registry.claim(
                 RegistryEntry(
-                    profile="germany-6221",
+                    profile="smoke-l4-002",
                     main_port=7443,
                     adapter="rathole",
                     transport="tcp",
                     role="worker",
-                    owned_ports=[7443, 7002],
+                    owned_ports=[7443, 39082],
                     owned_services=["svc-b"],
                 )
             )
@@ -33,18 +33,18 @@ class RegistryTests(unittest.TestCase):
     def test_detects_same_main_port_used_by_two_profiles(self) -> None:
         registry = PortRegistry(
             owners={
-                "turkey-6221": RegistryEntry(
-                    profile="turkey-6221",
-                    main_port=6221,
+                "smoke-l4-001": RegistryEntry(
+                    profile="smoke-l4-001",
+                    main_port=38080,
                     adapter="backhaul",
                     transport="tcp",
                     role="controller",
-                    owned_ports=[6221],
+                    owned_ports=[38080],
                     owned_services=["svc-a"],
                 ),
-                "germany-6221": RegistryEntry(
-                    profile="germany-6221",
-                    main_port=6221,
+                "smoke-l4-002": RegistryEntry(
+                    profile="smoke-l4-002",
+                    main_port=38080,
                     adapter="rathole",
                     transport="tcp",
                     role="worker",
@@ -58,13 +58,13 @@ class RegistryTests(unittest.TestCase):
     def test_detects_unsupported_transport_selected(self) -> None:
         registry = PortRegistry(
             owners={
-                "turkey-6221": RegistryEntry(
-                    profile="turkey-6221",
-                    main_port=6221,
+                "smoke-l4-001": RegistryEntry(
+                    profile="smoke-l4-001",
+                    main_port=38080,
                     adapter="backhaul",
                     transport="tcptun",
                     role="controller",
-                    owned_ports=[6221],
+                    owned_ports=[38080],
                     owned_services=["svc-a"],
                 )
             }

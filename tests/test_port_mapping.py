@@ -8,9 +8,9 @@ class PortMappingTests(unittest.TestCase):
         examples = [
             "443",
             "4000=5000",
-            "443-600:5201",
-            "443=1.1.1.1:5201",
-            "127.0.0.2:443=5201",
+            "443-600:39080",
+            "443=1.1.1.1:39080",
+            "127.0.0.2:443=39080",
         ]
         for value in examples:
             with self.subTest(value=value):
@@ -22,7 +22,7 @@ class PortMappingTests(unittest.TestCase):
             "",
             "abc",
             "443-400",
-            "127.0.0.2:443-600=5201",
+            "127.0.0.2:443-600=39080",
             "443=",
             "70000",
         ]
