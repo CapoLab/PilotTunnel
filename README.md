@@ -30,23 +30,23 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 
 ```bash
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name smoke-l4-001 --main-port 38080 --target-port 39080 --role controller --control-port 39081 --service-port 39082 --check-port 39083 --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name <PROFILE> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter rathole --transport tcp
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter rathole --transport tcp
 ```
 
 ## Dry-Run CLI Workflow
 
 ```bash
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name smoke-l4-001 --main-port 38080 --target-host 127.0.0.1 --target-port 39080 --role controller --control-port 39081 --service-port 39082 --check-port 39083
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name <PROFILE> --main-port <MAIN_PORT> --target-host <TARGET_HOST> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT>
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter show --name backhaul
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile smoke-l4-001 --adapter rathole --transport tcp
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json status --profile smoke-l4-001
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log logs --profile smoke-l4-001 --limit 10
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter rathole --transport tcp
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json status --profile <PROFILE>
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log logs --profile <PROFILE> --limit 10
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json registry check
 ```
 
@@ -59,10 +59,10 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 In this stage, `--apply` does not call `systemctl`, does not touch real systemd locations, does not modify firewall rules or routes, and does not download or execute tunnel binaries.
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging --apply switch --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging plan --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging --apply switch --profile <PROFILE> --adapter backhaul --transport tcpmux
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile <PROFILE> --adapter backhaul --transport tcpmux
 ```
 
 ## Host Preflight And Binary Planning
@@ -74,7 +74,7 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 
 ```bash
 python -m pilottunnel.cli preflight
-python -m pilottunnel.cli preflight --profile smoke-l4-001
+python -m pilottunnel.cli preflight --profile <PROFILE>
 python -m pilottunnel.cli binary list
 python -m pilottunnel.cli binary plan --adapter backhaul
 python -m pilottunnel.cli binary plan --adapter rathole
@@ -82,7 +82,7 @@ python -m pilottunnel.cli binary plan --adapter rathole
 
 ## Binary Import And Verification
 
-- No automatic downloads yet.
+- Manual import is still supported for controlled local testing.
 - Imported binaries are not executed unless `--run-version` is explicitly used.
 - Services are not started.
 - Real apply is still not implemented.
@@ -95,6 +95,25 @@ python -m pilottunnel.cli binary verify --adapter backhaul
 python -m pilottunnel.cli binary verify --adapter rathole --run-version
 ```
 
+## Controlled Binary Provider And Bootstrap Workflow
+
+- Binary provider manifests are required for managed downloads.
+- SHA256 verification is mandatory before any binary is imported.
+- Remote provider hosts must be allowlisted with `--allow-provider-host`.
+- `binary download-all` prepares every required Layer 4 provider-managed adapter in one run.
+- `bootstrap` prepares role, profile, bundle, staging, backup, and readiness state without real deployment.
+- Real deploy remains a separate gated workflow.
+
+```bash
+python -m pilottunnel.cli binary provider inspect --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
+python -m pilottunnel.cli binary provider inspect --manifest-file ./provider-manifest.json
+python -m pilottunnel.cli binary download --adapter backhaul --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_BINARY
+python -m pilottunnel.cli binary download-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_ALL_BINARIES
+python -m pilottunnel.cli binary download-all --manifest-file ./provider-manifest.json --confirm DOWNLOAD_ALL_BINARIES
+python -m pilottunnel.cli bootstrap plan --role controller --profile <PROFILE> --adapter backhaul --transport tcpmux --create-profile --target-host <TARGET_HOST> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
+python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> --adapter backhaul --transport tcpmux --create-profile --target-host <TARGET_HOST> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm BOOTSTRAP_APPLY
+```
+
 ## Real-Host Install Planning
 
 - `install plan` is read-only.
@@ -104,9 +123,9 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - Future real apply will require explicit confirmation and backups.
 
 ```bash
-python -m pilottunnel.cli install plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli install plan --profile smoke-l4-001 --adapter rathole --transport tcp --install-root .var/pilottunnel/install-root
-python -m pilottunnel.cli uninstall plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli install plan --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli install plan --profile <PROFILE> --adapter rathole --transport tcp --install-root .var/pilottunnel/install-root
+python -m pilottunnel.cli uninstall plan --profile <PROFILE> --adapter backhaul --transport tcpmux
 ```
 
 ## Controlled Install Apply Gate
@@ -119,9 +138,9 @@ python -m pilottunnel.cli uninstall plan --profile smoke-l4-001 --adapter backha
 - Real-host file mode is Linux-only, requires `--real-host-files`, and still does not execute `systemctl`.
 
 ```bash
-python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY
-python -m pilottunnel.cli install rollback --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm ROLLBACK
-python -m pilottunnel.cli uninstall apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
+python -m pilottunnel.cli install apply --profile <PROFILE> --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY
+python -m pilottunnel.cli install rollback --profile <PROFILE> --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm ROLLBACK
+python -m pilottunnel.cli uninstall apply --profile <PROFILE> --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm UNINSTALL
 ```
 
 ## Service Lifecycle Planning
@@ -132,10 +151,10 @@ python -m pilottunnel.cli uninstall apply --profile smoke-l4-001 --adapter backh
 - Real service lifecycle changes remain gated behind explicit `--real-systemd` confirmations.
 
 ```bash
-python -m pilottunnel.cli service plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux --action start
-python -m pilottunnel.cli service plan --profile smoke-l4-001 --adapter rathole --transport tcp --action stop
-python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --limit 50
+python -m pilottunnel.cli service plan --profile <PROFILE> --adapter backhaul --transport tcpmux --action start
+python -m pilottunnel.cli service plan --profile <PROFILE> --adapter rathole --transport tcp --action stop
+python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli service logs --profile <PROFILE> --adapter backhaul --transport tcpmux --limit 50
 ```
 
 ## Real Systemd Read-Only And Daemon-Reload Gate
@@ -154,8 +173,8 @@ python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul
 - Firewall rules, routes, and interfaces remain untouched.
 
 ```bash
-python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
-python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --limit 50
 python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_RELOAD
 ```
 
@@ -169,10 +188,10 @@ python -m pilottunnel.cli service daemon-reload --real-systemd --confirm DAEMON_
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service start --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE
-python -m pilottunnel.cli service start --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE --require-healthcheck
-python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
-python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service start --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE
+python -m pilottunnel.cli service start --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm START_SERVICE --require-healthcheck
+python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --limit 50
 ```
 
 ## Controlled Real Service Stop Gate
@@ -184,9 +203,9 @@ python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service stop --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm STOP_SERVICE
-python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
-python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --limit 50
+python -m pilottunnel.cli service stop --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm STOP_SERVICE
+python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service logs --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --limit 50
 ```
 
 ## Controlled Real Service Enable/Disable Gates
@@ -199,9 +218,9 @@ python -m pilottunnel.cli service logs --profile smoke-l4-001 --adapter backhaul
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service enable --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm ENABLE_SERVICE
-python -m pilottunnel.cli service disable --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm DISABLE_SERVICE
-python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service enable --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm ENABLE_SERVICE
+python -m pilottunnel.cli service disable --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm DISABLE_SERVICE
+python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Controlled Real Service Restart Gate
@@ -213,9 +232,9 @@ python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backha
 - Firewall rules, routes, interfaces, and downloads remain untouched.
 
 ```bash
-python -m pilottunnel.cli service restart --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE
-python -m pilottunnel.cli service restart --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE --require-healthcheck
-python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli service restart --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE
+python -m pilottunnel.cli service restart --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd --confirm RESTART_SERVICE --require-healthcheck
+python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Controlled Deployment Workflow
@@ -229,10 +248,10 @@ python -m pilottunnel.cli service status --profile smoke-l4-001 --adapter backha
 - Enabling the service is optional through `--enable-after-start`.
 
 ```bash
-python -m pilottunnel.cli deploy plan --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli deploy apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck
-python -m pilottunnel.cli deploy apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck --enable-after-start
-python -m pilottunnel.cli deploy status --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-systemd
+python -m pilottunnel.cli deploy plan --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli deploy apply --profile <PROFILE> --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck
+python -m pilottunnel.cli deploy apply --profile <PROFILE> --adapter backhaul --transport tcpmux --real-host --confirm DEPLOY_APPLY --require-healthcheck --enable-after-start
+python -m pilottunnel.cli deploy status --profile <PROFILE> --adapter backhaul --transport tcpmux --real-systemd
 ```
 
 ## Two-Sided Controller/Worker Bundles
@@ -245,10 +264,10 @@ python -m pilottunnel.cli deploy status --profile smoke-l4-001 --adapter backhau
 
 ```bash
 python -m pilottunnel.cli init --role controller
-python -m pilottunnel.cli bundle export-worker --profile smoke-l4-001 --adapter backhaul --transport tcpmux --output .var/pilottunnel/bundles/smoke-l4-001-worker.json
+python -m pilottunnel.cli bundle export-worker --profile <PROFILE> --adapter backhaul --transport tcpmux --output .var/pilottunnel/bundles/<PROFILE>-worker.json
 python -m pilottunnel.cli init --role worker
-python -m pilottunnel.cli bundle inspect --input .var/pilottunnel/bundles/smoke-l4-001-worker.json
-python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/smoke-l4-001-worker.json --staging-root .var/pilottunnel/staging --confirm IMPORT
+python -m pilottunnel.cli bundle inspect --input .var/pilottunnel/bundles/<PROFILE>-worker.json
+python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/<PROFILE>-worker.json --staging-root .var/pilottunnel/staging --confirm IMPORT
 ```
 
 ## End-to-End Local Simulation
@@ -259,9 +278,9 @@ python -m pilottunnel.cli bundle import --input .var/pilottunnel/bundles/smoke-l
 - It is the recommended check before running on real servers.
 
 ```bash
-python -m pilottunnel.cli simulate e2e --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli simulate e2e --profile smoke-l4-001 --adapter rathole --transport tcp --keep-files
-python -m pilottunnel.cli simulate e2e --profile smoke-l4-001 --adapter backhaul --transport tcpmux --json
+python -m pilottunnel.cli simulate e2e --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli simulate e2e --profile <PROFILE> --adapter rathole --transport tcp --keep-files
+python -m pilottunnel.cli simulate e2e --profile <PROFILE> --adapter backhaul --transport tcpmux --json
 ```
 
 ## Single Script, Two Roles
@@ -286,10 +305,10 @@ python -m pilottunnel.cli node status
 - It does not modify firewall, routes, or systemd.
 
 ```bash
-python -m pilottunnel.cli healthcheck --host 127.0.0.1 --port 39080
-python -m pilottunnel.cli healthcheck --profile smoke-l4-001 --all
-python -m pilottunnel.cli healthcheck --profile smoke-l4-001 --all --json
-python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY --require-healthcheck
+python -m pilottunnel.cli healthcheck --host <TARGET_HOST> --port <TARGET_PORT>
+python -m pilottunnel.cli healthcheck --profile <PROFILE> --all
+python -m pilottunnel.cli healthcheck --profile <PROFILE> --all --json
+python -m pilottunnel.cli install apply --profile <PROFILE> --adapter backhaul --transport tcpmux --install-root .var/pilottunnel/install-root --confirm APPLY --require-healthcheck
 ```
 
 ## Server Readiness Report
@@ -300,8 +319,8 @@ python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhau
 
 ```bash
 python -m pilottunnel.cli readiness report
-python -m pilottunnel.cli readiness report --profile smoke-l4-001 --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli readiness report --profile smoke-l4-001 --adapter rathole --transport tcp --json
+python -m pilottunnel.cli readiness report --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli readiness report --profile <PROFILE> --adapter rathole --transport tcp --json
 ```
 
 ## Controlled Real-Host File Apply
@@ -315,9 +334,9 @@ python -m pilottunnel.cli readiness report --profile smoke-l4-001 --adapter rath
 - Rollback restores backups and removes newly-created files from the manifest.
 
 ```bash
-python -m pilottunnel.cli install apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_APPLY
-python -m pilottunnel.cli install rollback --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_ROLLBACK
-python -m pilottunnel.cli uninstall apply --profile smoke-l4-001 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_UNINSTALL
+python -m pilottunnel.cli install apply --profile <PROFILE> --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_APPLY
+python -m pilottunnel.cli install rollback --profile <PROFILE> --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_ROLLBACK
+python -m pilottunnel.cli uninstall apply --profile <PROFILE> --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_UNINSTALL
 ```
 
 ## Backup and Restore Safety Layer

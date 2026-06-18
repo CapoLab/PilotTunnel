@@ -13,6 +13,8 @@ from .adapters import ADAPTERS
 from .adapters.base import AdapterContext
 from .audit import write_audit_log
 from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
+from .binary_provider import download_all_binaries, download_binary, inspect_manifest
+from .bootstrap import apply_bootstrap, build_bootstrap_plan
 from .bundles import build_worker_bundle, import_bundle, inspect_bundle
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
 from .config import (
@@ -351,6 +353,33 @@ def build_parser() -> argparse.ArgumentParser:
     binary_verify = binary_subparsers.add_parser("verify")
     binary_verify.add_argument("--adapter", required=True)
     binary_verify.add_argument("--run-version", action="store_true")
+    binary_download = binary_subparsers.add_parser("download")
+    binary_download.add_argument("--adapter", required=True)
+    binary_download.add_argument("--manifest-url")
+    binary_download.add_argument("--manifest-file", type=Path)
+    binary_download.add_argument("--allow-provider-host")
+    binary_download.add_argument("--platform", default="auto")
+    binary_download.add_argument("--confirm")
+    binary_download.add_argument("--force", action="store_true")
+    binary_download.add_argument("--run-version", action="store_true")
+    binary_download.add_argument("--json", action="store_true")
+    binary_download_all = binary_subparsers.add_parser("download-all")
+    binary_download_all.add_argument("--manifest-url")
+    binary_download_all.add_argument("--manifest-file", type=Path)
+    binary_download_all.add_argument("--allow-provider-host")
+    binary_download_all.add_argument("--platform", default="auto")
+    binary_download_all.add_argument("--confirm")
+    binary_download_all.add_argument("--force", action="store_true")
+    binary_download_all.add_argument("--run-version", action="store_true")
+    binary_download_all.add_argument("--json", action="store_true")
+    binary_provider = binary_subparsers.add_parser("provider")
+    binary_provider_subparsers = binary_provider.add_subparsers(dest="binary_provider_command", required=True)
+    binary_provider_inspect = binary_provider_subparsers.add_parser("inspect")
+    binary_provider_inspect.add_argument("--manifest-url")
+    binary_provider_inspect.add_argument("--manifest-file", type=Path)
+    binary_provider_inspect.add_argument("--allow-provider-host")
+    binary_provider_inspect.add_argument("--platform", default="auto")
+    binary_provider_inspect.add_argument("--json", action="store_true")
 
     bundle = subparsers.add_parser("bundle")
     bundle_subparsers = bundle.add_subparsers(dest="bundle_command", required=True)
@@ -382,6 +411,35 @@ def build_parser() -> argparse.ArgumentParser:
     simulate_e2e.add_argument("--base-root", type=Path, default=None)
     simulate_e2e.add_argument("--json", action="store_true")
     simulate_e2e.add_argument("--keep-files", action="store_true")
+
+    bootstrap = subparsers.add_parser("bootstrap")
+    bootstrap_subparsers = bootstrap.add_subparsers(dest="bootstrap_command", required=True)
+    bootstrap_plan = bootstrap_subparsers.add_parser("plan")
+    bootstrap_apply = bootstrap_subparsers.add_parser("apply")
+    for bootstrap_parser in (bootstrap_plan, bootstrap_apply):
+        bootstrap_parser.add_argument("--profile")
+        bootstrap_parser.add_argument("--adapter")
+        bootstrap_parser.add_argument("--transport")
+        bootstrap_parser.add_argument("--role")
+        bootstrap_parser.add_argument("--create-profile", action="store_true")
+        bootstrap_parser.add_argument("--update-profile", action="store_true")
+        bootstrap_parser.add_argument("--target-host")
+        bootstrap_parser.add_argument("--main-port", type=int)
+        bootstrap_parser.add_argument("--target-port", type=int)
+        bootstrap_parser.add_argument("--control-port", type=int)
+        bootstrap_parser.add_argument("--service-port", type=int)
+        bootstrap_parser.add_argument("--check-port", type=int)
+        bootstrap_parser.add_argument("--manifest-url")
+        bootstrap_parser.add_argument("--manifest-file", type=Path)
+        bootstrap_parser.add_argument("--allow-provider-host")
+        bootstrap_parser.add_argument("--bundle-output", type=Path)
+        bootstrap_parser.add_argument("--bundle-input", type=Path)
+        bootstrap_parser.add_argument("--backup-root", type=Path, default=None)
+        bootstrap_parser.add_argument("--platform", default="auto")
+        bootstrap_parser.add_argument("--force", action="store_true")
+        bootstrap_parser.add_argument("--json", action="store_true")
+    bootstrap_apply.add_argument("--confirm")
+    bootstrap_apply.add_argument("--run-version", action="store_true")
     return parser
 
 
@@ -415,6 +473,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
     if args.command == "adapter":
         return f"adapter_{args.adapter_command}"
     if args.command == "binary":
+        if args.binary_command == "provider":
+            return f"binary_provider_{args.binary_provider_command}"
         return f"binary_{args.binary_command}"
     if args.command == "backup":
         return f"backup_{args.backup_command}"
@@ -442,6 +502,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"restore_{args.restore_command}"
     if args.command == "deploy":
         return f"deploy_{args.deploy_command}"
+    if args.command == "bootstrap":
+        return f"bootstrap_{args.bootstrap_command}"
     if args.command in {"switch", "status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
         return args.command
     return None
@@ -1609,6 +1671,93 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
 
+    if args.command == "bootstrap" and args.bootstrap_command == "plan":
+        try:
+            payload = build_bootstrap_plan(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role_value=args.role,
+                create_profile_flag=args.create_profile,
+                target_host=args.target_host,
+                main_port=args.main_port,
+                target_port=args.target_port,
+                control_port=args.control_port,
+                service_port=args.service_port,
+                check_port=args.check_port,
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+                bundle_output=args.bundle_output,
+                bundle_input=args.bundle_input,
+                backup_root=args.backup_root,
+                requested_platform=args.platform,
+            )
+        except (KeyError, ValueError, PermissionError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "bootstrap" and args.bootstrap_command == "apply":
+        try:
+            payload = apply_bootstrap(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                state_path=state_path,
+                registry_path=registry_path,
+                switch_paths=switch_paths,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                role_value=args.role,
+                create_profile_flag=args.create_profile,
+                update_profile_flag=args.update_profile,
+                target_host=args.target_host,
+                main_port=args.main_port,
+                target_port=args.target_port,
+                control_port=args.control_port,
+                service_port=args.service_port,
+                check_port=args.check_port,
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+                bundle_output=args.bundle_output,
+                bundle_input=args.bundle_input,
+                backup_root=args.backup_root,
+                requested_platform=args.platform,
+                confirm=args.confirm,
+                force=args.force,
+                run_version=args.run_version,
+            )
+        except (KeyError, ValueError, PermissionError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "inspect":
+        try:
+            payload = inspect_manifest(
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+                requested_platform=args.platform,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
     if args.command == "binary" and args.binary_command == "list":
         print(json.dumps(list_binary_plans(switch_paths.work_dir, state), indent=2))
         return 0
@@ -1664,6 +1813,49 @@ def main(argv: list[str] | None = None) -> int:
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "binary" and args.binary_command == "download":
+        try:
+            payload = download_binary(
+                adapter=args.adapter,
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+                cache_root=switch_paths.work_dir,
+                state=state,
+                confirm=args.confirm,
+                force=args.force,
+                run_version=args.run_version,
+                audit_path=switch_paths.audit_path,
+                requested_platform=args.platform,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "download-all":
+        try:
+            payload = download_all_binaries(
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+                cache_root=switch_paths.work_dir,
+                state=state,
+                confirm=args.confirm,
+                force=args.force,
+                run_version=args.run_version,
+                audit_path=switch_paths.audit_path,
+                requested_platform=args.platform,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "staged" and args.staged_command == "list":
         print(json.dumps(_staged_list(switch_paths), indent=2))

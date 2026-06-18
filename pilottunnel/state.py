@@ -36,6 +36,9 @@ class BinaryRecord:
     executable: bool
     platform: str
     source_type: str = "user_supplied"
+    source_provider: str = ""
+    provider_host: str = ""
+    downloaded_at: str = ""
     run_version_result: dict[str, Any] = field(default_factory=dict)
 
 

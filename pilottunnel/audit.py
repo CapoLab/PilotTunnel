@@ -15,7 +15,7 @@ SECRET_KEYS = {"secret", "password", "token", "private_key", "apikey", "api_key"
 def redact_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: ("***REDACTED***" if key.lower() in SECRET_KEYS else redact_secrets(inner))
+            key: ("***REDACTED***" if str(key).lower() in SECRET_KEYS else redact_secrets(inner))
             for key, inner in value.items()
         }
     if isinstance(value, list):

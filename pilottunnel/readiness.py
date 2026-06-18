@@ -110,7 +110,7 @@ def build_readiness_report(
     if healthchecks["status"] == "failed":
         blockers.extend(healthchecks.get("blockers", []))
 
-    if binary_plan and not binary_plan["imported"]:
+    if binary_plan and binary_plan["status"] == "missing":
         blockers.append(f"Imported binary missing for adapter '{binary_plan['adapter']}'")
 
     if install_plan and not staged_files_summary["exists"]:
@@ -230,14 +230,24 @@ def _binary_status(
         blockers.append(str(exc))
         return {"ok": False, "adapter": adapter_name, "imported": False, "status": "missing", "error": str(exc)}
 
-    imported = plan.get("install_status") == "imported"
-    if not imported:
-        warnings.append(f"Binary for adapter '{adapter_name}' is planned but not imported yet")
+    status = plan.get("install_status")
+    coverage = plan.get("coverage", "")
+    imported = status == "imported"
+    if status == "system_dependency":
+        if not plan.get("system_command_available"):
+            blockers.append(f"System dependency '{plan.get('system_command')}' is missing for adapter '{adapter_name}'")
+        else:
+            warnings.append(f"Adapter '{adapter_name}' uses system dependency '{plan.get('system_command')}'")
+    elif status in {"template_only", "listed_only"}:
+        warnings.append(f"Adapter '{adapter_name}' is categorized as '{status}'")
+    elif not imported:
+        warnings.append(f"Binary for adapter '{adapter_name}' is '{coverage or status}' and not imported yet")
     return {
-        "ok": imported,
+        "ok": imported or status == "system_dependency",
         "adapter": adapter_name,
         "imported": imported,
-        "status": plan.get("install_status"),
+        "status": status,
+        "coverage": coverage,
         "binary_name": plan.get("binary_name"),
         "expected_cache_path": plan.get("expected_cache_path"),
         "expected_bin_path": plan.get("expected_bin_path"),
@@ -247,6 +257,8 @@ def _binary_status(
         "imported_path": plan.get("imported_path"),
         "supported_platforms": plan.get("supported_platforms"),
         "download_performed": plan.get("download_performed", False),
+        "system_command": plan.get("system_command"),
+        "system_command_available": plan.get("system_command_available", False),
     }
 
 

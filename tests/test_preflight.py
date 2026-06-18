@@ -33,8 +33,12 @@ class PreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             items = list_binary_plans(Path(temp_dir))
             adapters = {item["adapter"] for item in items}
-            self.assertEqual(adapters, {"backhaul", "rathole"})
+            self.assertEqual(
+                adapters,
+                {"backhaul", "rathole", "frp", "gost", "chisel", "realm", "bore", "wstunnel", "udp2raw", "ssh_reverse"},
+            )
             self.assertFalse(get_binary_plan("backhaul", Path(temp_dir))["download_performed"])
+            self.assertEqual(get_binary_plan("ssh_reverse", Path(temp_dir))["install_status"], "system_dependency")
 
     def test_preflight_ports_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
