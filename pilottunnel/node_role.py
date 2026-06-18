@@ -11,6 +11,10 @@ SAFE_INSPECT_ACTIONS = {
     "binary_status",
     "binary_verify",
     "binary_list",
+    "backup_plan",
+    "backup_list",
+    "backup_inspect",
+    "backup_verify",
     "deploy_plan",
     "deploy_status",
     "logs",
@@ -37,6 +41,7 @@ ROLE_ALLOWED_ACTIONS = {
     "controller": SAFE_INSPECT_ACTIONS
     | CONTROLLER_ONLY_ACTIONS
     | {
+        "backup_create",
         "bundle_import",
         "binary_import",
         "binary_plan",
@@ -47,6 +52,8 @@ ROLE_ALLOWED_ACTIONS = {
         "install_apply",
         "install_rollback",
         "rollback",
+        "restore_apply",
+        "restore_plan",
         "service_start",
         "service_stop",
         "service_restart",
@@ -64,6 +71,7 @@ ROLE_ALLOWED_ACTIONS = {
     "worker": SAFE_INSPECT_ACTIONS
     | WORKER_ONLY_ACTIONS
     | {
+        "backup_create",
         "bundle_import",
         "binary_import",
         "binary_plan",
@@ -73,6 +81,8 @@ ROLE_ALLOWED_ACTIONS = {
         "install_plan",
         "install_apply",
         "install_rollback",
+        "restore_apply",
+        "restore_plan",
         "service_start",
         "service_stop",
         "service_restart",

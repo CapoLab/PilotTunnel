@@ -12,6 +12,7 @@ from pathlib import Path
 from .adapters import ADAPTERS
 from .adapters.base import AdapterContext
 from .audit import write_audit_log
+from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
 from .bundles import build_worker_bundle, import_bundle, inspect_bundle
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
 from .config import (
@@ -257,6 +258,49 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_status.add_argument("--staging-root", dest="command_staging_root", type=Path, default=None)
     deploy_status.add_argument("--json", action="store_true")
 
+    backup = subparsers.add_parser("backup")
+    backup_subparsers = backup.add_subparsers(dest="backup_command", required=True)
+    backup_plan = backup_subparsers.add_parser("plan")
+    backup_plan.add_argument("--profile")
+    backup_plan.add_argument("--adapter")
+    backup_plan.add_argument("--transport")
+    backup_plan.add_argument("--install-root", type=Path, default=None)
+    backup_plan.add_argument("--backup-root", type=Path, default=None)
+    backup_plan.add_argument("--json", action="store_true")
+    backup_create = backup_subparsers.add_parser("create")
+    backup_create.add_argument("--profile")
+    backup_create.add_argument("--adapter")
+    backup_create.add_argument("--transport")
+    backup_create.add_argument("--install-root", type=Path, default=None)
+    backup_create.add_argument("--backup-root", type=Path, default=None)
+    backup_create.add_argument("--confirm")
+    backup_create.add_argument("--json", action="store_true")
+    backup_list = backup_subparsers.add_parser("list")
+    backup_list.add_argument("--backup-root", type=Path, default=None)
+    backup_list.add_argument("--json", action="store_true")
+    backup_inspect = backup_subparsers.add_parser("inspect")
+    backup_inspect.add_argument("--backup-id", required=True)
+    backup_inspect.add_argument("--backup-root", type=Path, default=None)
+    backup_inspect.add_argument("--json", action="store_true")
+    backup_verify = backup_subparsers.add_parser("verify")
+    backup_verify.add_argument("--backup-id", required=True)
+    backup_verify.add_argument("--backup-root", type=Path, default=None)
+    backup_verify.add_argument("--json", action="store_true")
+
+    restore = subparsers.add_parser("restore")
+    restore_subparsers = restore.add_subparsers(dest="restore_command", required=True)
+    restore_plan = restore_subparsers.add_parser("plan")
+    restore_plan.add_argument("--backup-id", required=True)
+    restore_plan.add_argument("--install-root", type=Path, default=None)
+    restore_plan.add_argument("--backup-root", type=Path, default=None)
+    restore_plan.add_argument("--json", action="store_true")
+    restore_apply = restore_subparsers.add_parser("apply")
+    restore_apply.add_argument("--backup-id", required=True)
+    restore_apply.add_argument("--install-root", type=Path, default=None)
+    restore_apply.add_argument("--backup-root", type=Path, default=None)
+    restore_apply.add_argument("--confirm")
+    restore_apply.add_argument("--json", action="store_true")
+
     registry = subparsers.add_parser("registry")
     registry.add_subparsers(dest="registry_command", required=True).add_parser("check")
 
@@ -372,6 +416,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"adapter_{args.adapter_command}"
     if args.command == "binary":
         return f"binary_{args.binary_command}"
+    if args.command == "backup":
+        return f"backup_{args.backup_command}"
     if args.command == "bundle":
         return f"bundle_{args.bundle_command.replace('-', '_')}"
     if args.command == "simulate":
@@ -392,6 +438,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return "node_status"
     if args.command == "readiness":
         return f"readiness_{args.readiness_command}"
+    if args.command == "restore":
+        return f"restore_{args.restore_command}"
     if args.command == "deploy":
         return f"deploy_{args.deploy_command}"
     if args.command in {"switch", "status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
@@ -617,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config, state, registry, config_path, state_path, registry_path, switch_paths = _load_runtime(args)
+    audit_path = switch_paths.audit_path
     engine = SwitchEngine(config=config, state=state, registry=registry, paths=switch_paths)
 
     if args.command == "init":
@@ -1363,6 +1412,115 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_preflight(switch_paths.staging_root, profile).to_dict()
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "backup" and args.backup_command == "plan":
+        try:
+            payload = build_backup_plan(
+                config=config,
+                state=state,
+                switch_paths=switch_paths,
+                config_path=config_path,
+                state_path=state_path,
+                registry_path=registry_path,
+                audit_path=audit_path,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                install_root=args.install_root,
+                backup_root=args.backup_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "backup" and args.backup_command == "create":
+        try:
+            payload = create_backup(
+                config=config,
+                switch_paths=switch_paths,
+                config_path=config_path,
+                state_path=state_path,
+                registry_path=registry_path,
+                audit_path=audit_path,
+                profile_name=args.profile,
+                adapter_name=args.adapter,
+                transport=args.transport,
+                install_root=args.install_root,
+                backup_root=args.backup_root,
+                confirm=args.confirm,
+            )
+        except (KeyError, ValueError, FileExistsError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "backup" and args.backup_command == "list":
+        try:
+            payload = list_backups(switch_paths=switch_paths, backup_root=args.backup_root)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "backup" and args.backup_command == "inspect":
+        try:
+            payload = inspect_backup(switch_paths=switch_paths, backup_root=args.backup_root, backup_id=args.backup_id)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "backup" and args.backup_command == "verify":
+        try:
+            payload = verify_backup(switch_paths=switch_paths, backup_root=args.backup_root, backup_id=args.backup_id)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "restore" and args.restore_command == "plan":
+        try:
+            payload = build_restore_plan(
+                config_path=config_path,
+                state_path=state_path,
+                registry_path=registry_path,
+                audit_path=audit_path,
+                switch_paths=switch_paths,
+                backup_root=args.backup_root,
+                backup_id=args.backup_id,
+                install_root=args.install_root,
+            )
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "restore" and args.restore_command == "apply":
+        try:
+            payload = apply_restore(
+                config=config,
+                config_path=config_path,
+                state_path=state_path,
+                registry_path=registry_path,
+                audit_path=audit_path,
+                switch_paths=switch_paths,
+                backup_root=args.backup_root,
+                backup_id=args.backup_id,
+                install_root=args.install_root,
+                confirm=args.confirm,
+            )
+        except (ValueError, json.JSONDecodeError, FileExistsError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "deploy" and args.deploy_command == "plan":
         try:

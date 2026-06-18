@@ -2561,6 +2561,444 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("deploy-apply", actions)
         self.assertIn("deploy-status", actions)
 
+    def test_backup_plan_is_read_only(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        code, output = self.run_cli("backup", "plan", "--install-root", str(install_root), "--backup-root", str(backup_root))
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["plan_only"])
+        self.assertFalse(payload["files_restored"])
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(backup_root.exists())
+
+    def test_backup_create_refuses_without_confirm_backup_create(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        code, output = self.run_cli("backup", "create", "--install-root", str(install_root), "--backup-root", str(backup_root))
+        self.assertEqual(code, 1)
+        self.assertIn("BACKUP_CREATE", output)
+
+    def test_backup_create_copies_only_pilottunnel_owned_files(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        extra = install_root / "opt" / "unowned.txt"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("keep-out", encoding="utf-8")
+        code, output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        manifest = json.loads(Path(payload["manifest_path"]).read_text(encoding="utf-8"))
+        source_paths = manifest["source_paths"]
+        self.assertFalse(any("opt\\unowned.txt" in path or "opt/unowned.txt" in path for path in source_paths))
+        self.assertTrue(any("etc/pilottunnel" in path.replace("\\", "/") for path in source_paths))
+
+    def test_backup_create_writes_manifest_and_checksums(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        code, output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        manifest_path = Path(payload["manifest_path"])
+        checksums_path = Path(payload["checksums_path"])
+        self.assertTrue(manifest_path.exists())
+        self.assertTrue(checksums_path.exists())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["real_systemd_touched"])
+        self.assertFalse(manifest["service_started"])
+        self.assertFalse(manifest["firewall_touched"])
+
+    def test_backup_create_records_skipped_missing_files_as_warnings(self) -> None:
+        self._create_profile()
+        backup_root = Path(self.temp_dir.name) / "backup-root"
+        install_root = Path(self.temp_dir.name) / "missing-install-root"
+        code, output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["warnings"])
+        self.assertTrue(payload["skipped"])
+
+    def test_backup_list_shows_created_backups(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        code, output = self.run_cli("backup", "list", "--backup-root", str(backup_root))
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertTrue(payload["backups"])
+
+    def test_backup_inspect_reads_manifest(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        code, output = self.run_cli("backup", "inspect", "--backup-root", str(backup_root), "--backup-id", backup_id)
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["manifest"]["backup_id"], backup_id)
+
+    def test_backup_verify_passes_on_valid_backup(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        code, output = self.run_cli("backup", "verify", "--backup-root", str(backup_root), "--backup-id", backup_id)
+        self.assertEqual(code, 0, msg=output)
+        self.assertTrue(json.loads(output)["ok"])
+
+    def test_backup_verify_fails_on_checksum_mismatch(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        payload = json.loads(create_output)
+        manifest = json.loads(Path(payload["manifest_path"]).read_text(encoding="utf-8"))
+        stored_rel = manifest["stored_files"][0]["stored_path"]
+        (Path(payload["backup_path"]) / stored_rel).write_text("corrupt", encoding="utf-8")
+        code, output = self.run_cli("backup", "verify", "--backup-root", str(backup_root), "--backup-id", payload["backup_id"])
+        self.assertEqual(code, 1)
+        self.assertTrue(json.loads(output)["checksum_mismatches"])
+
+    def test_restore_plan_is_read_only(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        code, output = self.run_cli("restore", "plan", "--backup-root", str(backup_root), "--install-root", str(install_root), "--backup-id", backup_id)
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["plan_only"])
+        self.assertFalse(payload["files_restored"])
+        self.assertFalse(payload["real_systemd_touched"])
+
+    def test_restore_apply_refuses_without_confirm_restore_apply(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        code, output = self.run_cli("restore", "apply", "--backup-root", str(backup_root), "--install-root", str(install_root), "--backup-id", backup_id)
+        self.assertEqual(code, 1)
+        self.assertIn("RESTORE_APPLY", output)
+
+    def test_restore_apply_restores_files_from_backup(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        original = target.read_text(encoding="utf-8")
+        target.write_text("modified", encoding="utf-8")
+        code, output = self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            backup_id,
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        self.assertEqual(target.read_text(encoding="utf-8"), original)
+
+    def test_restore_apply_creates_pre_restore_safety_backup_before_overwrite(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        target = install_root / "etc" / "pilottunnel" / "profiles" / "turkey-6221" / "backhaul" / "tcpmux" / "controller" / "backhaul-controller.toml"
+        target.write_text("modified", encoding="utf-8")
+        code, output = self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            backup_id,
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        pre_restore_path = Path(payload["pre_restore_backup_path"])
+        self.assertTrue(pre_restore_path.exists())
+        self.assertTrue((pre_restore_path / "backup-manifest.json").exists())
+
+    def test_restore_apply_refuses_path_traversal_backup_id(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        code, output = self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            "../bad",
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Path traversal", output)
+
+    def test_restore_apply_refuses_manifest_with_path_outside_allowed_roots(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        payload = json.loads(create_output)
+        manifest_path = Path(payload["manifest_path"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["stored_files"][0]["target_path"] = str((Path(self.temp_dir.name) / "escape" / "etc" / "passwd").resolve())
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        code, output = self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            payload["backup_id"],
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("outside allowed", output)
+
+    def test_restore_apply_refuses_corrupt_checksum(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        payload = json.loads(create_output)
+        checksums_path = Path(payload["checksums_path"])
+        checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+        first_key = next(iter(checksums))
+        checksums[first_key] = "deadbeef"
+        checksums_path.write_text(json.dumps(checksums, indent=2, sort_keys=True), encoding="utf-8")
+        code, output = self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            payload["backup_id"],
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("verification failed", output.lower())
+
+    @patch("pilottunnel.service_lifecycle.subprocess.run")
+    def test_restore_apply_does_not_call_systemctl_or_touch_firewall_routes_interfaces(self, mock_run) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        code, output = self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            backup_id,
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+        mock_run.assert_not_called()
+
+    def test_backup_restore_reject_unknown_adapter(self) -> None:
+        code, output = self.run_cli("backup", "plan", "--adapter", "missing", "--transport", "tcp")
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown adapter", output)
+
+    def test_backup_restore_unsupported_backhaul_experimental_transport_rejected(self) -> None:
+        code, output = self.run_cli("backup", "plan", "--adapter", "backhaul", "--transport", "tcptun")
+        self.assertEqual(code, 1)
+        self.assertIn("blocked in v0.1", output)
+
+    @patch("pilottunnel.backup.platform.system", return_value="Windows")
+    def test_backup_restore_windows_safe_behavior_is_covered(self, _mock_platform) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        code, output = self.run_cli("backup", "plan", "--install-root", str(install_root), "--backup-root", str(backup_root))
+        self.assertEqual(code, 0, msg=output)
+        self.assertIn("files", json.loads(output))
+
+    def test_audit_records_backup_and_restore_attempts(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        self.run_cli("backup", "plan", "--install-root", str(install_root), "--backup-root", str(backup_root))
+        _, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+        )
+        backup_id = json.loads(create_output)["backup_id"]
+        self.run_cli("restore", "plan", "--backup-root", str(backup_root), "--install-root", str(install_root), "--backup-id", backup_id)
+        self.run_cli(
+            "restore",
+            "apply",
+            "--backup-root",
+            str(backup_root),
+            "--install-root",
+            str(install_root),
+            "--backup-id",
+            backup_id,
+            "--confirm",
+            "RESTORE_APPLY",
+        )
+        lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        actions = [item["action"] for item in lines]
+        self.assertIn("backup-plan", actions)
+        self.assertIn("backup-create", actions)
+        self.assertIn("restore-plan", actions)
+        self.assertIn("restore-apply", actions)
+
+    def test_backup_restore_json_output_is_valid(self) -> None:
+        install_root, backup_root = self._prepare_backup_fixture()
+        create_code, create_output = self.run_cli(
+            "backup",
+            "create",
+            "--install-root",
+            str(install_root),
+            "--backup-root",
+            str(backup_root),
+            "--confirm",
+            "BACKUP_CREATE",
+            "--json",
+        )
+        self.assertEqual(create_code, 0, msg=create_output)
+        backup_id = json.loads(create_output)["backup_id"]
+        inspect_code, inspect_output = self.run_cli("backup", "inspect", "--backup-root", str(backup_root), "--backup-id", backup_id, "--json")
+        self.assertEqual(inspect_code, 0)
+        self.assertIn("manifest", json.loads(inspect_output))
+
     def test_service_start_unknown_adapter_rejected(self) -> None:
         self.run_cli("init", "--role", "controller")
         self._create_profile()
@@ -4303,6 +4741,29 @@ class CliWorkflowTests(unittest.TestCase):
         source = self._make_binary_source(adapter, content)
         self.run_cli("binary", "import", "--adapter", adapter, "--source", str(source), "--version", "manual-v0.0.0")
         return source
+
+    def _prepare_backup_fixture(self) -> tuple[Path, Path]:
+        self._create_profile()
+        self._stage_switch("backhaul", "tcpmux")
+        self._import_binary("backhaul")
+        install_root = Path(self.temp_dir.name) / "install-root"
+        backup_root = Path(self.temp_dir.name) / "backup-root"
+        code, output = self.run_cli(
+            "install",
+            "apply",
+            "--profile",
+            "turkey-6221",
+            "--adapter",
+            "backhaul",
+            "--transport",
+            "tcpmux",
+            "--install-root",
+            str(install_root),
+            "--confirm",
+            "APPLY",
+        )
+        self.assertEqual(code, 0, msg=output)
+        return install_root, backup_root
 
     def _start_tcp_server(self) -> tuple[socket.socket, int, threading.Thread]:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -320,6 +320,26 @@ python -m pilottunnel.cli install rollback --profile turkey-6221 --adapter backh
 python -m pilottunnel.cli uninstall apply --profile turkey-6221 --adapter backhaul --transport tcpmux --real-host-files --confirm REAL_FILES_UNINSTALL
 ```
 
+## Backup and Restore Safety Layer
+
+- Backups include PilotTunnel-owned files and metadata only.
+- `restore apply` requires exact confirmation before writing anything.
+- Restore verifies checksums before applying files.
+- Restore creates a pre-restore safety backup before overwriting current files.
+- No services are started, stopped, or restarted.
+- No firewall rules, routes, or network interfaces are touched.
+- It is recommended before first real Linux server testing.
+
+```bash
+python -m pilottunnel.cli backup plan
+python -m pilottunnel.cli backup create --confirm BACKUP_CREATE
+python -m pilottunnel.cli backup list
+python -m pilottunnel.cli backup inspect --backup-id BACKUP_ID
+python -m pilottunnel.cli backup verify --backup-id BACKUP_ID
+python -m pilottunnel.cli restore plan --backup-id BACKUP_ID
+python -m pilottunnel.cli restore apply --backup-id BACKUP_ID --confirm RESTORE_APPLY
+```
+
 ## What Is Implemented
 
 - Role-aware profile config with `controller/iran` and `worker/foreign` normalization.
