@@ -47,7 +47,7 @@ def build_bootstrap_plan(
     manifest_file: Path | None,
     allow_provider_host: str | None,
     bundle_output: Path | None,
-    bundle_input: Path | None,
+    bundle_file: Path | None,
     backup_root: Path | None,
     requested_platform: str | None,
 ) -> dict[str, Any]:
@@ -86,7 +86,7 @@ def build_bootstrap_plan(
         adapter_name=adapter_name,
         transport=transport,
         bundle_output=bundle_output,
-        bundle_input=bundle_input,
+        bundle_file=bundle_file,
         profile_name=profile_name,
     )
     readiness = build_readiness_report(
@@ -108,8 +108,8 @@ def build_bootstrap_plan(
         "binary_download_all": bool(manifest),
         "stage_files": bool(profile_name and adapter_name and transport and node_role == "controller"),
         "export_worker_bundle": bool(bundle_output),
-        "import_worker_bundle": bool(bundle_input),
-        "backup_before_changes": bool(create_profile_flag or update_profile_flag or bundle_input or role_value),
+        "import_worker_bundle": bool(bundle_file),
+        "backup_before_changes": bool(create_profile_flag or update_profile_flag or bundle_file or role_value),
     }
     return {
         "ok": True,
@@ -126,7 +126,7 @@ def build_bootstrap_plan(
         "profile_preview": profile_preview,
         "manifest": manifest,
         "bundle_output": str(bundle_output) if bundle_output else "",
-        "bundle_input": str(bundle_input) if bundle_input else "",
+        "bundle_file": str(bundle_file) if bundle_file else "",
         "backup_root": str(backup_root.resolve()) if backup_root else "",
         "readiness": readiness,
         "downloads_performed": False,
@@ -163,7 +163,7 @@ def apply_bootstrap(
     manifest_file: Path | None,
     allow_provider_host: str | None,
     bundle_output: Path | None,
-    bundle_input: Path | None,
+    bundle_file: Path | None,
     backup_root: Path | None,
     requested_platform: str | None,
     confirm: str | None,
@@ -178,14 +178,14 @@ def apply_bootstrap(
         require_controller("profile_create", node_role)
     if ports_mode == "auto" and node_role != "controller":
         raise ValueError("--ports auto is only supported for controller bootstrap profile operations")
-    if bundle_input and node_role == "controller":
+    if bundle_file and node_role == "controller":
         require_worker("bundle_import", node_role)
     if bundle_output and node_role == "worker":
         require_controller("bundle_export_worker", node_role)
 
     existing_profile = _resolve_profile(config, profile_name)
     backup_payload = None
-    if _should_backup(config, create_profile_flag, update_profile_flag, bundle_input, role_value):
+    if _should_backup(config, create_profile_flag, update_profile_flag, bundle_file, role_value):
         backup_payload = create_backup(
             config=config,
             switch_paths=switch_paths,
@@ -243,7 +243,7 @@ def apply_bootstrap(
 
     bundle_payload = None
     staged_payload = None
-    if bundle_input:
+    if bundle_file:
         bundle_payload = _apply_bundle_import(
             config=config,
             state=state,
@@ -252,7 +252,7 @@ def apply_bootstrap(
             state_path=state_path,
             registry_path=registry_path,
             switch_paths=switch_paths,
-            bundle_path=bundle_input,
+            bundle_path=bundle_file,
             force=force,
         )
         profile = get_profile(config, bundle_payload["profile"])
@@ -306,7 +306,7 @@ def apply_bootstrap(
             adapter_name=adapter_name,
             transport=transport,
             bundle_output=bundle_output,
-            bundle_input=bundle_input,
+            bundle_file=bundle_file,
             profile_name=profile.name if profile else profile_name,
         ),
         "backup": backup_payload,
@@ -336,6 +336,15 @@ def build_bootstrap_command(
     bundle_output: Path | None,
     bundle_file: Path | None,
 ) -> dict[str, Any]:
+    missing = [label for label, value in (
+        ("--profile", profile_name),
+        ("--adapter", adapter_name),
+        ("--transport", transport),
+        ("--manifest-url", manifest_url),
+        ("--allow-provider-host", provider_host),
+    ) if not value]
+    if missing:
+        raise ValueError("bootstrap command requires " + ", ".join(missing))
     profile = profile_name or "<PROFILE>"
     adapter = adapter_name or "<ADAPTER>"
     transport_name = transport or "<TRANSPORT>"
@@ -399,7 +408,7 @@ def build_bootstrap_command(
         "apply",
         "--role",
         "worker",
-        "--bundle-input",
+        "--bundle-file",
         worker_bundle_file,
         "--manifest-url",
         manifest,
@@ -625,10 +634,10 @@ def _should_backup(
     config: AppConfig,
     create_profile_flag: bool,
     update_profile_flag: bool,
-    bundle_input: Path | None,
+    bundle_file: Path | None,
     role_value: str | None,
 ) -> bool:
-    return bool(config.node.initialized or create_profile_flag or update_profile_flag or bundle_input or role_value)
+    return bool(config.node.initialized or create_profile_flag or update_profile_flag or bundle_file or role_value)
 
 
 def _validate_output_path(path: Path) -> Path:
@@ -712,7 +721,7 @@ def _bootstrap_steps(
     adapter_name: str | None,
     transport: str | None,
     bundle_output: Path | None,
-    bundle_input: Path | None,
+    bundle_file: Path | None,
     profile_name: str | None,
 ) -> list[dict[str, Any]]:
     controller_stage = bool(profile_name and adapter_name and transport and (role or "") == "controller")
@@ -720,8 +729,8 @@ def _bootstrap_steps(
         {"step": 1, "name": "verify_or_init_role", "will_run": True},
         {"step": 2, "name": "download_all_binaries", "will_run": manifest_enabled},
         {"step": 3, "name": "create_or_update_profile_if_controller", "will_run": create_profile_flag or update_profile_flag},
-        {"step": 4, "name": "stage_files_only", "will_run": controller_stage or bool(bundle_input)},
-        {"step": 5, "name": "export_or_import_bundle", "will_run": bool(bundle_output or bundle_input)},
+        {"step": 4, "name": "stage_files_only", "will_run": controller_stage or bool(bundle_file)},
+        {"step": 5, "name": "export_or_import_bundle", "will_run": bool(bundle_output or bundle_file)},
         {"step": 6, "name": "backup_create", "will_run": True},
         {"step": 7, "name": "readiness_report", "will_run": True},
     ]

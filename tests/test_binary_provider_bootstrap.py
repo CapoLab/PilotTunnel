@@ -1,7 +1,6 @@
 import hashlib
 import io
 import json
-import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -10,6 +9,7 @@ from unittest.mock import patch
 
 from pilottunnel import cli
 from pilottunnel.binaries import all_binary_adapters, binary_spec, current_platform_id, provider_required_adapters
+from pilottunnel.bootstrap import build_bootstrap_command
 from testsupport import allocate_tcp_ports, static_http_server
 
 
@@ -45,6 +45,14 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 ]
             )
         return code, output.getvalue()
+
+    def capture_help(self, *args: str) -> str:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exc:
+                cli.main(list(args))
+        self.assertEqual(exc.exception.code, 0)
+        return output.getvalue()
 
     def _profile_ports(self) -> tuple[list[int], list]:
         return allocate_tcp_ports(5)
@@ -443,6 +451,31 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("Symlink escape blocked", output)
+
+    def test_bootstrap_command_help_includes_allow_provider_host(self) -> None:
+        help_text = self.capture_help("bootstrap", "command", "--help")
+        self.assertIn("--allow-provider-host", help_text)
+        self.assertNotIn("--provider-host", help_text)
+
+    def test_bootstrap_apply_help_includes_bundle_file(self) -> None:
+        help_text = self.capture_help("bootstrap", "apply", "--help")
+        self.assertIn("--bundle-file", help_text)
+        self.assertNotIn("--bundle-input", help_text)
+
+    def test_bootstrap_command_requires_core_inputs(self) -> None:
+        with self.assertRaises(ValueError) as exc:
+            build_bootstrap_command(
+                profile_name=None,
+                adapter_name=None,
+                transport=None,
+                ports_mode="auto",
+                manifest_url=None,
+                provider_host=None,
+                bundle_output=None,
+                bundle_file=None,
+            )
+        self.assertIn("--profile", str(exc.exception))
+        self.assertIn("--allow-provider-host", str(exc.exception))
 
     def test_provider_verify_manifest_validates_schema(self) -> None:
         source_root, _metadata = self._provider_source_tree(("backhaul",))
@@ -855,14 +888,19 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "auto",
             "--manifest-url",
             "https://downloads.example.com/pilot/provider-manifest.json",
-            "--provider-host",
+            "--allow-provider-host",
             "downloads.example.com",
         )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
         self.assertIn("--ports auto", payload["controller_prepare_command"])
-        self.assertIn("--bundle-input", payload["worker_prepare_command"])
+        self.assertIn("--bundle-file", payload["worker_prepare_command"])
+        self.assertIn("--allow-provider-host", payload["worker_prepare_command"])
         self.assertNotIn("BOOTSTRAP_APPLY BOOTSTRAP_APPLY", payload["controller_prepare_command"])
+        self.assertNotIn("--provider-host", payload["controller_prepare_command"])
+        self.assertNotIn("--bundle-input", payload["controller_prepare_command"])
+        self.assertNotIn("--provider-host", payload["worker_prepare_command"])
+        self.assertNotIn("--bundle-input", payload["worker_prepare_command"])
 
     def test_bootstrap_command_uses_placeholders_for_manual_ports(self) -> None:
         code, output = self.run_cli(
@@ -875,11 +913,18 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "rathole",
             "--transport",
             "tcp",
+            "--manifest-url",
+            "https://downloads.example.com/pilot/provider-manifest.json",
+            "--allow-provider-host",
+            "downloads.example.com",
         )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
         self.assertIn("<MAIN_PORT>", payload["controller_prepare_command"])
         self.assertNotRegex(payload["controller_prepare_command"], r"--main-port\s+\d+")
+        self.assertIn("--allow-provider-host", payload["controller_prepare_command"])
+        self.assertIn("--bundle-output", payload["controller_prepare_command"])
+        self.assertIn("--bundle-file", payload["worker_prepare_command"])
 
     def test_bootstrap_apply_refuses_without_confirm(self) -> None:
         root = self.base / "bootstrap-no-confirm"
@@ -986,7 +1031,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "apply",
                 "--role",
                 "worker",
-                "--bundle-input",
+                "--bundle-file",
                 str(bundle_path),
                 "--confirm",
                 "BOOTSTRAP_APPLY",
@@ -1032,12 +1077,12 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                     "apply",
                     "--role",
                     "worker",
-                    "--bundle-input",
-                    str(bundle_path),
-                    "--manifest-file",
-                    str(manifest_path),
-                    "--confirm",
-                    "BOOTSTRAP_APPLY",
+                "--bundle-file",
+                str(bundle_path),
+                "--manifest-file",
+                str(manifest_path),
+                "--confirm",
+                "BOOTSTRAP_APPLY",
                 )
         finally:
             for listener in listeners:

@@ -444,19 +444,21 @@ def build_parser() -> argparse.ArgumentParser:
         bootstrap_parser.add_argument("--manifest-file", type=Path)
         bootstrap_parser.add_argument("--allow-provider-host")
         bootstrap_parser.add_argument("--bundle-output", type=Path)
-        bootstrap_parser.add_argument("--bundle-input", type=Path)
+        bootstrap_parser.add_argument("--bundle-file", type=Path)
+        bootstrap_parser.add_argument("--bundle-input", dest="bundle_file", type=Path, help=argparse.SUPPRESS)
         bootstrap_parser.add_argument("--backup-root", type=Path, default=None)
         bootstrap_parser.add_argument("--platform", default="auto")
         bootstrap_parser.add_argument("--force", action="store_true")
         bootstrap_parser.add_argument("--json", action="store_true")
     bootstrap_apply.add_argument("--confirm")
     bootstrap_apply.add_argument("--run-version", action="store_true")
-    bootstrap_command.add_argument("--profile")
-    bootstrap_command.add_argument("--adapter")
-    bootstrap_command.add_argument("--transport")
+    bootstrap_command.add_argument("--profile", required=True)
+    bootstrap_command.add_argument("--adapter", required=True)
+    bootstrap_command.add_argument("--transport", required=True)
     bootstrap_command.add_argument("--ports", choices=("auto",))
-    bootstrap_command.add_argument("--manifest-url")
-    bootstrap_command.add_argument("--provider-host")
+    bootstrap_command.add_argument("--manifest-url", required=True)
+    bootstrap_command.add_argument("--allow-provider-host", dest="allow_provider_host", required=True)
+    bootstrap_command.add_argument("--provider-host", dest="allow_provider_host", help=argparse.SUPPRESS)
     bootstrap_command.add_argument("--bundle-output", type=Path)
     bootstrap_command.add_argument("--bundle-file", type=Path)
     bootstrap_command.add_argument("--json", action="store_true")
@@ -1716,7 +1718,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_file=args.manifest_file,
                 allow_provider_host=args.allow_provider_host,
                 bundle_output=args.bundle_output,
-                bundle_input=args.bundle_input,
+                bundle_file=args.bundle_file,
                 backup_root=args.backup_root,
                 requested_platform=args.platform,
             )
@@ -1753,7 +1755,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_file=args.manifest_file,
                 allow_provider_host=args.allow_provider_host,
                 bundle_output=args.bundle_output,
-                bundle_input=args.bundle_input,
+                bundle_file=args.bundle_file,
                 backup_root=args.backup_root,
                 requested_platform=args.platform,
                 confirm=args.confirm,
@@ -1775,7 +1777,7 @@ def main(argv: list[str] | None = None) -> int:
                 transport=args.transport,
                 ports_mode=args.ports,
                 manifest_url=args.manifest_url,
-                provider_host=args.provider_host,
+                provider_host=args.allow_provider_host,
                 bundle_output=args.bundle_output,
                 bundle_file=args.bundle_file,
             )
