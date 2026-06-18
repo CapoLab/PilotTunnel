@@ -1,19 +1,26 @@
 import unittest
 
 from pilottunnel.registry import PortRegistry, RegistryEntry
+from testsupport import allocate_tcp_ports
 
 
 class RegistryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ports, listeners = allocate_tcp_ports(4)
+        self.main_port, self.alt_port, self.control_port, self.service_port = ports
+        for listener in listeners:
+            listener.close()
+
     def test_detects_port_conflicts(self) -> None:
         registry = PortRegistry()
         registry.claim(
             RegistryEntry(
                 profile="smoke-l4-001",
-                main_port=38080,
+                main_port=self.main_port,
                 adapter="backhaul",
                 transport="tcp",
                 role="controller",
-                owned_ports=[38080, 39081, 39082, 39083],
+                owned_ports=[self.main_port, self.control_port, self.service_port, self.alt_port],
                 owned_services=["svc-a"],
             )
         )
@@ -21,11 +28,11 @@ class RegistryTests(unittest.TestCase):
             registry.claim(
                 RegistryEntry(
                     profile="smoke-l4-002",
-                    main_port=7443,
+                    main_port=self.alt_port,
                     adapter="rathole",
                     transport="tcp",
                     role="worker",
-                    owned_ports=[7443, 39082],
+                    owned_ports=[self.alt_port, self.service_port],
                     owned_services=["svc-b"],
                 )
             )
@@ -35,20 +42,20 @@ class RegistryTests(unittest.TestCase):
             owners={
                 "smoke-l4-001": RegistryEntry(
                     profile="smoke-l4-001",
-                    main_port=38080,
+                    main_port=self.main_port,
                     adapter="backhaul",
                     transport="tcp",
                     role="controller",
-                    owned_ports=[38080],
+                    owned_ports=[self.main_port],
                     owned_services=["svc-a"],
                 ),
                 "smoke-l4-002": RegistryEntry(
                     profile="smoke-l4-002",
-                    main_port=38080,
+                    main_port=self.main_port,
                     adapter="rathole",
                     transport="tcp",
                     role="worker",
-                    owned_ports=[7443],
+                    owned_ports=[self.alt_port],
                     owned_services=["svc-b"],
                 ),
             }
@@ -60,11 +67,11 @@ class RegistryTests(unittest.TestCase):
             owners={
                 "smoke-l4-001": RegistryEntry(
                     profile="smoke-l4-001",
-                    main_port=38080,
+                    main_port=self.main_port,
                     adapter="backhaul",
                     transport="tcptun",
                     role="controller",
-                    owned_ports=[38080],
+                    owned_ports=[self.main_port],
                     owned_services=["svc-a"],
                 )
             }

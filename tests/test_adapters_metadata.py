@@ -4,9 +4,16 @@ from pathlib import Path
 from pilottunnel.adapters import ADAPTERS
 from pilottunnel.adapters.base import AdapterContext
 from pilottunnel.config import Profile, ProfilePorts
+from testsupport import allocate_tcp_ports
 
 
 class AdapterMetadataTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ports, listeners = allocate_tcp_ports(5)
+        self.main_port, self.target_port, self.control_port, self.service_port, self.check_port = ports
+        for listener in listeners:
+            listener.close()
+
     def test_all_adapters_expose_metadata(self) -> None:
         expected = {
             "backhaul",
@@ -30,11 +37,11 @@ class AdapterMetadataTests(unittest.TestCase):
         adapter = ADAPTERS["backhaul"]()
         profile = Profile(
             name="smoke-l4-001",
-            main_port=38080,
+            main_port=self.main_port,
             target_host="127.0.0.1",
-            target_port=39080,
+            target_port=self.target_port,
             role="controller",
-            ports=ProfilePorts(main_port=38080, control_port=39081, service_port=39082, check_port=39083),
+            ports=ProfilePorts(main_port=self.main_port, control_port=self.control_port, service_port=self.service_port, check_port=self.check_port),
         )
         controller = AdapterContext(profile=profile, transport="tcpmux", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
         worker = AdapterContext(profile=profile, transport="ws", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
@@ -47,7 +54,7 @@ class AdapterMetadataTests(unittest.TestCase):
 
     def test_backhaul_systemd_unit_naming(self) -> None:
         adapter = ADAPTERS["backhaul"]()
-        profile = Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)
+        profile = Profile(name="smoke-l4-001", main_port=self.main_port, target_host="127.0.0.1", target_port=self.target_port)
         controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
         worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         self.assertEqual(
@@ -63,11 +70,11 @@ class AdapterMetadataTests(unittest.TestCase):
         adapter = ADAPTERS["rathole"]()
         profile = Profile(
             name="smoke-l4-001",
-            main_port=38080,
+            main_port=self.main_port,
             target_host="127.0.0.1",
-            target_port=39080,
+            target_port=self.target_port,
             role="controller",
-            ports=ProfilePorts(main_port=38080, control_port=39081),
+            ports=ProfilePorts(main_port=self.main_port, control_port=self.control_port),
         )
         controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
         worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
@@ -76,7 +83,7 @@ class AdapterMetadataTests(unittest.TestCase):
 
     def test_rathole_systemd_unit_naming(self) -> None:
         adapter = ADAPTERS["rathole"]()
-        profile = Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)
+        profile = Profile(name="smoke-l4-001", main_port=self.main_port, target_host="127.0.0.1", target_port=self.target_port)
         controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
         worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         self.assertEqual(

@@ -23,6 +23,10 @@ class CliWorkflowTests(unittest.TestCase):
         self.lock_dir = base / "locks"
         self.work_dir = base / "work"
         self.staging_root = base / "staging"
+        ports, listeners = self._allocate_tcp_ports(6)
+        self.main_port, self.target_port, self.control_port, self.service_port, self.check_port, self.alt_port = ports
+        for listener in listeners:
+            listener.close()
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -59,19 +63,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -79,7 +83,7 @@ class CliWorkflowTests(unittest.TestCase):
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(config_data["profiles"][0]["name"], "smoke-l4-001")
 
-    def test_init_with_role_controller_stores_normalized_controller_role(self) -> None:
+    def test_init_with_role_controller_writes_node_role_to_config(self) -> None:
         code, output = self.run_cli("init", "--role", "controller")
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -142,15 +146,15 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self.run_cli("init", "--force", "--role", "worker")
         code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
@@ -165,15 +169,15 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
@@ -195,8 +199,8 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_duplicate_profile_create_is_blocked(self) -> None:
         self.run_cli("init", "--role", "controller")
-        self.run_cli("profile", "create", "--name", "smoke-l4-001", "--main-port", "38080", "--target-port", "39080")
-        code, output = self.run_cli("profile", "create", "--name", "smoke-l4-001", "--main-port", "38080", "--target-port", "39080")
+        self.run_cli("profile", "create", "--name", "smoke-l4-001", "--main-port", str(self.main_port), "--target-port", str(self.target_port))
+        code, output = self.run_cli("profile", "create", "--name", "smoke-l4-001", "--main-port", str(self.main_port), "--target-port", str(self.target_port))
         self.assertEqual(code, 1)
         self.assertIn("already exists", output)
 
@@ -222,15 +226,15 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
 
     def _create_profile_with_ports(
@@ -341,7 +345,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(payload["latency_ms"])
 
     def test_tcp_healthcheck_fails_safely_when_port_is_closed(self) -> None:
-        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "65534")
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", str(self.alt_port))
         self.assertEqual(code, 1)
         payload = json.loads(output)
         self.assertFalse(payload["ok"])
@@ -378,15 +382,15 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         code, output = self.run_cli("healthcheck", "--profile", "smoke-l4-001", "--role-aware")
         self.assertEqual(code, 1)
@@ -402,15 +406,15 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self.run_cli("init", "--force", "--role", "worker")
         code, output = self.run_cli("healthcheck", "--profile", "smoke-l4-001", "--role-aware")
@@ -420,13 +424,14 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("controller_endpoint", labels)
 
     def test_invalid_healthcheck_port_is_rejected(self) -> None:
-        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "70000")
+        invalid_port = str(65536 + (self.alt_port % 1000))
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", invalid_port)
         self.assertEqual(code, 1)
         self.assertIn("port must be between", output)
 
     @patch("pilottunnel.healthcheck.socket.create_connection", side_effect=TimeoutError("timed out"))
     def test_healthcheck_timeout_is_handled_safely(self, _mock_create_connection) -> None:
-        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "6553", "--timeout", "0.1")
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", str(self.alt_port), "--timeout", "0.1")
         self.assertEqual(code, 1)
         payload = json.loads(output)
         self.assertFalse(payload["ok"])
@@ -473,19 +478,19 @@ class CliWorkflowTests(unittest.TestCase):
         config_data["profiles"].append(
             {
                 "name": "other",
-                "main_port": 7443,
+                "main_port": self.alt_port,
                 "target_host": "127.0.0.1",
-                "target_port": 7443,
+                "target_port": self.alt_port,
                 "role": "worker",
                 "active_layer": "layer4",
                 "active_adapter": "",
                 "active_transport": "",
                 "candidates": [],
                 "ports": {
-                    "main_port": 7443,
-                    "control_port": 39081,
-                    "service_port": 2206,
-                    "check_port": 3206,
+                    "main_port": self.alt_port,
+                    "control_port": self.control_port,
+                    "service_port": self.service_port,
+                    "check_port": self.check_port,
                 },
                 "safety": {
                     "cooldown_seconds": 30,
@@ -554,7 +559,7 @@ class CliWorkflowTests(unittest.TestCase):
 
     def test_path_traversal_staging_root_or_profile_name_is_blocked(self) -> None:
         self.run_cli("init", "--role", "controller")
-        code, output = self.run_cli("profile", "create", "--name", "../bad", "--main-port", "38080", "--target-port", "39080")
+        code, output = self.run_cli("profile", "create", "--name", "../bad", "--main-port", str(self.main_port), "--target-port", str(self.target_port))
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", output)
 
@@ -717,19 +722,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         controller_code, controller_output = self.run_cli(
             "service",
@@ -1032,19 +1037,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
 
         def fake_run(command, **kwargs):
@@ -1379,7 +1384,7 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": False,
                 "host": "127.0.0.1",
-                "port": 38080,
+                "port": self.main_port,
                 "timeout": 2.0,
                 "latency_ms": None,
                 "error": "failed",
@@ -1431,7 +1436,7 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": True,
                 "host": "127.0.0.1",
-                "port": 38080,
+                "port": self.main_port,
                 "timeout": 2.0,
                 "latency_ms": 1.0,
                 "error": "",
@@ -1495,9 +1500,9 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
         )
         self._prepare_real_systemd_unit()
         with self._mock_real_systemd():
@@ -1760,7 +1765,7 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": False,
                 "host": "127.0.0.1",
-                "port": 38080,
+                "port": self.main_port,
                 "timeout": 2.0,
                 "latency_ms": None,
                 "error": "failed",
@@ -1812,7 +1817,7 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": True,
                 "host": "127.0.0.1",
-                "port": 38080,
+                "port": self.main_port,
                 "timeout": 2.0,
                 "latency_ms": 1.0,
                 "error": "",
@@ -1900,19 +1905,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -2426,7 +2431,7 @@ class CliWorkflowTests(unittest.TestCase):
         mock_readiness.return_value = self._readiness_ok()
         mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
         mock_healthchecks.return_value = [
-            {"ok": True, "host": "127.0.0.1", "port": 39080, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
+            {"ok": True, "host": "127.0.0.1", "port": self.target_port, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
         ]
         code, output = self.run_cli(
             "deploy",
@@ -2454,7 +2459,7 @@ class CliWorkflowTests(unittest.TestCase):
         mock_readiness.return_value = self._readiness_ok()
         mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
         mock_healthchecks.return_value = [
-            {"ok": True, "host": "127.0.0.1", "port": 39080, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
+            {"ok": True, "host": "127.0.0.1", "port": self.target_port, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
         ]
         code, output = self.run_cli(
             "deploy",
@@ -2523,7 +2528,7 @@ class CliWorkflowTests(unittest.TestCase):
         mock_ownership.return_value = {"ok": True, "message": "owned"}
         mock_status.return_value = {"ok": True, "read_only": True, "is_active": "active", "is_enabled": "enabled", "unit_path": "/etc/systemd/system/pilot.service"}
         mock_healthchecks.return_value = [
-            {"ok": True, "host": "127.0.0.1", "port": 39080, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
+            {"ok": True, "host": "127.0.0.1", "port": self.target_port, "timeout": 2.0, "latency_ms": 1.0, "error": "", "checked_at": "now", "role": "controller", "profile": "smoke-l4-001", "label": "target"}
         ]
         self.run_cli("deploy", "plan", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.run_cli(
@@ -3042,19 +3047,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -3211,9 +3216,9 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-port",
-            "38080",
+            str(self.main_port),
         )
         self._prepare_real_systemd_unit()
         with self._mock_real_systemd():
@@ -3831,19 +3836,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -4080,19 +4085,19 @@ class CliWorkflowTests(unittest.TestCase):
             "--name",
             "smoke-l4-001",
             "--main-port",
-            "38080",
+            str(self.main_port),
             "--target-host",
             "127.0.0.1",
             "--target-port",
-            "38080",
+            str(self.main_port),
             "--role",
             "controller",
             "--control-port",
-            "39081",
+            str(self.control_port),
             "--service-port",
-            "39082",
+            str(self.service_port),
             "--check-port",
-            "39083",
+            str(self.check_port),
         )
         self._prepare_real_systemd_unit(role="controller")
 
@@ -4544,9 +4549,9 @@ class CliWorkflowTests(unittest.TestCase):
                     "created_at": "2024-01-01T00:00:00Z",
                     "profile": {
                         "name": "smoke-l4-001",
-                        "main_port": 38080,
+                        "main_port": self.main_port,
                         "target_host": "127.0.0.1",
-                        "target_port": 39080,
+                        "target_port": self.target_port,
                         "role": "worker",
                     },
                     "adapter": "backhaul",
@@ -5152,7 +5157,7 @@ class CliWorkflowTests(unittest.TestCase):
             {
                 "ok": True,
                 "host": "127.0.0.1",
-                "port": 38080,
+                "port": self.main_port,
                 "timeout": 2.0,
                 "latency_ms": 1.0,
                 "error": "",
@@ -5927,7 +5932,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("uninstall-apply", actions)
 
     def test_audit_records_healthcheck_failure(self) -> None:
-        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", "65534")
+        code, output = self.run_cli("healthcheck", "--host", "127.0.0.1", "--port", str(self.alt_port))
         self.assertEqual(code, 1)
         lines = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(lines[-1]["action"], "healthcheck")

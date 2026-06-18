@@ -7,9 +7,16 @@ from pilottunnel.binaries import get_binary_plan, list_binary_plans, verify_bina
 from pilottunnel.config import Profile
 from pilottunnel.state import AppState, BinaryRecord
 from pilottunnel.preflight import run_preflight
+from testsupport import allocate_tcp_ports
 
 
 class PreflightTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ports, listeners = allocate_tcp_ports(2)
+        self.main_port, self.target_port = ports
+        for listener in listeners:
+            listener.close()
+
     def test_preflight_on_current_platform_does_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result = run_preflight(Path(temp_dir)).to_dict()
@@ -42,9 +49,9 @@ class PreflightTests(unittest.TestCase):
 
     def test_preflight_ports_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            profile = Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)
+            profile = Profile(name="smoke-l4-001", main_port=self.main_port, target_host="127.0.0.1", target_port=self.target_port)
             result = run_preflight(Path(temp_dir), profile).to_dict()
-            self.assertIn(38080, {int(key) for key in result["port_availability"].keys()})
+            self.assertIn(self.main_port, {int(key) for key in result["port_availability"].keys()})
 
     @patch("pilottunnel.binaries.subprocess.run")
     def test_verify_run_version_is_timeout_safe(self, mock_run) -> None:

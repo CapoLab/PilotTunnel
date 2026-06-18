@@ -9,9 +9,16 @@ from pilottunnel.config import AppConfig, Profile, ProfilePorts, SUPPORTED_LAYER
 from pilottunnel.registry import PortRegistry, RegistryEntry
 from pilottunnel.state import AppState
 from pilottunnel.switch_engine import SwitchEngine, SwitchPaths
+from testsupport import allocate_tcp_ports
 
 
 class SafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ports, listeners = allocate_tcp_ports(5)
+        self.main_port, self.target_port, self.control_port, self.service_port, self.check_port = ports
+        for listener in listeners:
+            listener.close()
+
     def test_secrets_are_redacted_from_audit_logs_and_dry_run_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "audit.log"
@@ -28,7 +35,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_unsupported_layers_are_listed_but_blocked(self) -> None:
         self.assertIn("layer7", SUPPORTED_LAYERS)
-        config = AppConfig(profiles=[Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)])
+        config = AppConfig(profiles=[Profile(name="smoke-l4-001", main_port=self.main_port, target_host="127.0.0.1", target_port=self.target_port)])
         engine = SwitchEngine(
             config=config,
             state=AppState(),
@@ -45,7 +52,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_unsupported_backhaul_experimental_tun_transports_blocked(self) -> None:
         adapter = ADAPTERS["backhaul"]()
-        profile = Profile(name="smoke-l4-001", main_port=38080, target_host="127.0.0.1", target_port=39080)
+        profile = Profile(name="smoke-l4-001", main_port=self.main_port, target_host="127.0.0.1", target_port=self.target_port)
         ok, reason = adapter.precheck(
             __import__("pilottunnel.adapters.base", fromlist=["AdapterContext"]).AdapterContext(
                 profile=profile,
@@ -63,20 +70,20 @@ class SafetyTests(unittest.TestCase):
             owners={
                 "a": RegistryEntry(
                     profile="a",
-                    main_port=38080,
+                    main_port=self.main_port,
                     adapter="backhaul",
                     transport="tcp",
                     role="controller",
-                    owned_ports=[38080, 39081, 39082, 39083],
+                    owned_ports=[self.main_port, self.control_port, self.service_port, self.check_port],
                     owned_services=["svc-a"],
                 ),
                 "b": RegistryEntry(
                     profile="b",
-                    main_port=7443,
+                    main_port=self.target_port,
                     adapter="rathole",
                     transport="tcp",
                     role="worker",
-                    owned_ports=[7443, 39083],
+                    owned_ports=[self.target_port, self.check_port],
                     owned_services=["svc-b"],
                 ),
             }

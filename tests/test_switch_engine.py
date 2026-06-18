@@ -10,6 +10,7 @@ from pilottunnel.config import AppConfig, Profile, ProfilePorts
 from pilottunnel.registry import PortRegistry, RegistryEntry
 from pilottunnel.state import AppState, RuntimeRecord
 from pilottunnel.switch_engine import SwitchEngine, SwitchPaths
+from testsupport import allocate_tcp_ports
 
 
 @dataclass
@@ -68,19 +69,25 @@ class StubAdapter:
 
 
 class SwitchEngineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ports, listeners = allocate_tcp_ports(5)
+        self.main_port, self.target_port, self.control_port, self.service_port, self.check_port = ports
+        for listener in listeners:
+            listener.close()
+
     def _engine(self, adapters: dict[str, StubAdapter], state: AppState | None = None) -> tuple[SwitchEngine, Path]:
         temp_dir = Path(tempfile.mkdtemp())
         config = AppConfig(
             profiles=[
                 Profile(
                     name="smoke-l4-001",
-                    main_port=38080,
+                    main_port=self.main_port,
                     target_host="127.0.0.1",
-                    target_port=39080,
+                    target_port=self.target_port,
                     role="controller",
                     active_adapter="backhaul",
                     active_transport="tcp",
-                    ports=ProfilePorts(main_port=38080, control_port=39081, service_port=39082, check_port=39083),
+                    ports=ProfilePorts(main_port=self.main_port, control_port=self.control_port, service_port=self.service_port, check_port=self.check_port),
                 )
             ]
         )
@@ -110,11 +117,11 @@ class SwitchEngineTests(unittest.TestCase):
                 owners={
                     "smoke-l4-001": RegistryEntry(
                         profile="smoke-l4-001",
-                        main_port=38080,
+                        main_port=self.main_port,
                         adapter="backhaul",
                         transport="tcp",
                         role="controller",
-                        owned_ports=[38080, 39081, 39082, 39083],
+                        owned_ports=[self.main_port, self.control_port, self.service_port, self.check_port],
                         owned_services=["svc-backhaul-tcp-controller"],
                     )
                 }
