@@ -725,5 +725,5 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "<PROVIDER_HOST>",
         ):
             self.assertIn(placeholder, readme)
-        for disallowed in ("38080", "39080", "39081", "39082", "39083", "turkey-6221"):
-            self.assertNotIn(disallowed, readme)
+        self.assertNotRegex(readme, r"--(?:main|target|control|service|check)-port\s+\d+")
+        self.assertNotRegex(readme, r"--profile\s+[A-Za-z][A-Za-z0-9._-]*-\d+[A-Za-z0-9._-]*")
