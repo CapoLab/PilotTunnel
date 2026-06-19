@@ -39,6 +39,7 @@ from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
 from .readiness import build_readiness_report
+from .rc import build_rc_check, build_rc_smoke
 from .runtime_plan import build_runtime_plan
 from .manual_switch import apply_manual_switch, build_manual_switch_plan
 from .service_install import apply_service_install, build_service_install_plan
@@ -388,6 +389,25 @@ def build_parser() -> argparse.ArgumentParser:
     readiness_report.add_argument("--install-root", type=Path, default=None)
     readiness_report.add_argument("--json", action="store_true")
 
+    rc = subparsers.add_parser("rc")
+    rc_subparsers = rc.add_subparsers(dest="rc_command", required=True)
+    rc_check = rc_subparsers.add_parser("check")
+    rc_check.add_argument("--profile")
+    rc_check.add_argument("--target")
+    rc_check.add_argument("--runtime-dir", type=Path, required=True)
+    rc_check.add_argument("--service-dir", type=Path, required=True)
+    rc_check.add_argument("--target-dir", type=Path, required=True)
+    rc_check.add_argument("--allow-system-dir", action="store_true")
+    rc_check.add_argument("--json", action="store_true")
+    rc_smoke = rc_subparsers.add_parser("smoke")
+    rc_smoke.add_argument("--profile")
+    rc_smoke.add_argument("--target")
+    rc_smoke.add_argument("--runtime-dir", type=Path, required=True)
+    rc_smoke.add_argument("--service-dir", type=Path, required=True)
+    rc_smoke.add_argument("--target-dir", type=Path, required=True)
+    rc_smoke.add_argument("--allow-system-dir", action="store_true")
+    rc_smoke.add_argument("--json", action="store_true")
+
     runtime = subparsers.add_parser("runtime")
     runtime_subparsers = runtime.add_subparsers(dest="runtime_command", required=True)
     runtime_plan = runtime_subparsers.add_parser("plan")
@@ -661,6 +681,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return "node_status"
     if args.command == "readiness":
         return f"readiness_{args.readiness_command}"
+    if args.command == "rc":
+        return f"rc_{args.rc_command}"
     if args.command == "runtime":
         return f"runtime_{args.runtime_command}"
     if args.command == "systemd":
@@ -2020,6 +2042,48 @@ def main(argv: list[str] | None = None) -> int:
                 transport=args.transport,
                 staging_root=getattr(args, "command_staging_root", None) or args.staging_root,
                 install_root=args.install_root,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "rc" and args.rc_command == "check":
+        try:
+            payload = build_rc_check(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                runtime_dir=args.runtime_dir,
+                service_dir=args.service_dir,
+                target_dir=args.target_dir,
+                profile_name=args.profile,
+                target_tunnel=args.target,
+                allow_system_dir=args.allow_system_dir,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "rc" and args.rc_command == "smoke":
+        try:
+            payload = build_rc_smoke(
+                config=config,
+                state=state,
+                registry=registry,
+                config_path=config_path,
+                switch_paths=switch_paths,
+                runtime_dir=args.runtime_dir,
+                service_dir=args.service_dir,
+                target_dir=args.target_dir,
+                profile_name=args.profile,
+                target_tunnel=args.target,
+                allow_system_dir=args.allow_system_dir,
             )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))

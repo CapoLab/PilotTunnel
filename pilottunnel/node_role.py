@@ -30,6 +30,8 @@ SAFE_INSPECT_ACTIONS = {
     "node_status",
     "readiness_report",
     "preflight",
+    "rc_check",
+    "rc_smoke",
     "runtime_plan",
     "service_install_plan",
     "service_render",

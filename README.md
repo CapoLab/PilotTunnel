@@ -16,6 +16,30 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 - The switch engine still enforces lock, stop-old, cleanup, registry validation, start-new plan, healthcheck stub, commit, and rollback behavior.
 - No real systemd, iptables, nftables, routes, or interfaces are changed in `v0.1`.
 
+## v0.1 Operator Workflow
+
+1. Inspect available upstream binary sources.
+2. Fetch source binaries into a local provider source directory.
+3. Prepare a provider manifest.
+4. Install managed binaries into a local managed install directory.
+5. Render and inspect a runtime plan.
+6. Render staged service unit files.
+7. Review a staged service install plan.
+8. Optionally run guarded daemon-reload later if the operator intentionally installs units.
+9. Start or stop managed services manually through the guarded lifecycle commands.
+10. Use guarded manual switch planning and apply when changing the active tunnel.
+11. Run `rc check` for a read-only release-candidate validation pass.
+12. Run `rc smoke` for a safe local smoke pass that stages artifacts without touching real services by default.
+
+## v0.1 Limitations
+
+- No full auto-switch.
+- No background monitoring daemon.
+- No UI.
+- Layer 4 TCP only.
+- Only selected adapters are covered by the runtime planning workflow.
+- Real deployment still requires careful operator confirmation.
+
 ## Layer 4 Scope
 
 - Supported practical dry-run flows:
@@ -29,7 +53,7 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 ## Example Commands
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init --role controller
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name <PROFILE> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter backhaul --transport tcpmux
@@ -39,7 +63,7 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 ## Dry-Run CLI Workflow
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init
+python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init --role controller
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name <PROFILE> --main-port <MAIN_PORT> --target-host <TARGET_HOST> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT>
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
 python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter show --name backhaul
@@ -236,6 +260,19 @@ python -m pilottunnel.cli systemd stop apply --service-dir <SERVICE_STAGING_DIR>
 ```bash
 python -m pilottunnel.cli --config <CONFIG_FILE> switch plan --target <TARGET_TUNNEL> --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR>
 python -m pilottunnel.cli --config <CONFIG_FILE> switch apply --target <TARGET_TUNNEL> --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --confirm SWITCH_PILOTTUNNEL_TUNNEL
+```
+
+## Release-Candidate Validation
+
+- `rc check` validates the safe end-to-end v0.1 workflow in scratch space and keeps the operator's runtime and staged service directories untouched.
+- `rc smoke` stages runtime and service artifacts under the chosen local directories, but it does not start services, run daemon-reload, install units into real system directories by default, or execute adapter binaries.
+- Both commands report component checklist status, warnings, blockers, next safe commands, next real-apply hints, and explicit v0.1 limitations.
+- Auto-switch and background monitoring are intentionally out of scope for `v0.1`.
+
+```bash
+python -m pilottunnel.cli --config <CONFIG_FILE> rc check --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <TARGET_SYSTEMD_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> rc smoke --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <TARGET_SYSTEMD_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> rc check --target <TARGET_TUNNEL> --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <TARGET_SYSTEMD_DIR>
 ```
 
 ## Real-Host Install Planning
