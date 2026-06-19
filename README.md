@@ -165,7 +165,8 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
   6. install staged service files into a chosen target directory
   7. optionally run guarded daemon-reload
   8. inspect managed service status
-  9. wait for a later start, stop, and switch workflow
+  9. use guarded start and stop for managed services
+  10. wait for a later manual switch and rollback workflow
 - `runtime plan` currently supports Layer 4 TCP planning for `rathole`, `frp`, and `gost`.
 - It resolves binaries through the managed install layer, writes runtime config files under the chosen runtime directory, and reports active, hot-standby, and config-only tunnels.
 - It does not start processes, bind ports, create `systemd` units, or execute adapter binaries.
@@ -206,12 +207,20 @@ python -m pilottunnel.cli --config <CONFIG_FILE> service install apply --runtime
 - `systemd reload plan` is read-only and reports whether a managed unit install likely requires `systemctl daemon-reload`.
 - `systemd reload apply` requires exact confirmation with `--confirm SYSTEMD_DAEMON_RELOAD`.
 - `systemd status` uses only read-only `systemctl show` calls for PilotTunnel-managed service names discovered from the staged service directory.
-- Start, stop, restart, enable, disable, and switching remain separate future work in this workflow.
+- `systemd start plan` and `systemd stop plan` are read-only.
+- `systemd start apply` requires exact confirmation with `--confirm START_PILOTTUNNEL_SERVICES`.
+- `systemd stop apply` requires exact confirmation with `--confirm STOP_PILOTTUNNEL_SERVICES`.
+- Only PilotTunnel-managed active and hot-standby services discovered from the staged service directory are eligible.
+- Restart, enable, disable, manual switch, and rollback remain separate future work in this workflow.
 
 ```bash
 python -m pilottunnel.cli systemd reload plan --target-dir <SYSTEMD_TARGET_DIR>
 python -m pilottunnel.cli systemd reload apply --target-dir <SYSTEMD_TARGET_DIR> --confirm SYSTEMD_DAEMON_RELOAD
 python -m pilottunnel.cli systemd status --service-dir <SERVICE_STAGING_DIR>
+python -m pilottunnel.cli systemd start plan --service-dir <SERVICE_STAGING_DIR>
+python -m pilottunnel.cli systemd start apply --service-dir <SERVICE_STAGING_DIR> --confirm START_PILOTTUNNEL_SERVICES
+python -m pilottunnel.cli systemd stop plan --service-dir <SERVICE_STAGING_DIR>
+python -m pilottunnel.cli systemd stop apply --service-dir <SERVICE_STAGING_DIR> --confirm STOP_PILOTTUNNEL_SERVICES
 ```
 
 ## Real-Host Install Planning

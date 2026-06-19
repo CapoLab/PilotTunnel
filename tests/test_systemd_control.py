@@ -118,6 +118,19 @@ class SystemdControlTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         return json.loads(output)
 
+    def _set_runtime_role_in_staged_unit(self, service_name: str, runtime_role: str) -> None:
+        path = self.service_dir / service_name
+        content = path.read_text(encoding="utf-8")
+        updated_lines = []
+        for line in content.splitlines():
+            if line.startswith("Description=PilotTunnel "):
+                parts = line[len("Description=PilotTunnel ") :].split(" ")
+                if len(parts) >= 3:
+                    parts[2] = runtime_role
+                    line = "Description=PilotTunnel " + " ".join(parts)
+            updated_lines.append(line)
+        path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+
     def test_reload_plan_is_read_only(self) -> None:
         install_dir = self._managed_install_dir("rathole")
         self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
@@ -192,6 +205,142 @@ class SystemdControlTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["action"], "reloaded")
 
+    def test_start_plan_is_read_only(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        self._render_services()
+        before = (self.service_dir / next(self.service_dir.glob("*.service")).name).read_text(encoding="utf-8")
+        code, output = self.run_cli("systemd", "start", "plan", "--service-dir", str(self.service_dir))
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["services"][0]["action"], "would_start")
+        after = (self.service_dir / next(self.service_dir.glob("*.service")).name).read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+    def test_start_apply_requires_exact_confirm_token(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        self._render_services()
+        code, output = self.run_cli("systemd", "start", "apply", "--service-dir", str(self.service_dir))
+        self.assertEqual(code, 1)
+        self.assertIn("START_PILOTTUNNEL_SERVICES", output)
+
+    def test_start_apply_calls_only_systemctl_start_for_managed_services(self) -> None:
+        install_dir = self._managed_install_dir("rathole", "frp")
+        self._write_config(
+            [
+                self._profile("smoke-l4-001", adapter="rathole", runtime_role="active"),
+                self._profile("demo-l4-002", adapter="frp", runtime_role="hot_standby"),
+            ],
+            managed_install_dir=install_dir,
+        )
+        render_payload = self._render_services()
+        expected = {item["service_name"] for item in render_payload["services"] if item["service_unit_rendered"]}
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], *, timeout_seconds: float) -> dict:
+            calls.append(command)
+            return {"returncode": 0, "stdout": "ok", "stderr": "", "timed_out": False}
+
+        with patch("pilottunnel.systemd_control._is_linux", return_value=True), patch(
+            "pilottunnel.systemd_control._systemd_available",
+            return_value=True,
+        ), patch("pilottunnel.systemd_control._default_command_runner", side_effect=fake_runner):
+            code, output = self.run_cli(
+                "systemd",
+                "start",
+                "apply",
+                "--service-dir",
+                str(self.service_dir),
+                "--confirm",
+                "START_PILOTTUNNEL_SERVICES",
+            )
+        self.assertEqual(code, 0, msg=output)
+        self.assertEqual({tuple(call) for call in calls}, {("systemctl", "start", name) for name in expected})
+
+    def test_start_apply_does_not_start_config_only_services(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        render_payload = self._render_services()
+        service_name = render_payload["services"][0]["service_name"]
+        self._set_runtime_role_in_staged_unit(service_name, "config_only")
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], *, timeout_seconds: float) -> dict:
+            calls.append(command)
+            return {"returncode": 0, "stdout": "ok", "stderr": "", "timed_out": False}
+
+        with patch("pilottunnel.systemd_control._is_linux", return_value=True), patch(
+            "pilottunnel.systemd_control._systemd_available",
+            return_value=True,
+        ), patch("pilottunnel.systemd_control._default_command_runner", side_effect=fake_runner):
+            code, output = self.run_cli(
+                "systemd",
+                "start",
+                "apply",
+                "--service-dir",
+                str(self.service_dir),
+                "--confirm",
+                "START_PILOTTUNNEL_SERVICES",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["services"][0]["action"], "skipped")
+        self.assertEqual(calls, [])
+
+    def test_stop_plan_is_read_only(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        self._render_services()
+        before = (self.service_dir / next(self.service_dir.glob("*.service")).name).read_text(encoding="utf-8")
+        code, output = self.run_cli("systemd", "stop", "plan", "--service-dir", str(self.service_dir))
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["services"][0]["action"], "would_stop")
+        after = (self.service_dir / next(self.service_dir.glob("*.service")).name).read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+    def test_stop_apply_requires_exact_confirm_token(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        self._render_services()
+        code, output = self.run_cli("systemd", "stop", "apply", "--service-dir", str(self.service_dir))
+        self.assertEqual(code, 1)
+        self.assertIn("STOP_PILOTTUNNEL_SERVICES", output)
+
+    def test_stop_apply_calls_only_systemctl_stop_for_managed_services(self) -> None:
+        install_dir = self._managed_install_dir("rathole", "frp")
+        self._write_config(
+            [
+                self._profile("smoke-l4-001", adapter="rathole", runtime_role="active"),
+                self._profile("demo-l4-002", adapter="frp", runtime_role="hot_standby"),
+            ],
+            managed_install_dir=install_dir,
+        )
+        render_payload = self._render_services()
+        expected = {item["service_name"] for item in render_payload["services"] if item["service_unit_rendered"]}
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], *, timeout_seconds: float) -> dict:
+            calls.append(command)
+            return {"returncode": 0, "stdout": "ok", "stderr": "", "timed_out": False}
+
+        with patch("pilottunnel.systemd_control._is_linux", return_value=True), patch(
+            "pilottunnel.systemd_control._systemd_available",
+            return_value=True,
+        ), patch("pilottunnel.systemd_control._default_command_runner", side_effect=fake_runner):
+            code, output = self.run_cli(
+                "systemd",
+                "stop",
+                "apply",
+                "--service-dir",
+                str(self.service_dir),
+                "--confirm",
+                "STOP_PILOTTUNNEL_SERVICES",
+            )
+        self.assertEqual(code, 0, msg=output)
+        self.assertEqual({tuple(call) for call in calls}, {("systemctl", "stop", name) for name in expected})
+
     def test_status_calls_only_read_only_systemctl_commands(self) -> None:
         install_dir = self._managed_install_dir("rathole")
         self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
@@ -224,6 +373,14 @@ class SystemdControlTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("non-PilotTunnel managed service name", output)
 
+    def test_start_rejects_arbitrary_non_pilottunnel_service_names(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        self._render_services()
+        code, output = self.run_cli("systemd", "start", "plan", "--service-dir", str(self.service_dir), "--service-name", "other.service")
+        self.assertEqual(code, 1)
+        self.assertIn("non-PilotTunnel managed service name", output)
+
     def test_status_accepts_deterministic_pilottunnel_managed_service_names(self) -> None:
         install_dir = self._managed_install_dir("rathole")
         self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
@@ -246,8 +403,8 @@ class SystemdControlTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["services"][0]["service_name"], service_name)
 
-    def test_systemd_start_stop_restart_enable_disable_are_not_callable(self) -> None:
-        for subcommand in ("start", "stop", "restart", "enable", "disable"):
+    def test_systemd_restart_enable_disable_mask_unmask_are_not_callable(self) -> None:
+        for subcommand in ("restart", "enable", "disable", "mask", "unmask"):
             code, _output = self.run_cli("systemd", subcommand)
             self.assertNotEqual(code, 0)
 
@@ -312,3 +469,26 @@ class SystemdControlTests(unittest.TestCase):
         ):
             code, output = self.run_cli("systemd", "status", "--service-dir", str(self.service_dir))
         self.assertEqual(code, 0, msg=output)
+
+    def test_start_apply_clean_error_when_systemctl_returns_non_zero(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        self._render_services()
+        with patch("pilottunnel.systemd_control._is_linux", return_value=True), patch(
+            "pilottunnel.systemd_control._systemd_available",
+            return_value=True,
+        ), patch(
+            "pilottunnel.systemd_control._default_command_runner",
+            return_value={"returncode": 1, "stdout": "", "stderr": "token=blocked", "timed_out": False},
+        ):
+            code, output = self.run_cli(
+                "systemd",
+                "start",
+                "apply",
+                "--service-dir",
+                str(self.service_dir),
+                "--confirm",
+                "START_PILOTTUNNEL_SERVICES",
+            )
+        self.assertEqual(code, 1)
+        self.assertNotIn("blocked", output)

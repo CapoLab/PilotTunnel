@@ -44,7 +44,11 @@ from .service_install import apply_service_install, build_service_install_plan
 from .service_plan import build_staged_service_plan
 from .systemd_control import (
     DEFAULT_TIMEOUT_SECONDS as SYSTEMD_TIMEOUT_SECONDS,
+    apply_start as apply_systemd_start,
+    apply_stop as apply_systemd_stop,
     apply_reload as apply_systemd_reload,
+    build_start_plan as build_systemd_start_plan,
+    build_stop_plan as build_systemd_stop_plan,
     build_reload_plan as build_systemd_reload_plan,
     inspect_managed_status as inspect_systemd_status,
 )
@@ -389,6 +393,30 @@ def build_parser() -> argparse.ArgumentParser:
     systemd_reload_apply.add_argument("--target-dir", type=Path, required=True)
     systemd_reload_apply.add_argument("--confirm")
     systemd_reload_apply.add_argument("--json", action="store_true")
+    systemd_start = systemd_subparsers.add_parser("start")
+    systemd_start_subparsers = systemd_start.add_subparsers(dest="systemd_start_command", required=True)
+    systemd_start_plan = systemd_start_subparsers.add_parser("plan")
+    systemd_start_plan.add_argument("--service-dir", type=Path, required=True)
+    systemd_start_plan.add_argument("--service-name")
+    systemd_start_plan.add_argument("--json", action="store_true")
+    systemd_start_apply = systemd_start_subparsers.add_parser("apply")
+    systemd_start_apply.add_argument("--service-dir", type=Path, required=True)
+    systemd_start_apply.add_argument("--service-name")
+    systemd_start_apply.add_argument("--timeout", type=float, default=SYSTEMD_TIMEOUT_SECONDS)
+    systemd_start_apply.add_argument("--confirm")
+    systemd_start_apply.add_argument("--json", action="store_true")
+    systemd_stop = systemd_subparsers.add_parser("stop")
+    systemd_stop_subparsers = systemd_stop.add_subparsers(dest="systemd_stop_command", required=True)
+    systemd_stop_plan = systemd_stop_subparsers.add_parser("plan")
+    systemd_stop_plan.add_argument("--service-dir", type=Path, required=True)
+    systemd_stop_plan.add_argument("--service-name")
+    systemd_stop_plan.add_argument("--json", action="store_true")
+    systemd_stop_apply = systemd_stop_subparsers.add_parser("apply")
+    systemd_stop_apply.add_argument("--service-dir", type=Path, required=True)
+    systemd_stop_apply.add_argument("--service-name")
+    systemd_stop_apply.add_argument("--timeout", type=float, default=SYSTEMD_TIMEOUT_SECONDS)
+    systemd_stop_apply.add_argument("--confirm")
+    systemd_stop_apply.add_argument("--json", action="store_true")
     systemd_status = systemd_subparsers.add_parser("status")
     systemd_status.add_argument("--service-dir", type=Path, required=True)
     systemd_status.add_argument("--service-name")
@@ -625,6 +653,10 @@ def _action_name(args: argparse.Namespace) -> str | None:
     if args.command == "systemd":
         if args.systemd_command == "reload":
             return f"systemd_reload_{args.systemd_reload_command}"
+        if args.systemd_command == "start":
+            return f"systemd_start_{args.systemd_start_command}"
+        if args.systemd_command == "stop":
+            return f"systemd_stop_{args.systemd_stop_command}"
         return f"systemd_{args.systemd_command}"
     if args.command == "restore":
         return f"restore_{args.restore_command}"
@@ -951,6 +983,46 @@ def main(argv: list[str] | None = None) -> int:
             target_dir=args.target_dir,
             confirm=args.confirm,
             audit_path=switch_paths.audit_path,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "start" and args.systemd_start_command == "plan":
+        payload = build_systemd_start_plan(
+            service_dir=args.service_dir,
+            service_name=args.service_name,
+            audit_path=switch_paths.audit_path,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "start" and args.systemd_start_command == "apply":
+        payload = apply_systemd_start(
+            service_dir=args.service_dir,
+            service_name=args.service_name,
+            confirm=args.confirm,
+            audit_path=switch_paths.audit_path,
+            timeout_seconds=args.timeout,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "stop" and args.systemd_stop_command == "plan":
+        payload = build_systemd_stop_plan(
+            service_dir=args.service_dir,
+            service_name=args.service_name,
+            audit_path=switch_paths.audit_path,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "stop" and args.systemd_stop_command == "apply":
+        payload = apply_systemd_stop(
+            service_dir=args.service_dir,
+            service_name=args.service_name,
+            confirm=args.confirm,
+            audit_path=switch_paths.audit_path,
+            timeout_seconds=args.timeout,
         )
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1

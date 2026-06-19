@@ -1,13 +1,12 @@
-"""Guarded systemd reload planning and managed status inspection."""
+"""Guarded systemd reload, status, start, and stop control."""
 
 from __future__ import annotations
 
 import json
-import os
 import platform
+import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +15,19 @@ from .service_install import INSTALL_SUMMARY_FILENAME
 from .service_plan import SERVICE_UNIT_MARKER
 
 RELOAD_CONFIRM_TOKEN = "SYSTEMD_DAEMON_RELOAD"
+START_CONFIRM_TOKEN = "START_PILOTTUNNEL_SERVICES"
+STOP_CONFIRM_TOKEN = "STOP_PILOTTUNNEL_SERVICES"
 DEFAULT_TIMEOUT_SECONDS = 2.0
 SHOW_PROPERTIES = "LoadState,ActiveState,SubState,FragmentPath"
 NEXT_ACTION_HINTS = [
     "start_not_implemented",
     "stop_not_implemented",
     "switch_not_implemented",
+]
+LIFECYCLE_NEXT_ACTION_HINTS = [
+    "manual_switch_not_implemented",
+    "rollback_not_implemented",
+    "auto_switch_not_implemented",
 ]
 
 
@@ -273,6 +279,62 @@ def inspect_managed_status(
     return payload
 
 
+def build_start_plan(*, service_dir: Path, service_name: str | None, audit_path: Path) -> dict[str, Any]:
+    return _build_lifecycle_plan(
+        action="start",
+        service_dir=service_dir,
+        service_name=service_name,
+        audit_path=audit_path,
+    )
+
+
+def apply_start(
+    *,
+    service_dir: Path,
+    service_name: str | None,
+    confirm: str | None,
+    audit_path: Path,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _apply_lifecycle_action(
+        action="start",
+        service_dir=service_dir,
+        service_name=service_name,
+        confirm=confirm,
+        expected_confirm=START_CONFIRM_TOKEN,
+        audit_path=audit_path,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def build_stop_plan(*, service_dir: Path, service_name: str | None, audit_path: Path) -> dict[str, Any]:
+    return _build_lifecycle_plan(
+        action="stop",
+        service_dir=service_dir,
+        service_name=service_name,
+        audit_path=audit_path,
+    )
+
+
+def apply_stop(
+    *,
+    service_dir: Path,
+    service_name: str | None,
+    confirm: str | None,
+    audit_path: Path,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _apply_lifecycle_action(
+        action="stop",
+        service_dir=service_dir,
+        service_name=service_name,
+        confirm=confirm,
+        expected_confirm=STOP_CONFIRM_TOKEN,
+        audit_path=audit_path,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def _discover_installed_managed_services(target_dir: Path) -> list[dict[str, str]]:
     summary_path = target_dir / INSTALL_SUMMARY_FILENAME
     if summary_path.exists():
@@ -318,6 +380,187 @@ def _discover_staged_managed_services(service_dir: Path) -> list[dict[str, str]]
         metadata = _parse_unit_metadata(content, candidate.name)
         services.append(metadata)
     return services
+
+
+def _build_lifecycle_plan(*, action: str, service_dir: Path, service_name: str | None, audit_path: Path) -> dict[str, Any]:
+    audit_action = f"systemd-{action}-plan"
+    try:
+        resolved_service_dir = _validated_service_dir(service_dir)
+        selected = _select_services(_discover_staged_managed_services(resolved_service_dir), service_name)
+        services, warnings, errors = _lifecycle_entries(selected, action=action, apply_changes=False)
+        payload = {
+            "ok": not errors,
+            "action": f"systemd-{action}-plan",
+            "service_dir": str(resolved_service_dir),
+            "services": services,
+            "warnings": sorted(set(filter(None, warnings))),
+            "errors": sorted(set(filter(None, errors))),
+            "plan_only": True,
+            "real_systemd_touched": False,
+            "systemctl_executed": False,
+            "service_started": False,
+            "service_stopped": False,
+            "service_enabled": False,
+            "service_disabled": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+        }
+    except ValueError as exc:
+        payload = _service_dir_failure_payload(
+            action=f"systemd-{action}-plan",
+            service_dir=service_dir,
+            message=str(exc),
+            plan_only=True,
+        )
+    _audit(audit_action, payload, audit_path)
+    return payload
+
+
+def _apply_lifecycle_action(
+    *,
+    action: str,
+    service_dir: Path,
+    service_name: str | None,
+    confirm: str | None,
+    expected_confirm: str,
+    audit_path: Path,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    audit_action = f"systemd-{action}-apply"
+    try:
+        resolved_service_dir = _validated_service_dir(service_dir)
+        selected = _select_services(_discover_staged_managed_services(resolved_service_dir), service_name)
+    except ValueError as exc:
+        payload = _service_dir_failure_payload(
+            action=f"systemd-{action}-apply",
+            service_dir=service_dir,
+            message=str(exc),
+            plan_only=False,
+        )
+        _audit(audit_action, payload, audit_path)
+        return payload
+
+    if confirm != expected_confirm:
+        payload = _service_dir_failure_payload(
+            action=f"systemd-{action}-apply",
+            service_dir=resolved_service_dir,
+            message=f"Refusing systemd {action} without --confirm {expected_confirm}",
+            plan_only=False,
+        )
+        preview_services, preview_warnings, _preview_errors = _lifecycle_entries(selected, action=action, apply_changes=False)
+        payload["services"] = preview_services
+        payload["warnings"] = preview_warnings
+        _audit(audit_action, payload, audit_path)
+        return payload
+
+    unavailable = _systemd_unavailable_reason()
+    if unavailable:
+        payload = _service_dir_failure_payload(
+            action=f"systemd-{action}-apply",
+            service_dir=resolved_service_dir,
+            message=unavailable,
+            plan_only=False,
+        )
+        preview_services, preview_warnings, _preview_errors = _lifecycle_entries(selected, action=action, apply_changes=False)
+        payload["services"] = preview_services
+        payload["warnings"] = preview_warnings
+        _audit(audit_action, payload, audit_path)
+        return payload
+
+    services, warnings, errors = _lifecycle_entries(
+        selected,
+        action=action,
+        apply_changes=True,
+        timeout_seconds=timeout_seconds,
+    )
+    payload = {
+        "ok": not errors,
+        "action": f"systemd-{action}-apply",
+        "service_dir": str(resolved_service_dir),
+        "services": services,
+        "warnings": sorted(set(filter(None, warnings))),
+        "errors": sorted(set(filter(None, errors))),
+        "plan_only": False,
+        "real_systemd_touched": any(item["action"] in {"started", "stopped"} for item in services),
+        "systemctl_executed": any(bool(item.get("command_executed")) for item in services),
+        "service_started": action == "start" and any(item["action"] == "started" for item in services),
+        "service_stopped": action == "stop" and any(item["action"] == "stopped" for item in services),
+        "service_enabled": False,
+        "service_disabled": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+    }
+    _audit(audit_action, payload, audit_path)
+    return payload
+
+
+def _lifecycle_entries(
+    services: list[dict[str, str]],
+    *,
+    action: str,
+    apply_changes: bool,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    entries: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    errors: list[str] = []
+    for item in services:
+        entry = _lifecycle_entry(item, action=action, apply_changes=apply_changes, timeout_seconds=timeout_seconds)
+        entries.append(entry)
+        warnings.extend(entry.get("warnings", []))
+        errors.extend(entry.get("errors", []))
+    return entries, warnings, errors
+
+
+def _lifecycle_entry(
+    service: dict[str, str],
+    *,
+    action: str,
+    apply_changes: bool,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    service_name = service["service_name"]
+    runtime_role = service.get("runtime_role", "")
+    entry = {
+        "service_name": service_name,
+        "tunnel_id": service.get("tunnel_id", ""),
+        "adapter": service.get("adapter", ""),
+        "runtime_role": runtime_role,
+        "action": "",
+        "reason": "",
+        "command_summary": f"systemctl {action} {service_name}",
+        "command_executed": "",
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 0,
+        "timed_out": False,
+        "warnings": [],
+        "errors": [],
+        "next_action_hints": list(LIFECYCLE_NEXT_ACTION_HINTS),
+    }
+    if runtime_role not in {"active", "hot_standby"}:
+        entry["action"] = "skipped"
+        entry["reason"] = f"runtime_role '{runtime_role or 'unknown'}' is not startable/stoppable in this workflow"
+        return entry
+    if not apply_changes:
+        entry["action"] = "would_start" if action == "start" else "would_stop"
+        return entry
+
+    command = ["systemctl", action, service_name]
+    result = _normalized_result(_default_command_runner(command, timeout_seconds=timeout_seconds))
+    entry["command_executed"] = " ".join(command)
+    entry["stdout"] = result["stdout"]
+    entry["stderr"] = result["stderr"]
+    entry["exit_code"] = result["returncode"]
+    entry["timed_out"] = result["timed_out"]
+    if result["returncode"] == 0 and not result["timed_out"]:
+        entry["action"] = "started" if action == "start" else "stopped"
+        return entry
+    entry["action"] = "error"
+    message = _command_error(" ".join(command), result)
+    entry["reason"] = message
+    entry["errors"].append(message)
+    return entry
 
 
 def _parse_unit_metadata(content: str, service_name: str) -> dict[str, str]:
@@ -464,7 +707,7 @@ def _command_error(command: str, result: dict[str, Any]) -> str:
 
 
 def _is_valid_managed_service_name(service_name: str) -> bool:
-    return service_name.startswith("pilottunnel-") and service_name.endswith(".service")
+    return bool(re.fullmatch(r"pilottunnel-[A-Za-z0-9._-]+\.service", service_name))
 
 
 def _redact_text(value: str) -> str:
@@ -509,9 +752,25 @@ def _failure_payload(*, action: str, target_dir: Path, message: str, plan_only: 
     }
 
 
+def _service_dir_failure_payload(*, action: str, service_dir: Path, message: str, plan_only: bool) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "action": action,
+        "service_dir": str(service_dir),
+        "services": [],
+        "warnings": [],
+        "errors": [message],
+        "plan_only": plan_only,
+        "real_systemd_touched": False,
+        "systemctl_executed": False,
+        "service_started": False,
+        "service_stopped": False,
+        "service_enabled": False,
+        "service_disabled": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+    }
+
+
 def _audit(action: str, payload: dict[str, Any], path: Path) -> None:
     write_audit_log(action, action, redact_secrets(payload), path)
-
-
-def _checked_at() -> str:
-    return datetime.now(timezone.utc).isoformat()
