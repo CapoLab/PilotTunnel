@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import os
 from pathlib import Path
 
 from ..healthcheck import local_only_healthcheck
@@ -74,6 +75,9 @@ class DryRunAdapter:
         safe_systemd_path(staging, unit.unit_name)
         return {"action": "render_systemd_unit", "mode": "staged-apply" if context.apply_changes else "dry-run", "unit": asdict(unit)}
 
+    def render_runtime_plan(self, context: AdapterContext, runtime_dir: Path, executable_path: str) -> dict:
+        raise ValueError(f"Runtime planning is not implemented for adapter '{self.metadata().name}'")
+
     def start(self, context: AdapterContext) -> dict:
         return {
             "action": "start",
@@ -118,3 +122,38 @@ class DryRunAdapter:
             config_dir.mkdir(parents=True, exist_ok=True)
             config_path.write_text(content, encoding="utf-8")
         return str(config_path)
+
+    def _write_runtime_file(self, context: AdapterContext, runtime_dir: Path, content: str, filename: str) -> str:
+        for value, label in [
+            (context.profile.name, "profile"),
+            (self.metadata().name, "adapter"),
+            (context.transport, "transport"),
+            (context.role, "role"),
+            (filename, "filename"),
+        ]:
+            if not value or value in {".", ".."}:
+                raise ValueError(f"Invalid {label}: {value!r}")
+            if any(part in {"", ".."} for part in value.split("/")) or any(part in {"", ".."} for part in value.split("\\")):
+                raise ValueError(f"Path traversal blocked for {label}: {value!r}")
+        self._validate_runtime_root(runtime_dir)
+        resolved_root = runtime_dir.resolve()
+        self._validate_runtime_root(resolved_root)
+        config_dir = resolved_root / "configs" / context.profile.name / self.metadata().name / context.transport / context.role
+        config_path = (config_dir / filename).resolve()
+        if resolved_root not in config_path.parents:
+            raise ValueError(f"Refusing to write outside runtime dir: {config_path}")
+        config_dir.mkdir(parents=True, exist_ok=True)
+        self._validate_runtime_root(config_dir)
+        config_path.write_text(content, encoding="utf-8")
+        if os.name != "nt":
+            config_path.chmod(0o600)
+        return str(config_path)
+
+    def _validate_runtime_root(self, path: Path) -> None:
+        current = path
+        while True:
+            if current.exists() and current.is_symlink():
+                raise ValueError(f"Symlink escape blocked for runtime path: {current}")
+            if current.parent == current:
+                return
+            current = current.parent

@@ -39,6 +39,7 @@ from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
 from .readiness import build_readiness_report
+from .runtime_plan import build_runtime_plan
 from .simulation import run_e2e_simulation
 from .service_lifecycle import block_real_service_action, build_service_plan, disable_service, enable_service, inspect_service_logs, inspect_service_status, restart_service, run_daemon_reload, start_service, stop_service
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
@@ -339,6 +340,13 @@ def build_parser() -> argparse.ArgumentParser:
     readiness_report.add_argument("--install-root", type=Path, default=None)
     readiness_report.add_argument("--json", action="store_true")
 
+    runtime = subparsers.add_parser("runtime")
+    runtime_subparsers = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_plan = runtime_subparsers.add_parser("plan")
+    runtime_plan.add_argument("--runtime-dir", type=Path, required=True)
+    runtime_plan.add_argument("--platform", default="auto")
+    runtime_plan.add_argument("--json", action="store_true")
+
     binary = subparsers.add_parser("binary")
     binary_subparsers = binary.add_subparsers(dest="binary_command", required=True)
     binary_subparsers.add_parser("list")
@@ -562,6 +570,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return "node_status"
     if args.command == "readiness":
         return f"readiness_{args.readiness_command}"
+    if args.command == "runtime":
+        return f"runtime_{args.runtime_command}"
     if args.command == "restore":
         return f"restore_{args.restore_command}"
     if args.command == "deploy":
@@ -862,6 +872,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "node" and args.node_command == "status":
         print(json.dumps(node_status_payload(config, str(config_path)), indent=2))
         return 0
+
+    if args.command == "runtime" and args.runtime_command == "plan":
+        try:
+            payload = build_runtime_plan(
+                config=config,
+                state=state,
+                runtime_dir=args.runtime_dir,
+                requested_platform=args.platform,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "profile" and args.profile_command == "create":
         if args.layer not in SUPPORTED_LAYERS:

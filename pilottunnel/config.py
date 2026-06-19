@@ -15,6 +15,7 @@ DEFAULT_REGISTRY_PATH = Path("/var/lib/pilottunnel/registry.json")
 DEFAULT_AUDIT_PATH = Path("/var/log/pilottunnel/audit.log")
 
 Role = Literal["controller", "worker"]
+RuntimeRole = Literal["active", "hot_standby", "config_only", ""]
 
 SUPPORTED_LAYERS = {
     "layer3": False,
@@ -82,12 +83,14 @@ class Profile:
     active_layer: str = "layer4"
     active_adapter: str = ""
     active_transport: str = ""
+    runtime_role: str = ""
     candidates: list[Candidate] = field(default_factory=list)
     ports: ProfilePorts | None = None
     safety: ProfileSafety = field(default_factory=ProfileSafety)
 
     def __post_init__(self) -> None:
         self.role = canonical_role(self.role)
+        self.runtime_role = canonical_runtime_role(self.runtime_role)
         if self.ports is None:
             self.ports = ProfilePorts(main_port=self.main_port)
         self.main_port = self.ports.main_port
@@ -121,6 +124,13 @@ def canonical_role(value: str) -> str:
     normalized = value.strip().lower()
     if normalized not in {"controller", "worker"}:
         raise ValueError(f"Unsupported role '{value}'")
+    return normalized
+
+
+def canonical_runtime_role(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"", "active", "hot_standby", "config_only"}:
+        raise ValueError(f"Unsupported runtime role '{value}'")
     return normalized
 
 
@@ -166,6 +176,7 @@ def _profile_from_dict(data: dict[str, Any]) -> Profile:
         active_layer=data.get("active_layer", "layer4"),
         active_adapter=data.get("active_adapter", ""),
         active_transport=data.get("active_transport", ""),
+        runtime_role=data.get("runtime_role", ""),
         candidates=candidates,
         ports=ProfilePorts(**ports_data),
         safety=ProfileSafety(

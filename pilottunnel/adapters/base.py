@@ -54,6 +54,9 @@ class BaseAdapter(Protocol):
     def render_systemd_unit(self, context: AdapterContext) -> dict:
         ...
 
+    def render_runtime_plan(self, context: AdapterContext, runtime_dir: Path, executable_path: str) -> dict:
+        ...
+
     def start(self, context: AdapterContext) -> dict:
         ...
 

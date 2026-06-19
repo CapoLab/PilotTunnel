@@ -105,6 +105,7 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - `binary install plan` shows how managed adapter binaries would be resolved from a provider manifest, the local cache, and optionally the system PATH.
 - `binary install apply` copies verified adapter binaries into a chosen managed install directory without executing them.
 - `binary install list` inspects the managed install directory and install summary file.
+- `runtime plan` resolves managed binaries, renders adapter runtime configs, and prints dry-run argv plans without starting tunnel processes.
 - Remote provider hosts must be allowlisted with `--allow-provider-host`.
 - `binary download-all` prepares every required Layer 4 provider-managed adapter in one run.
 - `binary provider generate-manifest` scans a local provider source tree and writes a manifest without downloading anything.
@@ -121,6 +122,7 @@ python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --pr
 python -m pilottunnel.cli binary install plan --manifest <MANIFEST_FILE> --platform <PLATFORM>
 python -m pilottunnel.cli binary install apply --manifest <MANIFEST_FILE> --platform <PLATFORM> --install-dir <INSTALL_DIR> --confirm INSTALL_PROVIDER_BINARIES
 python -m pilottunnel.cli binary install list --install-dir <INSTALL_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> runtime plan --runtime-dir <RUNTIME_DIR>
 python -m pilottunnel.cli binary provider generate-manifest --provider-name <PROVIDER_HOST> --base-url <MANIFEST_URL> --source-dir <SOURCE_DIR> --output <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider verify-manifest --manifest-file <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider inspect --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
@@ -137,7 +139,27 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
 - `ssh_reverse` remains a host system dependency and is intentionally skipped by upstream fetch.
 - Upstream fetch writes a local `pilottunnel-source-summary.json` file under `<SOURCE_DIR>` for audit-friendly review.
 - Managed install writes a local `pilottunnel-binary-install-summary.json` file under `<INSTALL_DIR>` and does not require root.
-- No upstream fetch, provider prepare, managed install, or bootstrap command in this stage starts services, modifies `systemd`, changes firewall or routes, or executes downloaded binaries.
+- Runtime planning writes adapter config files only under `<RUNTIME_DIR>` and keeps them in dry-run mode.
+- No upstream fetch, provider prepare, managed install, runtime plan, or bootstrap command in this stage starts services, modifies `systemd`, changes firewall or routes, or executes downloaded binaries.
+
+## Adapter Runtime Planning
+
+- Recommended order in v0.1:
+  1. fetch upstream sources
+  2. prepare a provider manifest
+  3. install managed binaries
+  4. render and inspect a runtime plan
+  5. wait for a later apply/start workflow
+- `runtime plan` currently supports Layer 4 TCP planning for `rathole`, `frp`, and `gost`.
+- It resolves binaries through the managed install layer, writes runtime config files under the chosen runtime directory, and reports active, hot-standby, and config-only tunnels.
+- It does not start processes, bind ports, create `systemd` units, or execute adapter binaries.
+
+```bash
+python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --confirm FETCH_UPSTREAM_BINARIES
+python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --base-url https://<PROVIDER_HOST>/<BASE_PATH> --platform <PLATFORM> --output <MANIFEST_FILE> --confirm PREPARE_PROVIDER_BINARIES
+python -m pilottunnel.cli binary install apply --manifest <MANIFEST_FILE> --platform <PLATFORM> --install-dir <INSTALL_DIR> --confirm INSTALL_PROVIDER_BINARIES
+python -m pilottunnel.cli --config <CONFIG_FILE> runtime plan --runtime-dir <RUNTIME_DIR>
+```
 
 ## Real-Host Install Planning
 
