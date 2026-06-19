@@ -25,9 +25,10 @@ def build_staged_service_plan(
     runtime_dir: Path,
     service_dir: Path,
     requested_platform: str | None,
-    audit_path: Path,
+    audit_path: Path | None,
+    write_units: bool = True,
 ) -> dict[str, Any]:
-    resolved_service_dir = _validated_service_dir(service_dir)
+    resolved_service_dir = _validated_service_dir(service_dir, create=write_units)
     runtime_plan = build_runtime_plan(
         config=config,
         state=state,
@@ -51,7 +52,8 @@ def build_staged_service_plan(
             "firewall_touched": False,
             "routes_touched": False,
         }
-        _audit("service-render", "service-render", payload, audit_path)
+        if audit_path is not None:
+            _audit("service-render", "service-render", payload, audit_path)
         return payload
 
     services: list[dict[str, Any]] = []
@@ -87,6 +89,7 @@ def build_staged_service_plan(
             service_dir=resolved_service_dir,
             service_name=service_name,
             tunnel=tunnel,
+            apply_changes=write_units,
         )
         service_entry = {
             "tunnel_id": tunnel["tunnel_id"],
@@ -127,22 +130,23 @@ def build_staged_service_plan(
         "firewall_touched": False,
         "routes_touched": False,
     }
-    _audit("service-render", "service-render", payload, audit_path)
+    if audit_path is not None:
+        _audit("service-render", "service-render", payload, audit_path)
     return payload
 
 
-def _render_service_unit(*, service_dir: Path, service_name: str, tunnel: dict[str, Any]) -> dict[str, str]:
+def _render_service_unit(*, service_dir: Path, service_name: str, tunnel: dict[str, Any], apply_changes: bool) -> dict[str, str]:
     command = _exec_start_command(tunnel["command_argv"])
     rendered = render_unit_file(
         unit_name=service_name,
         description=f"PilotTunnel {tunnel['tunnel_id']} {tunnel['adapter']} {tunnel['role']}",
         command=command,
         output_dir=service_dir,
-        apply_changes=True,
+        apply_changes=apply_changes,
     )
     path = Path(rendered.path)
     _validate_service_file_path(path, service_dir)
-    if os.name != "nt":
+    if apply_changes and os.name != "nt":
         path.chmod(0o644)
     return {"path": str(path), "content": rendered.content}
 
@@ -167,7 +171,7 @@ def _redacted_exec_start_summary(argv: list[str]) -> str:
     return _redact_text(shlex.join(argv))
 
 
-def _validated_service_dir(path: Path) -> Path:
+def _validated_service_dir(path: Path, *, create: bool) -> Path:
     if ".." in path.parts:
         raise ValueError(f"Path traversal blocked for service staging dir: {path!r}")
     if _targets_real_systemd(path):
@@ -175,9 +179,12 @@ def _validated_service_dir(path: Path) -> Path:
     _validate_parent_chain(path)
     resolved = path.resolve()
     _validate_parent_chain(resolved)
+    if not create and not resolved.exists():
+        raise ValueError(f"Service staging dir does not exist: {path}")
     if resolved.exists() and not resolved.is_dir():
         raise ValueError(f"Service staging dir must be a directory: {path}")
-    resolved.mkdir(parents=True, exist_ok=True)
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
 

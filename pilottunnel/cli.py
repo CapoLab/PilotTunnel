@@ -40,6 +40,7 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .readiness import build_readiness_report
 from .runtime_plan import build_runtime_plan
+from .service_install import apply_service_install, build_service_install_plan
 from .service_plan import build_staged_service_plan
 from .simulation import run_e2e_simulation
 from .service_lifecycle import block_real_service_action, build_service_plan, disable_service, enable_service, inspect_service_logs, inspect_service_status, restart_service, run_daemon_reload, start_service, stop_service
@@ -162,6 +163,24 @@ def build_parser() -> argparse.ArgumentParser:
     service_render.add_argument("--service-dir", type=Path, required=True)
     service_render.add_argument("--platform", default="auto")
     service_render.add_argument("--json", action="store_true")
+    service_install = service_subparsers.add_parser("install")
+    service_install_subparsers = service_install.add_subparsers(dest="service_install_command", required=True)
+    service_install_plan = service_install_subparsers.add_parser("plan")
+    service_install_plan.add_argument("--runtime-dir", type=Path, required=True)
+    service_install_plan.add_argument("--service-dir", type=Path, required=True)
+    service_install_plan.add_argument("--target-dir", type=Path, required=True)
+    service_install_plan.add_argument("--platform", default="auto")
+    service_install_plan.add_argument("--allow-system-dir", action="store_true")
+    service_install_plan.add_argument("--json", action="store_true")
+    service_install_apply = service_install_subparsers.add_parser("apply")
+    service_install_apply.add_argument("--runtime-dir", type=Path, required=True)
+    service_install_apply.add_argument("--service-dir", type=Path, required=True)
+    service_install_apply.add_argument("--target-dir", type=Path, required=True)
+    service_install_apply.add_argument("--platform", default="auto")
+    service_install_apply.add_argument("--allow-system-dir", action="store_true")
+    service_install_apply.add_argument("--replace-existing", action="store_true")
+    service_install_apply.add_argument("--confirm")
+    service_install_apply.add_argument("--json", action="store_true")
     service_status = service_subparsers.add_parser("status")
     service_status.add_argument("--profile", required=True)
     service_status.add_argument("--adapter", required=True)
@@ -565,6 +584,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
     if args.command == "uninstall":
         return f"uninstall_{args.uninstall_command}"
     if args.command == "service":
+        if args.service_command == "install":
+            return f"service_install_{args.service_install_command.replace('-', '_')}"
         return f"service_{args.service_command.replace('-', '_')}"
     if args.command == "profile":
         return f"profile_{args.profile_command}"
@@ -1133,6 +1154,44 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_dir=args.runtime_dir,
                 service_dir=args.service_dir,
                 requested_platform=args.platform,
+                audit_path=switch_paths.audit_path,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "service" and args.service_command == "install" and args.service_install_command == "plan":
+        try:
+            payload = build_service_install_plan(
+                config=config,
+                state=state,
+                runtime_dir=args.runtime_dir,
+                service_dir=args.service_dir,
+                target_dir=args.target_dir,
+                requested_platform=args.platform,
+                allow_system_dir=args.allow_system_dir,
+                audit_path=switch_paths.audit_path,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "service" and args.service_command == "install" and args.service_install_command == "apply":
+        try:
+            payload = apply_service_install(
+                config=config,
+                state=state,
+                runtime_dir=args.runtime_dir,
+                service_dir=args.service_dir,
+                target_dir=args.target_dir,
+                requested_platform=args.platform,
+                allow_system_dir=args.allow_system_dir,
+                replace_existing=args.replace_existing,
+                confirm=args.confirm,
                 audit_path=switch_paths.audit_path,
             )
         except (KeyError, ValueError) as exc:

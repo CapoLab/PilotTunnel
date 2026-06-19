@@ -107,6 +107,8 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - `binary install list` inspects the managed install directory and install summary file.
 - `runtime plan` resolves managed binaries, renders adapter runtime configs, and prints dry-run argv plans without starting tunnel processes.
 - `service render` converts the runtime plan into staged systemd unit files under a chosen output directory without touching real `systemd`.
+- `service install plan` validates staged PilotTunnel unit files against the current service plan and shows what would be installed into a chosen target directory.
+- `service install apply` copies only verified PilotTunnel unit files into the chosen target directory after exact confirmation, without calling `systemctl`.
 - Remote provider hosts must be allowlisted with `--allow-provider-host`.
 - `binary download-all` prepares every required Layer 4 provider-managed adapter in one run.
 - `binary provider generate-manifest` scans a local provider source tree and writes a manifest without downloading anything.
@@ -125,6 +127,8 @@ python -m pilottunnel.cli binary install apply --manifest <MANIFEST_FILE> --plat
 python -m pilottunnel.cli binary install list --install-dir <INSTALL_DIR>
 python -m pilottunnel.cli --config <CONFIG_FILE> runtime plan --runtime-dir <RUNTIME_DIR>
 python -m pilottunnel.cli --config <CONFIG_FILE> service render --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> service install plan --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <SYSTEMD_TARGET_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> service install apply --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <SYSTEMD_TARGET_DIR> --confirm INSTALL_PILOTTUNNEL_SERVICES
 python -m pilottunnel.cli binary provider generate-manifest --provider-name <PROVIDER_HOST> --base-url <MANIFEST_URL> --source-dir <SOURCE_DIR> --output <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider verify-manifest --manifest-file <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider inspect --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
@@ -142,7 +146,7 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
 - Upstream fetch writes a local `pilottunnel-source-summary.json` file under `<SOURCE_DIR>` for audit-friendly review.
 - Managed install writes a local `pilottunnel-binary-install-summary.json` file under `<INSTALL_DIR>` and does not require root.
 - Runtime planning writes adapter config files only under `<RUNTIME_DIR>` and keeps them in dry-run mode.
-- No upstream fetch, provider prepare, managed install, runtime plan, service render, or bootstrap command in this stage starts services, modifies `systemd`, changes firewall or routes, or executes downloaded binaries.
+- No upstream fetch, provider prepare, managed install, runtime plan, service render, service install, or bootstrap command in this stage starts services, modifies `systemd`, changes firewall or routes, or executes downloaded binaries.
 
 ## Adapter Runtime Planning
 
@@ -152,7 +156,8 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
   3. install managed binaries
   4. render and inspect a runtime plan
   5. render and inspect a staged service plan
-  6. wait for a later install/start workflow
+  6. install staged service files into a chosen target directory
+  7. wait for a later daemon-reload and start workflow
 - `runtime plan` currently supports Layer 4 TCP planning for `rathole`, `frp`, and `gost`.
 - It resolves binaries through the managed install layer, writes runtime config files under the chosen runtime directory, and reports active, hot-standby, and config-only tunnels.
 - It does not start processes, bind ports, create `systemd` units, or execute adapter binaries.
@@ -173,6 +178,19 @@ python -m pilottunnel.cli --config <CONFIG_FILE> runtime plan --runtime-dir <RUN
 
 ```bash
 python -m pilottunnel.cli --config <CONFIG_FILE> service render --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR>
+```
+
+## Staged Service Install
+
+- `service install plan` is read-only and verifies that the staged unit files still match the current runtime-backed service plan.
+- `service install apply` requires exact confirmation with `--confirm INSTALL_PILOTTUNNEL_SERVICES`.
+- It copies only verified PilotTunnel-generated unit files into the chosen target directory.
+- It does not call `systemctl`, run `daemon-reload`, or start, stop, enable, or restart services.
+- Real `/etc/systemd/system` targets require `--allow-system-dir`.
+
+```bash
+python -m pilottunnel.cli --config <CONFIG_FILE> service install plan --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <SYSTEMD_TARGET_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> service install apply --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <SYSTEMD_TARGET_DIR> --confirm INSTALL_PILOTTUNNEL_SERVICES
 ```
 
 ## Real-Host Install Planning
@@ -207,6 +225,7 @@ python -m pilottunnel.cli uninstall apply --profile <PROFILE> --adapter backhaul
 ## Service Lifecycle Planning
 
 - `service render` is the new dry-run bridge from runtime plans to staged unit files.
+- `service install plan` and `service install apply` are the guarded bridge from staged unit files to a chosen target systemd directory.
 - `service plan` shows the service action that would be taken, but it does not run `systemctl`.
 - `service status` and `service logs` are read-only inspection commands.
 - Windows hosts remain safe: these commands return warnings instead of crashing.
@@ -214,6 +233,8 @@ python -m pilottunnel.cli uninstall apply --profile <PROFILE> --adapter backhaul
 
 ```bash
 python -m pilottunnel.cli --config <CONFIG_FILE> service render --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> service install plan --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <SYSTEMD_TARGET_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> service install apply --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --target-dir <SYSTEMD_TARGET_DIR> --confirm INSTALL_PILOTTUNNEL_SERVICES
 python -m pilottunnel.cli service plan --profile <PROFILE> --adapter backhaul --transport tcpmux --action start
 python -m pilottunnel.cli service plan --profile <PROFILE> --adapter rathole --transport tcp --action stop
 python -m pilottunnel.cli service status --profile <PROFILE> --adapter backhaul --transport tcpmux
