@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .adapters import ADAPTERS
 from .adapters.base import AdapterContext
+from .__version__ import version_payload
 from .audit import write_audit_log
 from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
 from .binary_provider import download_all_binaries, download_binary, generate_manifest, inspect_manifest, verify_manifest_file
@@ -74,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-root", type=Path, default=None)
     parser.add_argument("--apply", action="store_true", help="Allow dangerous operations to write runtime artifacts")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("version")
 
     init = subparsers.add_parser("init")
     init.add_argument("--role")
@@ -925,6 +928,9 @@ def _staged_show(paths: SwitchPaths, profile: str, adapter: str, transport: str)
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "version":
+        print(json.dumps(version_payload(), indent=2))
+        return 0
     config, state, registry, config_path, state_path, registry_path, switch_paths = _load_runtime(args)
     audit_path = switch_paths.audit_path
     engine = SwitchEngine(config=config, state=state, registry=registry, paths=switch_paths)

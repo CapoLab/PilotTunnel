@@ -9,6 +9,38 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 - Backhaul and Rathole now have richer dry-run planning for `controller` and `worker` roles.
 - Real remote coordination, real systemd changes, firewall rules, and host networking changes are still not implemented.
 
+## v0.1.0 Release
+
+- Current project version: `0.1.0`
+- Release phase: `v0.1-final`
+- CLI only, with config-file driven workflows
+- No auto-switch or background monitoring is included in `v0.1.0`
+- Release notes are available in [RELEASE_NOTES.md](RELEASE_NOTES.md)
+- Change history is summarized in [CHANGELOG.md](CHANGELOG.md)
+
+## v0.1.0 Supported Scope
+
+- CLI only
+- Config-file driven
+- Layer 4 TCP only
+- Selected adapters only
+- One active tunnel
+- Up to two hot-standby tunnels
+- Config-only for remaining tunnels
+- Guarded manual switch with rollback support
+- No full auto-switch
+- No background daemon
+- No UI
+
+## Version Metadata
+
+```bash
+python -m pilottunnel.cli version
+```
+
+- Prints the project name, version, release phase, supported scope, and safety notes.
+- Confirms that auto-switch and background monitoring are not part of `v0.1.0`.
+
 ## Dry-Run Safety Model
 
 - Default behavior stays dry-run unless `--apply` is passed.
@@ -31,6 +63,21 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 11. Run `rc check` for a read-only release-candidate validation pass.
 12. Run `rc smoke` for a safe local smoke pass that stages artifacts without touching real services by default.
 
+## Final Operator Checklist
+
+1. Clone or pull the repository into a local working directory.
+2. Initialize the local node role with `python -m pilottunnel.cli init --role controller` or `python -m pilottunnel.cli init --role worker`.
+3. Inspect and fetch upstream binary sources into `<SOURCE_DIR>`.
+4. Prepare a provider manifest at `<MANIFEST_FILE>`.
+5. Install managed binaries into `<INSTALL_DIR>`.
+6. Render a runtime plan into `<RUNTIME_DIR>`.
+7. Render staged service files into `<SERVICE_STAGING_DIR>`.
+8. Review and apply the staged service install into `<SYSTEMD_TARGET_DIR>` only when ready.
+9. Run guarded `systemd reload` and guarded start or stop commands only after staged files are in place.
+10. Use guarded manual switch planning before any active tunnel change.
+11. Run `rc check` and `rc smoke` before any real deployment step.
+12. Keep backup and restore steps available before production rollout.
+
 ## v0.1 Limitations
 
 - No full auto-switch.
@@ -39,6 +86,14 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 - Layer 4 TCP only.
 - Only selected adapters are covered by the runtime planning workflow.
 - Real deployment still requires careful operator confirmation.
+
+## Known Limitations
+
+- No automatic failover.
+- No background monitor.
+- No UI.
+- Real deployment requires explicit operator confirmation.
+- Production use should begin with a non-production smoke test.
 
 ## Layer 4 Scope
 
