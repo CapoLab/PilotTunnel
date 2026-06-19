@@ -40,6 +40,7 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .readiness import build_readiness_report
 from .runtime_plan import build_runtime_plan
+from .service_plan import build_staged_service_plan
 from .simulation import run_e2e_simulation
 from .service_lifecycle import block_real_service_action, build_service_plan, disable_service, enable_service, inspect_service_logs, inspect_service_status, restart_service, run_daemon_reload, start_service, stop_service
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
@@ -156,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
     service_plan.add_argument("--role")
     service_plan.add_argument("--install-root", type=Path, default=None)
     service_plan.add_argument("--json", action="store_true")
+    service_render = service_subparsers.add_parser("render")
+    service_render.add_argument("--runtime-dir", type=Path, required=True)
+    service_render.add_argument("--service-dir", type=Path, required=True)
+    service_render.add_argument("--platform", default="auto")
+    service_render.add_argument("--json", action="store_true")
     service_status = service_subparsers.add_parser("status")
     service_status.add_argument("--profile", required=True)
     service_status.add_argument("--adapter", required=True)
@@ -1118,6 +1124,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(payload, indent=2))
         return 0
+
+    if args.command == "service" and args.service_command == "render":
+        try:
+            payload = build_staged_service_plan(
+                config=config,
+                state=state,
+                runtime_dir=args.runtime_dir,
+                service_dir=args.service_dir,
+                requested_platform=args.platform,
+                audit_path=switch_paths.audit_path,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
 
     if args.command == "service" and args.service_command == "status":
         try:

@@ -31,6 +31,7 @@ SAFE_INSPECT_ACTIONS = {
     "readiness_report",
     "preflight",
     "runtime_plan",
+    "service_render",
     "simulate_e2e",
     "status",
 }
