@@ -14,6 +14,7 @@ from .adapters.base import AdapterContext
 from .audit import write_audit_log
 from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
 from .binary_provider import download_all_binaries, download_binary, generate_manifest, inspect_manifest, verify_manifest_file
+from .binary_install import apply_binary_install, build_binary_install_plan, list_binary_installations
 from .bootstrap import apply_bootstrap, build_bootstrap_command, build_bootstrap_plan
 from .bundles import build_worker_bundle, import_bundle, inspect_bundle
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
@@ -386,6 +387,21 @@ def build_parser() -> argparse.ArgumentParser:
     binary_source_fetch.add_argument("--force", action="store_true")
     binary_source_fetch.add_argument("--dry-run", action="store_true")
     binary_source_fetch.add_argument("--json", action="store_true")
+    binary_install = binary_subparsers.add_parser("install")
+    binary_install_subparsers = binary_install.add_subparsers(dest="binary_install_command", required=True)
+    binary_install_plan = binary_install_subparsers.add_parser("plan")
+    binary_install_plan.add_argument("--manifest", dest="manifest_file", type=Path, required=True)
+    binary_install_plan.add_argument("--platform", default="auto")
+    binary_install_plan.add_argument("--json", action="store_true")
+    binary_install_apply = binary_install_subparsers.add_parser("apply")
+    binary_install_apply.add_argument("--manifest", dest="manifest_file", type=Path, required=True)
+    binary_install_apply.add_argument("--platform", default="auto")
+    binary_install_apply.add_argument("--install-dir", type=Path, required=True)
+    binary_install_apply.add_argument("--confirm")
+    binary_install_apply.add_argument("--json", action="store_true")
+    binary_install_list = binary_install_subparsers.add_parser("list")
+    binary_install_list.add_argument("--install-dir", type=Path, required=True)
+    binary_install_list.add_argument("--json", action="store_true")
     binary_provider = binary_subparsers.add_parser("provider")
     binary_provider_subparsers = binary_provider.add_subparsers(dest="binary_provider_command", required=True)
     binary_provider_inspect = binary_provider_subparsers.add_parser("inspect")
@@ -517,6 +533,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
     if args.command == "adapter":
         return f"adapter_{args.adapter_command}"
     if args.command == "binary":
+        if args.binary_command == "install":
+            return f"binary_install_{args.binary_install_command}"
         if args.binary_command == "source":
             return f"binary_source_{args.binary_source_command}"
         if args.binary_command == "provider":
@@ -1828,6 +1846,49 @@ def main(argv: list[str] | None = None) -> int:
                 version_filters=args.version,
                 audit_path=switch_paths.audit_path,
             )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "install" and args.binary_install_command == "plan":
+        try:
+            payload = build_binary_install_plan(
+                manifest_file=args.manifest_file,
+                requested_platform=args.platform,
+                install_dir=None,
+                config=config,
+                state=state,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "install" and args.binary_install_command == "apply":
+        try:
+            payload = apply_binary_install(
+                manifest_file=args.manifest_file,
+                requested_platform=args.platform,
+                install_dir=args.install_dir,
+                config=config,
+                state=state,
+                confirm=args.confirm,
+                audit_path=switch_paths.audit_path,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        if payload["ok"]:
+            _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "install" and args.binary_install_command == "list":
+        try:
+            payload = list_binary_installations(install_dir=args.install_dir)
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1

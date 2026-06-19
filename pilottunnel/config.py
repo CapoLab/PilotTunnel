@@ -65,6 +65,14 @@ class ProfileSafety:
 
 
 @dataclass
+class BinaryResolutionSettings:
+    managed_install_dir: str = ""
+    provider_manifest: str = ""
+    allow_system_path: bool = False
+    prefer_managed_install: bool = True
+
+
+@dataclass
 class Profile:
     name: str
     main_port: int
@@ -95,6 +103,7 @@ class AppConfig:
     worker_role: str = "worker"
     pre_armed_configs: bool = False
     partition_mode: bool = False
+    binary_resolution: BinaryResolutionSettings = field(default_factory=BinaryResolutionSettings)
     node: NodeSettings = field(default_factory=NodeSettings)
     profiles: list[Profile] = field(default_factory=list)
 
@@ -177,6 +186,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         worker_role=data.get("worker_role", "worker"),
         pre_armed_configs=data.get("pre_armed_configs", False),
         partition_mode=data.get("partition_mode", False),
+        binary_resolution=BinaryResolutionSettings(**(data.get("binary_resolution") or {})),
         node=NodeSettings(**(data.get("node") or {})),
         profiles=profiles,
     )

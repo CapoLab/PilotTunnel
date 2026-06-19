@@ -102,6 +102,9 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - `binary source list` shows the built-in upstream catalog without contacting external hosts.
 - `binary source fetch` downloads only from the known upstream release catalog and stores verified binaries under a local provider source tree.
 - `binary provider prepare` combines upstream fetch, manifest generation, and manifest verification for one platform without uploading anything.
+- `binary install plan` shows how managed adapter binaries would be resolved from a provider manifest, the local cache, and optionally the system PATH.
+- `binary install apply` copies verified adapter binaries into a chosen managed install directory without executing them.
+- `binary install list` inspects the managed install directory and install summary file.
 - Remote provider hosts must be allowlisted with `--allow-provider-host`.
 - `binary download-all` prepares every required Layer 4 provider-managed adapter in one run.
 - `binary provider generate-manifest` scans a local provider source tree and writes a manifest without downloading anything.
@@ -115,6 +118,9 @@ python -m pilottunnel.cli binary source list
 python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --dry-run
 python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --confirm FETCH_UPSTREAM_BINARIES
 python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --base-url https://<PROVIDER_HOST>/<BASE_PATH> --platform <PLATFORM> --output <MANIFEST_FILE> --confirm PREPARE_PROVIDER_BINARIES
+python -m pilottunnel.cli binary install plan --manifest <MANIFEST_FILE> --platform <PLATFORM>
+python -m pilottunnel.cli binary install apply --manifest <MANIFEST_FILE> --platform <PLATFORM> --install-dir <INSTALL_DIR> --confirm INSTALL_PROVIDER_BINARIES
+python -m pilottunnel.cli binary install list --install-dir <INSTALL_DIR>
 python -m pilottunnel.cli binary provider generate-manifest --provider-name <PROVIDER_HOST> --base-url <MANIFEST_URL> --source-dir <SOURCE_DIR> --output <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider verify-manifest --manifest-file <MANIFEST_FILE>
 python -m pilottunnel.cli binary provider inspect --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
@@ -130,7 +136,8 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
 - Upstream fetch uses only the built-in adapter catalog for `backhaul`, `rathole`, `frp`, `gost`, `chisel`, `realm`, and `bore`.
 - `ssh_reverse` remains a host system dependency and is intentionally skipped by upstream fetch.
 - Upstream fetch writes a local `pilottunnel-source-summary.json` file under `<SOURCE_DIR>` for audit-friendly review.
-- No upstream fetch, provider prepare, or bootstrap command in this stage starts services, modifies `systemd`, changes firewall or routes, or executes downloaded binaries.
+- Managed install writes a local `pilottunnel-binary-install-summary.json` file under `<INSTALL_DIR>` and does not require root.
+- No upstream fetch, provider prepare, managed install, or bootstrap command in this stage starts services, modifies `systemd`, changes firewall or routes, or executes downloaded binaries.
 
 ## Real-Host Install Planning
 
