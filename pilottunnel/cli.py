@@ -42,6 +42,12 @@ from .readiness import build_readiness_report
 from .runtime_plan import build_runtime_plan
 from .service_install import apply_service_install, build_service_install_plan
 from .service_plan import build_staged_service_plan
+from .systemd_control import (
+    DEFAULT_TIMEOUT_SECONDS as SYSTEMD_TIMEOUT_SECONDS,
+    apply_reload as apply_systemd_reload,
+    build_reload_plan as build_systemd_reload_plan,
+    inspect_managed_status as inspect_systemd_status,
+)
 from .simulation import run_e2e_simulation
 from .service_lifecycle import block_real_service_action, build_service_plan, disable_service, enable_service, inspect_service_logs, inspect_service_status, restart_service, run_daemon_reload, start_service, stop_service
 from .registry import PortRegistry, RegistryEntry, load_registry, save_registry
@@ -372,6 +378,23 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_plan.add_argument("--platform", default="auto")
     runtime_plan.add_argument("--json", action="store_true")
 
+    systemd = subparsers.add_parser("systemd")
+    systemd_subparsers = systemd.add_subparsers(dest="systemd_command", required=True)
+    systemd_reload = systemd_subparsers.add_parser("reload")
+    systemd_reload_subparsers = systemd_reload.add_subparsers(dest="systemd_reload_command", required=True)
+    systemd_reload_plan = systemd_reload_subparsers.add_parser("plan")
+    systemd_reload_plan.add_argument("--target-dir", type=Path, required=True)
+    systemd_reload_plan.add_argument("--json", action="store_true")
+    systemd_reload_apply = systemd_reload_subparsers.add_parser("apply")
+    systemd_reload_apply.add_argument("--target-dir", type=Path, required=True)
+    systemd_reload_apply.add_argument("--confirm")
+    systemd_reload_apply.add_argument("--json", action="store_true")
+    systemd_status = systemd_subparsers.add_parser("status")
+    systemd_status.add_argument("--service-dir", type=Path, required=True)
+    systemd_status.add_argument("--service-name")
+    systemd_status.add_argument("--timeout", type=float, default=SYSTEMD_TIMEOUT_SECONDS)
+    systemd_status.add_argument("--json", action="store_true")
+
     binary = subparsers.add_parser("binary")
     binary_subparsers = binary.add_subparsers(dest="binary_command", required=True)
     binary_subparsers.add_parser("list")
@@ -599,6 +622,10 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"readiness_{args.readiness_command}"
     if args.command == "runtime":
         return f"runtime_{args.runtime_command}"
+    if args.command == "systemd":
+        if args.systemd_command == "reload":
+            return f"systemd_reload_{args.systemd_reload_command}"
+        return f"systemd_{args.systemd_command}"
     if args.command == "restore":
         return f"restore_{args.restore_command}"
     if args.command == "deploy":
@@ -911,6 +938,30 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "reload" and args.systemd_reload_command == "plan":
+        payload = build_systemd_reload_plan(target_dir=args.target_dir, audit_path=switch_paths.audit_path)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "reload" and args.systemd_reload_command == "apply":
+        payload = apply_systemd_reload(
+            target_dir=args.target_dir,
+            confirm=args.confirm,
+            audit_path=switch_paths.audit_path,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "systemd" and args.systemd_command == "status":
+        payload = inspect_systemd_status(
+            service_dir=args.service_dir,
+            service_name=args.service_name,
+            audit_path=switch_paths.audit_path,
+            timeout_seconds=args.timeout,
+        )
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
 
