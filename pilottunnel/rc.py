@@ -116,16 +116,17 @@ def _build_rc_report(
     requested_service_dir: Path,
 ) -> dict[str, Any]:
     selected_profile = _selected_profile(config, profile_name)
-    config_section = _config_section(config, config_path, selected_profile)
-    registry_section = _registry_section(config, state, registry)
-    binary_section = _binary_section(config, state, switch_paths.work_dir)
-    runtime_section = _section_from_payload(
-        build_runtime_plan(
+    config_section = _normalized_section("config", _config_section(config, config_path, selected_profile))
+    registry_section = _normalized_section("registry", _registry_section(config, state, registry))
+    binary_section = _normalized_section("binaries", _binary_section(config, state, switch_paths.work_dir))
+    runtime_section = _safe_payload_section(
+        "runtime_plan",
+        lambda: build_runtime_plan(
             config=config,
             state=state,
             runtime_dir=runtime_dir,
             requested_platform="auto",
-        )
+        ),
     )
 
     service_render_payload: dict[str, Any]
@@ -140,9 +141,14 @@ def _build_rc_report(
             write_units=True,
         )
     else:
-        service_render_payload = _blocked_section("service_render", "Runtime plan must succeed before service rendering")
-    service_render_section = _section_from_payload(service_render_payload)
+        service_render_payload = {}
+    service_render_section = (
+        _normalized_section("service_render", service_render_payload)
+        if runtime_section["ok"]
+        else _dependent_section("service_render", "runtime_plan", "Runtime plan must succeed before service rendering")
+    )
 
+    service_install_payload: dict[str, Any]
     if service_render_section["ok"]:
         service_install_payload = build_service_install_plan(
             config=config,
@@ -155,11 +161,19 @@ def _build_rc_report(
             audit_path=switch_paths.audit_path,
         )
     else:
-        service_install_payload = _blocked_section("service_install_plan", "Service render must succeed before service install planning")
-    service_install_section = _section_from_payload(service_install_payload)
+        service_install_payload = {}
+    service_install_section = (
+        _normalized_section("service_install_plan", service_install_payload)
+        if service_render_section["ok"]
+        else _dependent_section(
+            "service_install_plan",
+            "service_render",
+            "Service render must succeed before service install planning",
+        )
+    )
 
     systemd_reload_payload = build_reload_plan(target_dir=target_dir, audit_path=switch_paths.audit_path)
-    systemd_reload_section = _section_from_payload(systemd_reload_payload)
+    systemd_reload_section = _normalized_section("systemd_reload_plan", systemd_reload_payload)
 
     lifecycle_section = _lifecycle_section(service_dir, service_render_payload, switch_paths)
     manual_switch_section = _manual_switch_section(
@@ -202,21 +216,26 @@ def _build_rc_report(
         "safety_guards": safety_guards,
         "v0_1_limitations": {
             "ok": True,
+            "status": "passed",
+            "warnings": [],
+            "blockers": [],
             "items": list(V0_1_LIMITATIONS),
         },
     }
 
     warnings = _collect_messages(sections, "warnings")
-    blockers = _collect_messages(sections, "blockers") + _collect_failed_errors(sections)
+    blockers = _collect_messages(sections, "blockers")
     warnings = _dedupe(warnings)
     blockers = _dedupe(blockers)
     passed = not blockers
 
-    component_checklist = {
+    components = {
         name: {
+            "status": section.get("status", "passed" if section.get("ok", False) else "blocked"),
             "ok": bool(section.get("ok", False)),
-            "warnings": len(section.get("warnings", [])),
-            "blockers": len(section.get("blockers", [])),
+            "warnings": list(section.get("warnings", [])),
+            "blockers": list(section.get("blockers", [])),
+            "dependent_on": section.get("dependent_on", ""),
         }
         for name, section in sections.items()
         if isinstance(section, dict) and "ok" in section
@@ -224,18 +243,27 @@ def _build_rc_report(
 
     next_safe = _next_safe_hints(selected_profile, target_tunnel)
     next_real = _next_real_hints(selected_profile, target_tunnel)
+    next_steps = {
+        "safe": next_safe,
+        "real_apply": next_real,
+    }
+    limitations = list(V0_1_LIMITATIONS)
 
     report = {
         "ok": passed,
+        "status": "passed" if passed else "blocked",
         "mode": mode,
         "read_only": read_only,
         "passed": passed,
-        "warnings": warnings,
-        "blockers": blockers,
-        "component_checklist": component_checklist,
+        "warnings": list(warnings),
+        "blockers": list(blockers),
+        "components": components,
+        "component_checklist": components,
+        "next_steps": next_steps,
         "next_safe_command_hints": next_safe,
         "next_real_apply_command_hints": next_real,
-        "v0_1_limitations": list(V0_1_LIMITATIONS),
+        "limitations": limitations,
+        "v0_1_limitations": limitations,
         "auto_switch_implemented": False,
         "background_monitoring_implemented": False,
         "requested_runtime_dir": str(requested_runtime_dir),
@@ -368,45 +396,95 @@ def _binary_section(config: AppConfig, state: AppState, work_dir: Path) -> dict[
         }
         plans.append(plan)
         if not resolution.get("ok"):
+            blockers.append("Binary resolver is not ready")
             blockers.append(resolution.get("message", f"Binary resolver is not ready for adapter '{adapter}'"))
     return {
         "ok": not blockers,
         "adapter_count": len(plans),
         "plans": plans,
-        "warnings": warnings,
-        "blockers": blockers,
+        "warnings": _dedupe(warnings),
+        "blockers": _dedupe(blockers),
     }
 
 
-def _section_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ok": bool(payload.get("ok", False)),
-        "action": payload.get("action", ""),
-        "warnings": list(payload.get("warnings", [])),
-        "blockers": list(payload.get("blockers", [])) or list(payload.get("errors", [])),
-        "summary": payload,
-    }
+def _normalized_section(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    blockers = list(payload.get("blockers", [])) or list(payload.get("errors", []))
+    warnings = list(payload.get("warnings", []))
+    status = payload.get("status")
+    if not status:
+        status = "passed" if payload.get("ok", False) else "blocked"
+    normalized = dict(payload)
+    normalized.update(
+        {
+            "ok": bool(payload.get("ok", False)),
+            "action": payload.get("action", name),
+            "status": status,
+            "warnings": warnings,
+            "blockers": blockers,
+        }
+    )
+    normalized["summary"] = payload
+    return normalized
 
 
-def _blocked_section(name: str, message: str) -> dict[str, Any]:
-    return {
+def _exception_section(name: str, message: str) -> dict[str, Any]:
+    payload = {
         "ok": False,
         "action": name,
+        "status": "blocked",
         "warnings": [],
         "blockers": [message],
-        "summary": {"ok": False, "action": name, "message": message},
+        "message": message,
+        "errors": [message],
     }
+    payload["summary"] = {
+        "ok": False,
+        "action": name,
+        "status": "blocked",
+        "message": message,
+        "errors": [message],
+        "warnings": [],
+        "blockers": [message],
+    }
+    return payload
+
+
+def _dependent_section(name: str, dependency: str, message: str) -> dict[str, Any]:
+    warning = f"Skipped because '{dependency}' did not pass: {message}"
+    payload = {
+        "ok": False,
+        "action": name,
+        "status": "skipped",
+        "warnings": [warning],
+        "blockers": [],
+        "dependent_on": dependency,
+        "message": message,
+        "errors": [],
+    }
+    payload["summary"] = {
+        "ok": False,
+        "action": name,
+        "status": "skipped",
+        "message": message,
+        "dependent_on": dependency,
+        "errors": [],
+        "warnings": [warning],
+        "blockers": [],
+    }
+    return payload
 
 
 def _lifecycle_section(service_dir: Path, service_render_payload: dict[str, Any], switch_paths: SwitchPaths) -> dict[str, Any]:
     if not service_render_payload.get("ok"):
-        return _blocked_section("lifecycle_plan", "Service render must succeed before lifecycle planning")
+        return _dependent_section("lifecycle_plan", "service_render", "Service render must succeed before lifecycle planning")
     start_plan = build_start_plan(service_dir=service_dir, service_name=None, audit_path=switch_paths.audit_path)
     stop_plan = build_stop_plan(service_dir=service_dir, service_name=None, audit_path=switch_paths.audit_path)
     blockers = list(start_plan.get("errors", [])) + list(stop_plan.get("errors", []))
     warnings = list(start_plan.get("warnings", [])) + list(stop_plan.get("warnings", []))
     return {
         "ok": not blockers,
+        "action": "lifecycle_plan",
+        "status": "passed" if not blockers else "blocked",
         "warnings": _dedupe(warnings),
         "blockers": _dedupe(blockers),
         "summary": {
@@ -434,14 +512,17 @@ def _manual_switch_section(
     audit_path: Path,
 ) -> dict[str, Any]:
     if not service_render_payload.get("ok"):
-        return _blocked_section("manual_switch_plan", "Service render must succeed before manual switch planning")
+        return _dependent_section("manual_switch_plan", "service_render", "Service render must succeed before manual switch planning")
     if not target_tunnel:
         return {
             "ok": True,
+            "action": "manual_switch_plan",
+            "status": "skipped",
             "warnings": ["No manual switch target was supplied; switch planning was skipped"],
             "blockers": [],
             "summary": {
                 "ok": True,
+                "status": "skipped",
                 "action": "manual-switch-plan-skipped",
                 "selected_profile": selected_profile.name if selected_profile else "",
             },
@@ -456,10 +537,19 @@ def _manual_switch_section(
     )
     return {
         "ok": bool(payload.get("ok", False)),
+        "action": "manual_switch_plan",
+        "status": "passed" if payload.get("ok", False) else "blocked",
         "warnings": list(payload.get("warnings", [])),
         "blockers": list(payload.get("errors", [])),
         "summary": payload,
     }
+
+
+def _safe_payload_section(name: str, builder: Any) -> dict[str, Any]:
+    try:
+        return _normalized_section(name, builder())
+    except (KeyError, ValueError) as exc:
+        return _exception_section(name, str(exc))
 
 
 def _collect_messages(sections: dict[str, Any], field: str) -> list[str]:
@@ -468,19 +558,6 @@ def _collect_messages(sections: dict[str, Any], field: str) -> list[str]:
         if isinstance(section, dict):
             messages.extend(section.get(field, []))
     return messages
-
-
-def _collect_failed_errors(sections: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    for section in sections.values():
-        if not isinstance(section, dict):
-            continue
-        if section.get("ok", True):
-            continue
-        summary = section.get("summary", {})
-        if isinstance(summary, dict):
-            errors.extend(summary.get("errors", []))
-    return errors
 
 
 def _next_safe_hints(selected_profile: Profile | None, target_tunnel: str | None) -> list[str]:

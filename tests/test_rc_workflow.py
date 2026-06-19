@@ -173,6 +173,12 @@ class RcWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
+        self.assertEqual(payload["status"], "passed")
+        self.assertIsInstance(payload["warnings"], list)
+        self.assertIsInstance(payload["blockers"], list)
+        self.assertIsInstance(payload["components"], dict)
+        self.assertIsInstance(payload["next_steps"], dict)
+        self.assertIsInstance(payload["limitations"], list)
         self.assertTrue(payload["sections"]["config"]["ok"])
         self.assertEqual(payload["sections"]["config"]["profile_count"], 2)
 
@@ -193,6 +199,7 @@ class RcWorkflowTests(unittest.TestCase):
         binary_section = json.loads(output)["sections"]["binaries"]
         self.assertTrue(binary_section["ok"])
         self.assertEqual(binary_section["adapter_count"], 2)
+        self.assertEqual(binary_section["status"], "passed")
 
     def test_rc_check_reports_runtime_service_and_install_statuses(self) -> None:
         install_dir = self._managed_install_dir("rathole", "frp")
@@ -234,6 +241,7 @@ class RcWorkflowTests(unittest.TestCase):
         switch_section = json.loads(output)["sections"]["manual_switch_plan"]
         self.assertTrue(switch_section["ok"])
         self.assertEqual(switch_section["summary"]["action"], "switch-plan")
+        self.assertEqual(switch_section["status"], "passed")
 
     def test_rc_check_warns_clearly_when_no_manual_switch_target_is_supplied(self) -> None:
         install_dir = self._managed_install_dir("rathole", "frp")
@@ -251,6 +259,7 @@ class RcWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         switch_section = json.loads(output)["sections"]["manual_switch_plan"]
         self.assertTrue(switch_section["ok"])
+        self.assertEqual(switch_section["status"], "skipped")
         self.assertIn("No manual switch target was supplied", switch_section["warnings"][0])
 
     def test_rc_check_does_not_call_systemd_lifecycle_or_reload_execution(self) -> None:
@@ -346,7 +355,12 @@ class RcWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 1)
         payload = json.loads(output)
         self.assertTrue(payload["blockers"])
-        self.assertIn("Binary resolver is not ready", "\n".join(payload["blockers"]))
+        combined = "\n".join(payload["blockers"])
+        self.assertIn("Binary resolver is not ready", combined)
+        self.assertIn("No binary source is available", combined)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["components"]["binaries"]["status"], "blocked")
+        self.assertEqual(payload["components"]["service_render"]["status"], "skipped")
 
     def test_rc_check_reports_invalid_config_blocker_cleanly(self) -> None:
         install_dir = self._managed_install_dir("rathole", "frp")
@@ -367,4 +381,25 @@ class RcWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         payload = json.loads(output)
+        self.assertIsInstance(payload["blockers"], list)
         self.assertIn("exactly one active tunnel", "\n".join(payload["blockers"]))
+        self.assertEqual(payload["components"]["runtime_plan"]["status"], "blocked")
+        self.assertEqual(payload["components"]["service_render"]["status"], "skipped")
+
+    def test_rc_check_success_has_empty_blockers_list(self) -> None:
+        install_dir = self._managed_install_dir("rathole", "frp")
+        self._write_config(self._profiles(), managed_install_dir=install_dir)
+        code, output = self.run_cli(
+            "rc",
+            "check",
+            "--runtime-dir",
+            str(self.runtime_dir),
+            "--service-dir",
+            str(self.service_dir),
+            "--target-dir",
+            str(self.target_dir),
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["blockers"], [])
+        self.assertIsInstance(payload["warnings"], list)
