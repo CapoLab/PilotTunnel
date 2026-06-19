@@ -166,7 +166,7 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
   7. optionally run guarded daemon-reload
   8. inspect managed service status
   9. use guarded start and stop for managed services
-  10. wait for a later manual switch and rollback workflow
+  10. inspect and apply a guarded manual switch workflow when needed
 - `runtime plan` currently supports Layer 4 TCP planning for `rathole`, `frp`, and `gost`.
 - It resolves binaries through the managed install layer, writes runtime config files under the chosen runtime directory, and reports active, hot-standby, and config-only tunnels.
 - It does not start processes, bind ports, create `systemd` units, or execute adapter binaries.
@@ -211,7 +211,7 @@ python -m pilottunnel.cli --config <CONFIG_FILE> service install apply --runtime
 - `systemd start apply` requires exact confirmation with `--confirm START_PILOTTUNNEL_SERVICES`.
 - `systemd stop apply` requires exact confirmation with `--confirm STOP_PILOTTUNNEL_SERVICES`.
 - Only PilotTunnel-managed active and hot-standby services discovered from the staged service directory are eligible.
-- Restart, enable, disable, manual switch, and rollback remain separate future work in this workflow.
+- Restart, enable, and disable remain separate workflows. Guarded manual switch now has its own staged command path.
 
 ```bash
 python -m pilottunnel.cli systemd reload plan --target-dir <SYSTEMD_TARGET_DIR>
@@ -221,6 +221,21 @@ python -m pilottunnel.cli systemd start plan --service-dir <SERVICE_STAGING_DIR>
 python -m pilottunnel.cli systemd start apply --service-dir <SERVICE_STAGING_DIR> --confirm START_PILOTTUNNEL_SERVICES
 python -m pilottunnel.cli systemd stop plan --service-dir <SERVICE_STAGING_DIR>
 python -m pilottunnel.cli systemd stop apply --service-dir <SERVICE_STAGING_DIR> --confirm STOP_PILOTTUNNEL_SERVICES
+```
+
+## Guarded Manual Tunnel Switch
+
+- `switch plan` is read-only and inspects only configured active or hot-standby tunnels.
+- `switch apply` requires exact confirmation with `--confirm SWITCH_PILOTTUNNEL_TUNNEL`.
+- The target service is started before the previous active service is stopped.
+- A read-only healthcheck runs after target start.
+- If target start or healthcheck fails, the previous active service is left in place.
+- If a later failure happens after the previous service was stopped, PilotTunnel attempts rollback before reporting failure.
+- This workflow uses only the managed service lifecycle abstraction and does not call adapter binaries directly.
+
+```bash
+python -m pilottunnel.cli --config <CONFIG_FILE> switch plan --target <TARGET_TUNNEL> --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR>
+python -m pilottunnel.cli --config <CONFIG_FILE> switch apply --target <TARGET_TUNNEL> --runtime-dir <RUNTIME_DIR> --service-dir <SERVICE_STAGING_DIR> --confirm SWITCH_PILOTTUNNEL_TUNNEL
 ```
 
 ## Real-Host Install Planning

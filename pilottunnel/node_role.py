@@ -46,6 +46,8 @@ CONTROLLER_ONLY_ACTIONS = {
     "profile_list",
     "profile_show",
     "switch",
+    "switch_plan",
+    "switch_apply",
     "plan",
     "registry_check",
     "bundle_export_worker",

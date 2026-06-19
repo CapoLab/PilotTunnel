@@ -40,6 +40,7 @@ from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan
 from .preflight import run_preflight
 from .readiness import build_readiness_report
 from .runtime_plan import build_runtime_plan
+from .manual_switch import apply_manual_switch, build_manual_switch_plan
 from .service_install import apply_service_install, build_service_install_plan
 from .service_plan import build_staged_service_plan
 from .systemd_control import (
@@ -243,10 +244,22 @@ def build_parser() -> argparse.ArgumentParser:
         blocked_parser.add_argument("--json", action="store_true")
 
     switch = subparsers.add_parser("switch")
-    switch.add_argument("--profile", required=True)
-    switch.add_argument("--adapter", required=True)
-    switch.add_argument("--transport", required=True)
+    switch.add_argument("--profile")
+    switch.add_argument("--adapter")
+    switch.add_argument("--transport")
     switch.add_argument("--require-healthcheck", action="store_true")
+    switch_subparsers = switch.add_subparsers(dest="switch_command", required=False)
+    switch_plan = switch_subparsers.add_parser("plan")
+    switch_plan.add_argument("--target", required=True)
+    switch_plan.add_argument("--runtime-dir", type=Path, required=True)
+    switch_plan.add_argument("--service-dir", type=Path, required=True)
+    switch_plan.add_argument("--json", action="store_true")
+    switch_apply = switch_subparsers.add_parser("apply")
+    switch_apply.add_argument("--target", required=True)
+    switch_apply.add_argument("--runtime-dir", type=Path, required=True)
+    switch_apply.add_argument("--service-dir", type=Path, required=True)
+    switch_apply.add_argument("--confirm")
+    switch_apply.add_argument("--json", action="store_true")
 
     status = subparsers.add_parser("status")
     status.add_argument("--profile", required=True)
@@ -664,7 +677,11 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"deploy_{args.deploy_command}"
     if args.command == "bootstrap":
         return f"bootstrap_{args.bootstrap_command}"
-    if args.command in {"switch", "status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
+    if args.command == "switch":
+        if getattr(args, "switch_command", None):
+            return f"switch_{args.switch_command}"
+        return "switch"
+    if args.command in {"status", "healthcheck", "logs", "cleanup", "plan", "preflight", "rollback"}:
         return args.command
     return None
 
@@ -1623,6 +1640,53 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload["ok"] else 1
 
     if args.command == "switch":
+        if args.switch_command == "plan":
+            try:
+                payload = build_manual_switch_plan(
+                    config=config,
+                    state=state,
+                    target_tunnel=args.target,
+                    runtime_dir=args.runtime_dir,
+                    service_dir=args.service_dir,
+                    audit_path=switch_paths.audit_path,
+                )
+            except (KeyError, ValueError) as exc:
+                print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+                return 1
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
+
+        if args.switch_command == "apply":
+            try:
+                payload = apply_manual_switch(
+                    config=config,
+                    state=state,
+                    state_path=state_path,
+                    target_tunnel=args.target,
+                    runtime_dir=args.runtime_dir,
+                    service_dir=args.service_dir,
+                    confirm=args.confirm,
+                    paths=switch_paths,
+                )
+            except (KeyError, ValueError) as exc:
+                print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+                return 1
+            if payload["ok"]:
+                _save_runtime(config, state, registry, config_path, state_path, registry_path)
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
+
+        if not args.profile or not args.adapter or not args.transport:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "message": "Legacy switch requires --profile, --adapter, and --transport, or use 'switch plan/apply'.",
+                    },
+                    indent=2,
+                )
+            )
+            return 1
         try:
             profile = get_profile(config, args.profile)
             tcp_plan = build_profile_healthcheck_plan(

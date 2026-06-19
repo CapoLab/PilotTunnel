@@ -46,6 +46,9 @@ class BinaryRecord:
 class AppState:
     profiles: dict[str, RuntimeRecord] = field(default_factory=dict)
     binaries: dict[str, BinaryRecord] = field(default_factory=dict)
+    manual_active_tunnel: str = ""
+    manual_previous_tunnel: str = ""
+    last_manual_switch: dict[str, Any] = field(default_factory=dict)
 
     def clone(self) -> "AppState":
         return copy.deepcopy(self)
@@ -57,7 +60,13 @@ def load_state(path: Path = DEFAULT_STATE_PATH) -> AppState:
     data = json.loads(path.read_text(encoding="utf-8"))
     profiles = {name: RuntimeRecord(**payload) for name, payload in data.get("profiles", {}).items()}
     binaries = {name: BinaryRecord(**payload) for name, payload in data.get("binaries", {}).items()}
-    return AppState(profiles=profiles, binaries=binaries)
+    return AppState(
+        profiles=profiles,
+        binaries=binaries,
+        manual_active_tunnel=data.get("manual_active_tunnel", ""),
+        manual_previous_tunnel=data.get("manual_previous_tunnel", ""),
+        last_manual_switch=data.get("last_manual_switch") or {},
+    )
 
 
 def save_state(state: AppState, path: Path = DEFAULT_STATE_PATH) -> None:

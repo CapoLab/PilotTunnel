@@ -104,6 +104,22 @@ def _assign_runtime_roles(config: AppConfig, state: AppState) -> dict[str, str]:
         raise ValueError("Only one tunnel can be active")
     if len([name for name, role in assignments.items() if role == "hot_standby"]) > 2:
         raise ValueError("At most two tunnels can be marked hot_standby")
+    override_target = (state.manual_active_tunnel or "").strip()
+    if override_target:
+        if override_target not in assignments:
+            raise ValueError(f"Manual active tunnel override references unknown tunnel '{override_target}'")
+        if assignments[override_target] == "config_only":
+            raise ValueError(f"Manual active tunnel override requires a rendered managed tunnel: '{override_target}'")
+        previous_active = next((name for name, role in assignments.items() if role == "active"), "")
+        for name in list(assignments):
+            if name == override_target:
+                assignments[name] = "active"
+            elif name == previous_active:
+                assignments[name] = "hot_standby"
+        if len([name for name, role in assignments.items() if role == "active"]) != 1:
+            raise ValueError("Manual active tunnel override produced an invalid active tunnel set")
+        if len([name for name, role in assignments.items() if role == "hot_standby"]) > 2:
+            raise ValueError("Manual active tunnel override exceeds the hot_standby limit")
     return assignments
 
 
