@@ -1,6 +1,6 @@
 # PilotTunnel
 
-PilotTunnel is a server-only Python CLI project for managing multiple tunnel adapters behind a stable public port. There is no UI, no dashboard, and no frontend. Version `v0.1` remains focused on safe Layer 4 orchestration with dry-run behavior by default.
+PilotTunnel is a server-only Python CLI project for managing multiple tunnel adapters behind a stable public port. There is no UI, no dashboard, and no frontend. The current development line is `0.1.1-dev`, continuing the safe Layer 4 orchestration model introduced in `v0.1.0`.
 
 ## Current Status
 
@@ -9,14 +9,15 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 - Backhaul and Rathole now have richer dry-run planning for `controller` and `worker` roles.
 - Real remote coordination, real systemd changes, firewall rules, and host networking changes are still not implemented.
 
-## v0.1.0 Release
+## Current Development Version
 
-- Current project version: `0.1.0`
-- Release phase: `v0.1-final`
+- Current project version: `0.1.1-dev`
+- Release phase: `post-v0.1-dev`
 - CLI only, with config-file driven workflows
-- No auto-switch or background monitoring is included in `v0.1.0`
+- No auto-switch or background monitoring is included in the current development stage
 - Release notes are available in [RELEASE_NOTES.md](RELEASE_NOTES.md)
 - Change history is summarized in [CHANGELOG.md](CHANGELOG.md)
+- The tagged `v0.1.0` release remains the stable reference point while the installer/bootstrap workflow evolves on `main`.
 
 ## v0.1.0 Supported Scope
 
@@ -39,7 +40,19 @@ python -m pilottunnel.cli version
 ```
 
 - Prints the project name, version, release phase, supported scope, and safety notes.
-- Confirms that auto-switch and background monitoring are not part of `v0.1.0`.
+- Confirms that auto-switch and background monitoring are not part of the current development stage.
+
+## One-Command Non-Production Server Setup
+
+- `scripts/install.sh` is a Linux-focused installer/bootstrap helper for non-production smoke testing.
+- It requires an explicit role, supports dry-run planning, and requires exact confirmation for apply mode.
+- It clones or updates the requested repo ref into a PilotTunnel-owned install directory and runs only safe setup checks.
+- By default it does not write to `/etc/systemd/system`, does not call daemon reload, does not start services, does not modify firewall or routes, and does not execute tunnel adapter binaries.
+
+```bash
+sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --dry-run
+sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --confirm INSTALL_PILOTTUNNEL
+```
 
 ## Dry-Run Safety Model
 

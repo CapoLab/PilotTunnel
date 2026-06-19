@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1-dev - 2026-06-20
+
+- Bumped project metadata to the post-`v0.1.0` development stage.
+- Added a Linux `scripts/install.sh` helper for safe one-command non-production bootstrap and smoke-test preparation.
+- Kept installer behavior confirmation-gated, with no default writes to live systemd targets, no service lifecycle changes, no firewall changes, and no tunnel binary execution.
+
 ## 0.1.0 - 2026-06-20
 
 - First public v0.1.0 release of the unified `pilottunnel` CLI.

@@ -40,15 +40,15 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
         self.assertEqual(payload["project"], "PilotTunnel")
-        self.assertEqual(payload["release_phase"], "v0.1-final")
+        self.assertEqual(payload["release_phase"], "post-v0.1-dev")
         combined_notes = "\n".join(payload["safety_notes"]).lower()
         self.assertIn("auto-switch", combined_notes)
         self.assertIn("background", combined_notes)
 
-    def test_version_command_includes_0_1_0(self) -> None:
+    def test_version_command_includes_0_1_1_dev(self) -> None:
         code, output = self.run_cli("version")
         self.assertEqual(code, 0, msg=output)
-        self.assertEqual(json.loads(output)["version"], "0.1.0")
+        self.assertEqual(json.loads(output)["version"], "0.1.1-dev")
 
     def test_release_docs_note_no_auto_switch_or_background_monitoring(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8").lower()

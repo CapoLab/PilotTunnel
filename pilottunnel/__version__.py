@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 PROJECT_NAME = "PilotTunnel"
-VERSION = "0.1.0"
-RELEASE_PHASE = "v0.1-final"
+VERSION = "0.1.1-dev"
+RELEASE_PHASE = "post-v0.1-dev"
 SAFETY_NOTES = [
-    "No automatic failover or auto-switch is included in v0.1.0.",
-    "No background monitoring daemon is included in v0.1.0.",
+    "No automatic failover or auto-switch is included in the current development stage.",
+    "No background monitoring daemon is included in the current development stage.",
     "Real deployment still requires explicit operator confirmation.",
+    "The Linux installer workflow is intended for non-production smoke testing first.",
 ]
 
 SUPPORTED_SCOPE = [

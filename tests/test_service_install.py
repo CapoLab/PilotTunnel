@@ -235,7 +235,7 @@ class ServiceInstallWorkflowTests(unittest.TestCase):
         install_dir = self._managed_install_dir("rathole")
         self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
         self._render_services()
-        extra = self.service_dir / "foreign.service"
+        extra = self.service_dir / "external-extra.service"
         extra.write_text("not owned", encoding="utf-8")
         code, output = self.run_cli(
             "service",
@@ -251,7 +251,7 @@ class ServiceInstallWorkflowTests(unittest.TestCase):
             "INSTALL_PILOTTUNNEL_SERVICES",
         )
         self.assertEqual(code, 0, msg=output)
-        self.assertFalse((self.target_dir / "foreign.service").exists())
+        self.assertFalse((self.target_dir / "external-extra.service").exists())
 
     def test_reinstall_is_idempotent_when_target_matches(self) -> None:
         install_dir = self._managed_install_dir("rathole")
@@ -501,4 +501,3 @@ class ServiceInstallWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertNotIn("secret-value", output)
-
