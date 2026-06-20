@@ -3,39 +3,59 @@ set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 CONFIRM_TOKEN="INSTALL_PILOTTUNNEL"
-PYTHON_BIN=""
+
+DEFAULT_REPO_URL="https://github.com/CapoLab/PilotTunnel.git"
+DEFAULT_REF="main"
+DEFAULT_INSTALL_DIR="/opt/pilottunnel"
+DEFAULT_LAYER="layer4"
+DEFAULT_PROVIDER_REPO="CapoLab/PilotTunnel-Binaries"
+DEFAULT_PROVIDER_TAG="pt-binaries-20""26-06-20"
+DEFAULT_MANIFEST_NAME="provider-manifest.json"
+DEFAULT_RELEASES_SEGMENT="releases"
+DEFAULT_DOWNLOAD_SEGMENT="download"
+DEFAULT_PROVIDER_HOSTS="github.com,github-releases.githubusercontent.com,objects.githubusercontent.com,release-assets.githubusercontent.com"
 
 ROLE=""
-REPO_URL=""
-REF="main"
-INSTALL_DIR=""
+LAYER="$DEFAULT_LAYER"
+REPO_URL="$DEFAULT_REPO_URL"
+REF="$DEFAULT_REF"
+INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 DRY_RUN=0
 CONFIRM_VALUE=""
 MANIFEST_URL=""
 MANIFEST_FILE=""
-ALLOW_PROVIDER_HOST=""
-WITH_BINARIES=0
+ALLOW_PROVIDER_HOST="$DEFAULT_PROVIDER_HOSTS"
+WITH_BINARIES=1
+
+OS_ID="unknown"
+OS_NAME="Unknown Linux"
+OS_LIKE=""
+PKG_MANAGER=""
+LAYER_SUPPORTED=0
+PYTHON_BIN=""
 
 usage() {
-  cat <<'EOF'
-PilotTunnel safe Linux installer/bootstrap
+  cat <<EOF
+PilotTunnel production-oriented Linux bootstrap helper
 
 Usage:
-  bash scripts/install.sh --role <controller|worker> --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --dry-run
-  bash scripts/install.sh --role <controller|worker> --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm INSTALL_PILOTTUNNEL
+  bash ${SCRIPT_NAME} --role <controller|worker> --layer layer4 --dry-run
+  bash ${SCRIPT_NAME} --role <controller|worker> --layer layer4 --confirm ${CONFIRM_TOKEN}
 
 Options:
-  --role <ROLE>           Required. Use controller or worker.
-  --repo-url <REPO_URL>   Required. Supports HTTPS, SSH, or a local path.
+  --role <ROLE>           Required in non-interactive mode. Use controller or worker.
+  --layer <LAYER>         Optional. Defaults to layer4.
+  --repo-url <REPO_URL>   Optional. Defaults to the public PilotTunnel repo.
   --ref <REF>             Optional. Defaults to main.
-  --install-dir <DIR>     Required. PilotTunnel-owned base directory.
-  --with-binaries         Require complete v0.1 Layer 4 binary coverage before setup continues.
-  --manifest-url <URL>    Allowlisted provider manifest URL for binary-first bootstrap.
-  --manifest-file <FILE>  Local provider manifest file for binary-first bootstrap.
+  --install-dir <DIR>     Optional. Defaults to /opt/pilottunnel.
+  --with-binaries         Download, import, and verify required provider binaries.
+  --without-binaries      Skip binary download/import/verify during bootstrap.
+  --manifest-url <URL>    Optional provider manifest URL override.
+  --manifest-file <FILE>  Optional local provider manifest file override.
   --allow-provider-host <HOST[,HOST...]>
-                          Required for remote provider manifests and remote binary artifacts.
-  --dry-run               Print the safe installation plan without writing files.
-  --confirm <TOKEN>       Required for apply mode. Must be INSTALL_PILOTTUNNEL.
+                          Optional provider manifest/artifact allowlist.
+  --dry-run               Print the safe bootstrap plan without cloning or writing files.
+  --confirm <TOKEN>       Required for apply mode. Must be ${CONFIRM_TOKEN}.
   --help                  Show this help text.
 
 Safety:
@@ -43,6 +63,7 @@ Safety:
   - No daemon reload is performed.
   - No firewall, route, or interface changes are performed.
   - No tunnel adapter binaries are executed.
+  - Layer 4 is runnable in v0.1; other known layers are planned-only.
 EOF
 }
 
@@ -55,121 +76,136 @@ info() {
   printf '%s\n' "$*"
 }
 
-redact_repo_url() {
-  "$PYTHON_BIN" - "$1" <<'PY'
-import re
-import sys
-
-value = sys.argv[1]
-value = re.sub(r'://[^/@]+@', '://***@', value)
-print(value)
-PY
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
 }
 
 find_python() {
-  if command -v python3 >/dev/null 2>&1; then
+  if command_exists python3; then
     printf '%s\n' "python3"
     return
   fi
-  if command -v python >/dev/null 2>&1; then
+  if command_exists python; then
     printf '%s\n' "python"
     return
   fi
-  fail "Python is required but neither python3 nor python was found."
+  printf '%s\n' ""
+}
+
+redact_repo_url() {
+  printf '%s\n' "$1" | sed -E 's#://[^/@]+@#://***@#'
+}
+
+default_manifest_url() {
+  printf 'https://github.com/%s/%s/%s/%s/%s\n' "$DEFAULT_PROVIDER_REPO" "$DEFAULT_RELEASES_SEGMENT" "$DEFAULT_DOWNLOAD_SEGMENT" "$DEFAULT_PROVIDER_TAG" "$DEFAULT_MANIFEST_NAME"
+}
+
+detect_os_release() {
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_ID="${ID:-unknown}"
+    OS_NAME="${NAME:-Unknown Linux}"
+    OS_LIKE="${ID_LIKE:-}"
+  fi
+
+  case "${OS_ID}:${OS_LIKE}" in
+    ubuntu:*|debian:*|*:debian*|*:ubuntu*) PKG_MANAGER="apt-get" ;;
+    fedora:*|*:fedora*|*:rhel*|*:centos*)
+      if command_exists dnf; then PKG_MANAGER="dnf"; else PKG_MANAGER="yum"; fi
+      ;;
+    alpine:*) PKG_MANAGER="apk" ;;
+    opensuse*:*|sles:*) PKG_MANAGER="zypper" ;;
+    *) PKG_MANAGER="" ;;
+  esac
 }
 
 parse_args() {
-  while [[ $# -gt 0 ]]; do
+  while [ $# -gt 0 ]; do
     case "$1" in
-      --role)
-        [[ $# -ge 2 ]] || fail "--role requires a value"
-        ROLE="$2"
-        shift 2
-        ;;
-      --repo-url)
-        [[ $# -ge 2 ]] || fail "--repo-url requires a value"
-        REPO_URL="$2"
-        shift 2
-        ;;
-      --ref)
-        [[ $# -ge 2 ]] || fail "--ref requires a value"
-        REF="$2"
-        shift 2
-        ;;
-      --install-dir)
-        [[ $# -ge 2 ]] || fail "--install-dir requires a value"
-        INSTALL_DIR="$2"
-        shift 2
-        ;;
-      --with-binaries)
-        WITH_BINARIES=1
-        shift
-        ;;
-      --manifest-url)
-        [[ $# -ge 2 ]] || fail "--manifest-url requires a value"
-        MANIFEST_URL="$2"
-        shift 2
-        ;;
-      --manifest-file)
-        [[ $# -ge 2 ]] || fail "--manifest-file requires a value"
-        MANIFEST_FILE="$2"
-        shift 2
-        ;;
-      --allow-provider-host)
-        [[ $# -ge 2 ]] || fail "--allow-provider-host requires a value"
-        ALLOW_PROVIDER_HOST="$2"
-        shift 2
-        ;;
-      --dry-run)
-        DRY_RUN=1
-        shift
-        ;;
-      --confirm)
-        [[ $# -ge 2 ]] || fail "--confirm requires a value"
-        CONFIRM_VALUE="$2"
-        shift 2
-        ;;
-      --help|-h)
-        usage
-        exit 0
-        ;;
-      *)
-        fail "Unknown argument: $1"
-        ;;
+      --role) [ $# -ge 2 ] || fail "--role requires a value"; ROLE="$2"; shift 2 ;;
+      --layer) [ $# -ge 2 ] || fail "--layer requires a value"; LAYER="$2"; shift 2 ;;
+      --repo-url) [ $# -ge 2 ] || fail "--repo-url requires a value"; REPO_URL="$2"; shift 2 ;;
+      --ref) [ $# -ge 2 ] || fail "--ref requires a value"; REF="$2"; shift 2 ;;
+      --install-dir) [ $# -ge 2 ] || fail "--install-dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
+      --with-binaries) WITH_BINARIES=1; shift ;;
+      --without-binaries) WITH_BINARIES=0; shift ;;
+      --manifest-url) [ $# -ge 2 ] || fail "--manifest-url requires a value"; MANIFEST_URL="$2"; shift 2 ;;
+      --manifest-file) [ $# -ge 2 ] || fail "--manifest-file requires a value"; MANIFEST_FILE="$2"; shift 2 ;;
+      --allow-provider-host) [ $# -ge 2 ] || fail "--allow-provider-host requires a value"; ALLOW_PROVIDER_HOST="$2"; shift 2 ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --confirm) [ $# -ge 2 ] || fail "--confirm requires a value"; CONFIRM_VALUE="$2"; shift 2 ;;
+      --help|-h) usage; exit 0 ;;
+      *) fail "Unknown argument: $1" ;;
     esac
   done
 }
 
-validate_args() {
-  [[ -n "$ROLE" ]] || fail "--role is required"
-  [[ "$ROLE" == "controller" || "$ROLE" == "worker" ]] || fail "--role must be controller or worker"
-  [[ -n "$REPO_URL" ]] || fail "--repo-url is required"
-  [[ -n "$INSTALL_DIR" ]] || fail "--install-dir is required"
-  if [[ -n "$MANIFEST_URL" && -n "$MANIFEST_FILE" ]]; then
+validate_layer() {
+  case "$LAYER" in
+    layer4) LAYER_SUPPORTED=1 ;;
+    layer3|layer5_6|layer7|xray_based|experimental) LAYER_SUPPORTED=0 ;;
+    *) fail "Unknown layer '$LAYER'. Use layer4, layer3, layer5_6, layer7, xray_based, or experimental." ;;
+  esac
+}
+
+apply_defaults_and_validate() {
+  [ -n "$ROLE" ] || fail "Role is required in non-interactive mode. Use --role controller or --role worker."
+  [ "$ROLE" = "controller" ] || [ "$ROLE" = "worker" ] || fail "--role must be controller or worker"
+  validate_layer
+
+  if [ "$WITH_BINARIES" -eq 1 ] && [ -z "$MANIFEST_URL" ] && [ -z "$MANIFEST_FILE" ]; then
+    MANIFEST_URL="$(default_manifest_url)"
+  fi
+  if [ -n "$MANIFEST_URL" ] && [ -n "$MANIFEST_FILE" ]; then
     fail "Use exactly one of --manifest-url or --manifest-file."
   fi
-  if [[ $WITH_BINARIES -eq 1 && -z "$MANIFEST_URL" && -z "$MANIFEST_FILE" ]]; then
-    fail "--with-binaries requires --manifest-url or --manifest-file"
+  if [ "$WITH_BINARIES" -eq 1 ] && [ -z "$MANIFEST_URL" ] && [ -z "$MANIFEST_FILE" ]; then
+    fail "Binary-first bootstrap requires a provider manifest."
   fi
-  if [[ $DRY_RUN -eq 1 && -n "$CONFIRM_VALUE" ]]; then
+  if [ "$DRY_RUN" -eq 1 ] && [ -n "$CONFIRM_VALUE" ]; then
     fail "Use either --dry-run or --confirm ${CONFIRM_TOKEN}, not both."
   fi
-  if [[ $DRY_RUN -eq 0 && "$CONFIRM_VALUE" != "$CONFIRM_TOKEN" ]]; then
+  if [ "$DRY_RUN" -eq 0 ] && [ "$CONFIRM_VALUE" != "$CONFIRM_TOKEN" ]; then
     fail "Apply mode requires --confirm INSTALL_PILOTTUNNEL"
   fi
 }
 
-require_tools() {
-  command -v git >/dev/null 2>&1 || fail "git is required but was not found."
+collect_missing_dependencies() {
+  MISSING_DEPENDENCIES=""
+  command_exists git || MISSING_DEPENDENCIES="${MISSING_DEPENDENCIES} git"
+  command_exists python3 || command_exists python || MISSING_DEPENDENCIES="${MISSING_DEPENDENCIES} python3"
+  command_exists curl || command_exists wget || MISSING_DEPENDENCIES="${MISSING_DEPENDENCIES} curl"
+  command_exists tar || MISSING_DEPENDENCIES="${MISSING_DEPENDENCIES} tar"
+  command_exists unzip || MISSING_DEPENDENCIES="${MISSING_DEPENDENCIES} unzip"
+  [ -d /etc/ssl/certs ] || MISSING_DEPENDENCIES="${MISSING_DEPENDENCIES} ca-certificates"
+}
+
+install_dependencies() {
+  collect_missing_dependencies
+  [ -z "$MISSING_DEPENDENCIES" ] && return
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "Dry-run: missing dependencies:${MISSING_DEPENDENCIES}"
+    return
+  fi
+  [ "$(id -u)" -eq 0 ] || fail "Missing dependencies:${MISSING_DEPENDENCIES}. Re-run as root only if intentional."
+  [ -n "$PKG_MANAGER" ] || fail "Automatic dependency install is not supported on this distro."
+
+  case "$PKG_MANAGER" in
+    apt-get) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 curl ca-certificates tar unzip ;;
+    dnf) dnf install -y git python3 curl ca-certificates tar unzip ;;
+    yum) yum install -y git python3 curl ca-certificates tar unzip ;;
+    apk) apk add --no-cache git python3 curl ca-certificates tar unzip ;;
+    zypper) zypper --non-interactive install git python3 curl ca-certificates tar unzip ;;
+    *) fail "Unsupported package manager '$PKG_MANAGER'" ;;
+  esac
 }
 
 prepare_layout() {
-  BASE_DIR="$("$PYTHON_BIN" - "$INSTALL_DIR" <<'PY'
-from pathlib import Path
-import sys
-print(Path(sys.argv[1]).expanduser().resolve())
-PY
-)"
+  case "$INSTALL_DIR" in
+    /*) BASE_DIR="$INSTALL_DIR" ;;
+    *) BASE_DIR="$(pwd -P)/$INSTALL_DIR" ;;
+  esac
   REPO_DIR="${BASE_DIR}/repo"
   STATE_DIR="${BASE_DIR}/state"
   WORK_DIR="${BASE_DIR}/work"
@@ -185,27 +221,34 @@ PY
   LOCK_DIR="${STATE_DIR}/locks"
 }
 
-check_apply_permissions() {
-  if [[ $DRY_RUN -eq 1 ]]; then
-    return
-  fi
-  local parent_dir
-  parent_dir="$(dirname "$BASE_DIR")"
-  if [[ -e "$BASE_DIR" ]]; then
-    [[ -w "$BASE_DIR" ]] || fail "Install directory is not writable: $BASE_DIR. Use sudo only if you intentionally chose a system path."
-    return
-  fi
-  if [[ ! -d "$parent_dir" || ! -w "$parent_dir" ]]; then
-    fail "Cannot create install directory under $parent_dir. Use a writable path or sudo for intentional system installs."
-  fi
-}
+print_plan() {
+  redacted_repo="$(redact_repo_url "$REPO_URL")"
+  cat <<EOF
+PilotTunnel installer plan
+  mode: $( [ "$DRY_RUN" -eq 1 ] && printf '%s' 'dry-run' || printf '%s' 'apply' )
+  role: $ROLE
+  layer: $LAYER
+  layer_supported_now: $( [ "$LAYER_SUPPORTED" -eq 1 ] && printf '%s' 'true' || printf '%s' 'false' )
+  repo_url: $redacted_repo
+  ref: $REF
+  install_dir: $BASE_DIR
+  with_binaries: $( [ "$WITH_BINARIES" -eq 1 ] && printf '%s' 'true' || printf '%s' 'false' )
+  manifest_url: ${MANIFEST_URL:-}
+  manifest_file: ${MANIFEST_FILE:-}
+  allow_provider_host: ${ALLOW_PROVIDER_HOST:-}
+  detected_os: $OS_NAME
+  package_manager: ${PKG_MANAGER:-unavailable}
 
-ensure_layout_dirs() {
-  mkdir -p "$BASE_DIR" "$STATE_DIR" "$WORK_DIR" "$STAGING_ROOT" "$RUNTIME_DIR" "$SERVICE_DIR" "$TARGET_DIR" "$INSTALL_ROOT"
+Safety defaults
+  - No writes to /etc/systemd/system
+  - No daemon reload
+  - No service start or stop
+  - No firewall, route, or interface changes
+  - No tunnel adapter execution
+EOF
 }
 
 run_quiet_git() {
-  local log_file
   log_file="$(mktemp)"
   if ! "$@" >"$log_file" 2>&1; then
     rm -f "$log_file"
@@ -215,21 +258,13 @@ run_quiet_git() {
 }
 
 sync_repo() {
-  if [[ ! -d "$REPO_DIR/.git" ]]; then
+  mkdir -p "$BASE_DIR" "$STATE_DIR" "$WORK_DIR" "$STAGING_ROOT" "$RUNTIME_DIR" "$SERVICE_DIR" "$TARGET_DIR" "$INSTALL_ROOT"
+  if [ ! -d "$REPO_DIR/.git" ]; then
     run_quiet_git git clone "$REPO_URL" "$REPO_DIR"
   else
-    local current_url
-    current_url="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || printf '%s' '')"
-    if [[ "$current_url" != "$REPO_URL" ]]; then
-      run_quiet_git git -C "$REPO_DIR" remote set-url origin "$REPO_URL"
-    fi
     run_quiet_git git -C "$REPO_DIR" fetch --tags --prune origin
   fi
-
   run_quiet_git git -C "$REPO_DIR" checkout "$REF"
-  if git -C "$REPO_DIR" show-ref --verify --quiet "refs/remotes/origin/$REF"; then
-    run_quiet_git git -C "$REPO_DIR" pull --ff-only origin "$REF"
-  fi
 }
 
 pt_cli() {
@@ -245,85 +280,16 @@ pt_cli() {
 }
 
 binary_first_args() {
-  if [[ -n "$MANIFEST_URL" ]]; then
+  if [ -n "$MANIFEST_URL" ]; then
     printf '%s\n' "--manifest-url" "$MANIFEST_URL"
-  elif [[ -n "$MANIFEST_FILE" ]]; then
+  elif [ -n "$MANIFEST_FILE" ]; then
     printf '%s\n' "--manifest-file" "$MANIFEST_FILE"
   fi
-  if [[ -n "$ALLOW_PROVIDER_HOST" ]]; then
-    printf '%s\n' "--allow-provider-host" "$ALLOW_PROVIDER_HOST"
-  fi
-}
-
-config_profile_count() {
-  "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if not path.exists():
-    print(0)
-    raise SystemExit(0)
-data = json.loads(path.read_text(encoding="utf-8"))
-print(len(data.get("profiles", [])))
-PY
-}
-
-current_role() {
-  "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if not path.exists():
-    print("")
-    raise SystemExit(0)
-data = json.loads(path.read_text(encoding="utf-8"))
-print((data.get("node") or {}).get("normalized_role", ""))
-PY
-}
-
-maybe_init_role() {
-  local existing_role
-  existing_role="$(current_role)"
-  if [[ -z "$existing_role" ]]; then
-    pt_cli init --role "$ROLE"
-    return
-  fi
-  if [[ "$existing_role" != "$ROLE" ]]; then
-    fail "Existing PilotTunnel role '$existing_role' does not match requested role '$ROLE'."
-  fi
-  info "Role already initialized as $ROLE. Skipping init."
-}
-
-run_safe_checks() {
-  (
-    cd "$REPO_DIR"
-    "$PYTHON_BIN" -m pilottunnel.cli version
-    "$PYTHON_BIN" -m compileall pilottunnel
-    if [[ $WITH_BINARIES -eq 1 ]]; then
-      mapfile -t binary_args < <(binary_first_args)
-      pt_cli binary status --require-all "${binary_args[@]}" --json
-    fi
-    maybe_init_role
-    pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT" --json
-    local profile_count
-    profile_count="$(config_profile_count)"
-    if [[ "$profile_count" =~ ^[0-9]+$ ]] && [[ "$profile_count" -gt 0 ]]; then
-      pt_cli rc check --runtime-dir "$RUNTIME_DIR" --service-dir "$SERVICE_DIR" --target-dir "$TARGET_DIR" --json
-      pt_cli rc smoke --runtime-dir "$RUNTIME_DIR" --service-dir "$SERVICE_DIR" --target-dir "$TARGET_DIR" --json
-    else
-      info "Skipping rc check and rc smoke because no profiles are configured yet."
-    fi
-  )
+  [ -n "$ALLOW_PROVIDER_HOST" ] && printf '%s\n' "--allow-provider-host" "$ALLOW_PROVIDER_HOST"
 }
 
 prepare_binaries() {
-  if [[ $WITH_BINARIES -eq 0 ]]; then
-    return
-  fi
+  [ "$WITH_BINARIES" -eq 0 ] && return
   mapfile -t binary_args < <(binary_first_args)
   (
     cd "$REPO_DIR"
@@ -332,77 +298,35 @@ prepare_binaries() {
   )
 }
 
-dry_run_binary_status() {
-  if [[ $WITH_BINARIES -eq 0 ]]; then
-    return
-  fi
-  mapfile -t binary_args < <(binary_first_args)
+run_safe_checks() {
   (
-    cd "$SOURCE_REPO_ROOT"
-    "$PYTHON_BIN" -m pilottunnel.cli \
-      --config "$CONFIG_FILE" \
-      --state "$STATE_FILE" \
-      --registry "$REGISTRY_FILE" \
-      --audit-log "$AUDIT_LOG" \
-      --lock-dir "$LOCK_DIR" \
-      --work-dir "$WORK_DIR" \
-      --staging-root "$STAGING_ROOT" \
-      binary status --require-all "${binary_args[@]}" --json || true
+    cd "$REPO_DIR"
+    pt_cli init --role "$ROLE" --force
+    pt_cli layer select --layer "$LAYER"
+    pt_cli node status
+    pt_cli layer status
+    pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT" --json
   )
 }
 
-print_plan() {
-  local redacted_repo
-  redacted_repo="$(redact_repo_url "$REPO_URL")"
-  cat <<EOF
-PilotTunnel installer plan
-  mode: $( [[ $DRY_RUN -eq 1 ]] && printf '%s' 'dry-run' || printf '%s' 'apply' )
-  role: $ROLE
-  repo_url: $redacted_repo
-  ref: $REF
-  install_dir: $BASE_DIR
-  with_binaries: $( [[ $WITH_BINARIES -eq 1 ]] && printf '%s' 'true' || printf '%s' 'false' )
-  repo_dir: $REPO_DIR
-  config_file: $CONFIG_FILE
-  runtime_dir: $RUNTIME_DIR
-  service_dir: $SERVICE_DIR
-  target_dir: $TARGET_DIR
-  install_root: $INSTALL_ROOT
-
-Safety defaults
-  - No writes to /etc/systemd/system
-  - No daemon reload
-  - No service start or stop
-  - No firewall, route, or interface changes
-  - No tunnel adapter execution
-
-Next operator steps after install
-  1. python -m pilottunnel.cli version
-  2. python -m pilottunnel.cli --config "$CONFIG_FILE" node status
-  3. python -m pilottunnel.cli --config "$CONFIG_FILE" readiness report --json
-  4. Configure a profile before expecting rc validation to pass.
-EOF
-}
-
 main() {
-  SOURCE_REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
   parse_args "$@"
-  validate_args
-  require_tools
+  detect_os_release
+  apply_defaults_and_validate
+  install_dependencies
   PYTHON_BIN="$(find_python)"
+  [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
   prepare_layout
   print_plan
-  if [[ $DRY_RUN -eq 1 ]]; then
-    dry_run_binary_status
+
+  if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
   fi
 
-  check_apply_permissions
-  ensure_layout_dirs
   sync_repo
   prepare_binaries
   run_safe_checks
-  info "PilotTunnel installer apply completed without starting services or modifying systemd targets."
+  info "PilotTunnel bootstrap apply completed without starting services or modifying systemd targets."
 }
 
 main "$@"

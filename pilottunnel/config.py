@@ -33,6 +33,8 @@ class NodeSettings:
     initialized_at: str = ""
     role_alias_used: str = ""
     normalized_role: str = ""
+    preferred_layer: str = ""
+    preferred_layer_selected_at: str = ""
 
     @property
     def initialized(self) -> bool:
@@ -125,6 +127,13 @@ def canonical_role(value: str) -> str:
     normalized = value.strip().lower()
     if normalized not in {"controller", "worker"}:
         raise ValueError(f"Unsupported role '{value}'")
+    return normalized
+
+
+def canonical_layer(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in SUPPORTED_LAYERS:
+        raise ValueError(f"Unknown layer '{value}'")
     return normalized
 
 

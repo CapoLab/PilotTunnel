@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .adapters import ADAPTERS
@@ -37,6 +38,7 @@ from .config import (
     SUPPORTED_LAYERS,
     build_worker_stub,
     build_node_settings,
+    canonical_layer,
     canonical_role,
     get_profile,
     load_config,
@@ -114,7 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     profile_show = profile_subparsers.add_parser("show")
     profile_show.add_argument("--name", required=True)
 
-    subparsers.add_parser("layer").add_subparsers(dest="layer_command", required=True).add_parser("list")
+    layer = subparsers.add_parser("layer")
+    layer_subparsers = layer.add_subparsers(dest="layer_command", required=True)
+    layer_subparsers.add_parser("list")
+    layer_select = layer_subparsers.add_parser("select")
+    layer_select.add_argument("--layer", required=True)
+    layer_subparsers.add_parser("status")
     adapter = subparsers.add_parser("adapter")
     adapter_subparsers = adapter.add_subparsers(dest="adapter_command", required=True)
     adapter_subparsers.add_parser("list")
@@ -876,6 +883,33 @@ def _adapter_payload(name: str) -> dict:
     }
 
 
+def _layer_list_payload() -> list[dict]:
+    return [
+        {
+            "name": name,
+            "supported": supported,
+            "status": "available" if supported else "planned_only",
+        }
+        for name, supported in SUPPORTED_LAYERS.items()
+    ]
+
+
+def _layer_status_payload(config: AppConfig) -> dict:
+    selected = config.node.preferred_layer
+    selected_supported = SUPPORTED_LAYERS.get(selected, False) if selected else False
+    effective = selected or "layer4"
+    return {
+        "ok": True,
+        "selected_layer": selected,
+        "configured": bool(selected),
+        "supported": selected_supported if selected else SUPPORTED_LAYERS.get(effective, False),
+        "planned_only": bool(selected and not selected_supported),
+        "current_effective_layer": effective,
+        "available_layers": _layer_list_payload(),
+        "selected_at": config.node.preferred_layer_selected_at,
+    }
+
+
 def _registry_view(config: AppConfig, state: AppState, registry: PortRegistry) -> tuple[PortRegistry, list[str]]:
     computed = PortRegistry(owners=dict(registry.owners))
     issues: list[str] = []
@@ -993,6 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
+        node.preferred_layer = config.node.preferred_layer
+        node.preferred_layer_selected_at = config.node.preferred_layer_selected_at
         old_role = config.node.normalized_role
         config.node = node
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
@@ -1117,8 +1153,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload["ok"] else 1
 
     if args.command == "profile" and args.profile_command == "create":
-        if args.layer not in SUPPORTED_LAYERS:
-            parser.error(f"Unknown layer: {args.layer}")
+        try:
+            selected_layer = canonical_layer(args.layer)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
         existing = [item for item in config.profiles if item.name == args.name]
         if existing and not (args.force or args.update):
             print(json.dumps({"ok": False, "message": f"Profile '{args.name}' already exists. Use --force or --update."}, indent=2))
@@ -1130,7 +1169,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_host=args.target_host,
                 target_port=args.target_port,
                 role=canonical_role(args.role),
-                active_layer=args.layer,
+                active_layer=selected_layer,
                 candidates=_profile_candidates(args.candidate),
                 ports=ProfilePorts(
                     main_port=args.main_port,
@@ -1188,7 +1227,45 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "layer" and args.layer_command == "list":
-        print(json.dumps([{"name": name, "supported": supported} for name, supported in SUPPORTED_LAYERS.items()], indent=2))
+        print(json.dumps(_layer_list_payload(), indent=2))
+        return 0
+
+    if args.command == "layer" and args.layer_command == "select":
+        try:
+            selected_layer = canonical_layer(args.layer)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        config.node.preferred_layer = selected_layer
+        config.node.preferred_layer_selected_at = datetime.now(timezone.utc).isoformat()
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        supported = SUPPORTED_LAYERS[selected_layer]
+        payload = {
+            "ok": True,
+            "layer": selected_layer,
+            "supported": supported,
+            "planned_only": not supported,
+            "message": (
+                f"Layer '{selected_layer}' selected"
+                if supported
+                else f"Layer '{selected_layer}' is recognized but not implemented in v0.1. Preference recorded as planned-only."
+            ),
+        }
+        write_audit_log(
+            "select_layer",
+            "",
+            {
+                "layer": selected_layer,
+                "supported": supported,
+                "planned_only": not supported,
+            },
+            audit_path,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "layer" and args.layer_command == "status":
+        print(json.dumps(_layer_status_payload(config), indent=2))
         return 0
 
     if args.command == "adapter" and args.adapter_command == "list":
