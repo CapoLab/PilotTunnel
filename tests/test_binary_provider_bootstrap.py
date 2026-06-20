@@ -983,6 +983,113 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertEqual(results["backhaul"], "imported")
         self.assertEqual(set(results), set(all_binary_adapters()))
 
+    def test_binary_status_require_all_fails_when_any_required_binary_is_missing(self) -> None:
+        fixture_root, metadata = self._provider_fixture(("backhaul",))
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            code, output = self.run_cli(
+                self.base / "binary-status-missing",
+                "binary",
+                "status",
+                "--require-all",
+                "--manifest-file",
+                str(manifest_path),
+            )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertTrue(payload["blockers"])
+        self.assertIn("has not been imported", "\n".join(payload["blockers"]))
+
+    def test_binary_status_require_all_fails_on_checksum_mismatch(self) -> None:
+        fixture_root, metadata = self._provider_fixture()
+        root = self.base / "binary-status-checksum"
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            code, output = self.run_cli(
+                root,
+                "binary",
+                "download-all",
+                "--manifest-file",
+                str(manifest_path),
+                "--confirm",
+                "DOWNLOAD_ALL_BINARIES",
+            )
+        self.assertEqual(code, 0, msg=output)
+        backhaul_path = root / "work" / ".var" / "pilottunnel" / "bin" / binary_spec("backhaul").binary_name
+        backhaul_path.write_text("tampered", encoding="utf-8")
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "status",
+            "--require-all",
+            "--manifest-file",
+            str(manifest_path),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Checksum mismatch for adapter 'backhaul'", output)
+
+    def test_binary_status_require_all_fails_when_manifest_host_is_not_allowlisted(self) -> None:
+        fixture_root, metadata = self._provider_fixture()
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            code, output = self.run_cli(
+                self.base / "binary-status-remote-host",
+                "binary",
+                "status",
+                "--require-all",
+                "--manifest-url",
+                f"{base_url}/{manifest_path.name}",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("--allow-provider-host", output)
+
+    def test_binary_status_require_all_succeeds_only_when_all_required_binaries_are_verified(self) -> None:
+        fixture_root, metadata = self._provider_fixture()
+        root = self.base / "binary-status-complete"
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            code, output = self.run_cli(
+                root,
+                "binary",
+                "download-all",
+                "--manifest-file",
+                str(manifest_path),
+                "--confirm",
+                "DOWNLOAD_ALL_BINARIES",
+            )
+        self.assertEqual(code, 0, msg=output)
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "status",
+            "--require-all",
+            "--manifest-file",
+            str(manifest_path),
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(set(payload["verified_adapters"]), set(provider_required_adapters()))
+        results = {item["adapter"]: item for item in payload["results"]}
+        self.assertEqual(results["ssh_reverse"]["status"], "system_dependency")
+        self.assertEqual(results["wstunnel"]["status"], "not_required_v0_1")
+        self.assertEqual(results["udp2raw"]["status"], "not_required_v0_1")
+        self.assertFalse(payload["real_systemd_touched"])
+        self.assertFalse(payload["service_started"])
+        self.assertFalse(payload["firewall_touched"])
+        self.assertFalse(payload["routes_touched"])
+
     @patch("pilottunnel.binaries.verify_binary", return_value={"run_version_result": {"ran": False}})
     def test_binary_download_run_version_only_after_import(self, mock_verify_binary) -> None:
         fixture_root, metadata = self._provider_fixture(("backhaul",))
@@ -1029,6 +1136,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "backhaul",
                 "--transport",
                 "tcpmux",
+                "--allow-incomplete-binaries-for-tests-only",
             )
         finally:
             for listener in listeners:
@@ -1036,6 +1144,37 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         self.assertFalse((root / "config.json").exists())
         self.assertFalse((root / "staging").exists())
+
+    def test_bootstrap_plan_fails_before_profile_work_when_binary_coverage_is_incomplete(self) -> None:
+        root = self.base / "bootstrap-plan-missing-binaries"
+        fixture_root, metadata = self._provider_fixture(("backhaul",))
+        with static_http_server(fixture_root) as base_url:
+            manifest_path = self._write_manifest(
+                fixture_root,
+                self._supported_manifest_entries(base_url, metadata),
+            )
+            ports, listeners = self._profile_ports()
+            try:
+                code, output = self.run_cli(
+                    root,
+                    "bootstrap",
+                    "plan",
+                    "--role",
+                    "controller",
+                    "--create-profile",
+                    *self._controller_profile_args("smoke-l4-001", ports),
+                    "--adapter",
+                    "backhaul",
+                    "--transport",
+                    "tcpmux",
+                    "--manifest-file",
+                    str(manifest_path),
+                )
+            finally:
+                for listener in listeners:
+                    listener.close()
+        self.assertEqual(code, 1)
+        self.assertIn("Binary readiness is incomplete", output)
 
     def test_bootstrap_plan_with_auto_ports_is_read_only(self) -> None:
         root = self.base / "bootstrap-plan-auto"
@@ -1051,6 +1190,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "backhaul",
             "--transport",
             "tcpmux",
+            "--allow-incomplete-binaries-for-tests-only",
         )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
@@ -1081,6 +1221,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "backhaul",
             "--transport",
             "tcpmux",
+            "--allow-incomplete-binaries-for-tests-only",
             "--confirm",
             "BOOTSTRAP_APPLY",
         )
@@ -1105,6 +1246,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "backhaul",
             "--transport",
             "tcpmux",
+            "--allow-incomplete-binaries-for-tests-only",
             "--confirm",
             "BOOTSTRAP_APPLY",
         )
@@ -1185,6 +1327,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "backhaul",
                 "--transport",
                 "tcpmux",
+                "--allow-incomplete-binaries-for-tests-only",
             )
         finally:
             for listener in listeners:
@@ -1211,6 +1354,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "tcpmux",
                 "--bundle-output",
                 str(bundle_path),
+                "--allow-incomplete-binaries-for-tests-only",
                 "--confirm",
                 "BOOTSTRAP_APPLY",
             )
@@ -1238,6 +1382,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "worker",
                 "--create-profile",
                 *self._controller_profile_args("smoke-l4-001", ports),
+                "--allow-incomplete-binaries-for-tests-only",
                 "--confirm",
                 "BOOTSTRAP_APPLY",
             )
@@ -1276,6 +1421,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "worker",
                 "--bundle-file",
                 str(bundle_path),
+                "--allow-incomplete-binaries-for-tests-only",
                 "--confirm",
                 "BOOTSTRAP_APPLY",
             )
@@ -1286,6 +1432,52 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["bundle_import"]["profile"], "smoke-l4-001")
         self.assertFalse(payload["real_systemd_touched"])
+
+    def test_worker_bootstrap_requires_full_binary_coverage_before_bundle_import(self) -> None:
+        controller_root = self.base / "controller-gated"
+        worker_root = self.base / "worker-gated"
+        bundle_path = self.base / "gated-bundle.json"
+        fixture_root, metadata = self._provider_fixture(("backhaul",))
+        ports, listeners = self._profile_ports()
+        try:
+            self._init_and_create_profile(controller_root, "smoke-l4-001", ports)
+            export_code, export_output = self.run_cli(
+                controller_root,
+                "bundle",
+                "export-worker",
+                "--profile",
+                "smoke-l4-001",
+                "--adapter",
+                "backhaul",
+                "--transport",
+                "tcpmux",
+                "--output",
+                str(bundle_path),
+            )
+            self.assertEqual(export_code, 0, msg=export_output)
+            with static_http_server(fixture_root) as base_url:
+                manifest_path = self._write_manifest(
+                    fixture_root,
+                    self._supported_manifest_entries(base_url, metadata),
+                )
+                code, output = self.run_cli(
+                    worker_root,
+                    "bootstrap",
+                    "apply",
+                    "--role",
+                    "worker",
+                    "--bundle-file",
+                    str(bundle_path),
+                    "--manifest-file",
+                    str(manifest_path),
+                    "--confirm",
+                    "BOOTSTRAP_APPLY",
+                )
+        finally:
+            for listener in listeners:
+                listener.close()
+        self.assertEqual(code, 1)
+        self.assertIn("Binary readiness is incomplete", output)
 
     def test_worker_bootstrap_downloads_binaries_from_provider(self) -> None:
         controller_root = self.base / "controller-download"
@@ -1350,6 +1542,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 "controller",
                 "--create-profile",
                 *self._controller_profile_args("smoke-l4-001", ports),
+                "--allow-incomplete-binaries-for-tests-only",
                 "--confirm",
                 "BOOTSTRAP_APPLY",
             )

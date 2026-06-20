@@ -13,6 +13,7 @@ from .adapters.base import AdapterContext
 from .audit import write_audit_log
 from .backup import create_backup
 from .binary_provider import download_all_binaries, inspect_manifest
+from .binary_readiness import binary_readiness_failure_message, build_binary_readiness_report, remember_binary_provider_source
 from .bundles import build_worker_bundle, import_bundle
 from .config import AppConfig, Candidate, Profile, ProfilePorts, ProfileSafety, build_node_settings, build_worker_stub, canonical_role, get_profile, validate_profile_name
 from .node_role import require_controller, require_worker
@@ -50,7 +51,18 @@ def build_bootstrap_plan(
     bundle_file: Path | None,
     backup_root: Path | None,
     requested_platform: str | None,
+    allow_incomplete_binaries_for_tests_only: bool,
 ) -> dict[str, Any]:
+    binary_readiness = _ensure_binary_first_ready(
+        state=state,
+        switch_paths=switch_paths,
+        manifest_url=manifest_url,
+        manifest_file=manifest_file,
+        allow_provider_host=allow_provider_host,
+        requested_platform=requested_platform,
+        allow_incomplete_binaries_for_tests_only=allow_incomplete_binaries_for_tests_only,
+        required=bool(create_profile_flag or update_profile_flag or bundle_output or bundle_file or (profile_name and adapter_name and transport)),
+    )
     profile = _resolve_profile(config, profile_name)
     node_role = _resolved_role(config, role_value)
     manifest = None
@@ -125,6 +137,7 @@ def build_bootstrap_plan(
         "selected_ports": selected_ports or {},
         "profile_preview": profile_preview,
         "manifest": manifest,
+        "binary_readiness": binary_readiness,
         "bundle_output": str(bundle_output) if bundle_output else "",
         "bundle_file": str(bundle_file) if bundle_file else "",
         "backup_root": str(backup_root.resolve()) if backup_root else "",
@@ -169,9 +182,45 @@ def apply_bootstrap(
     confirm: str | None,
     force: bool,
     run_version: bool,
+    allow_incomplete_binaries_for_tests_only: bool,
 ) -> dict[str, Any]:
     if confirm != "BOOTSTRAP_APPLY":
         return _failure("Refusing bootstrap apply without --confirm BOOTSTRAP_APPLY")
+
+    binaries_required = bool(create_profile_flag or update_profile_flag or bundle_output or bundle_file or (profile_name and adapter_name and transport))
+    if binaries_required and not allow_incomplete_binaries_for_tests_only:
+        if not (manifest_url or manifest_file):
+            raise ValueError(
+                "Binary-first bootstrap requires --manifest-url or --manifest-file unless --allow-incomplete-binaries-for-tests-only is set"
+            )
+        download_payload = download_all_binaries(
+            manifest_url=manifest_url,
+            manifest_file=manifest_file,
+            allow_provider_host=allow_provider_host,
+            cache_root=switch_paths.work_dir,
+            state=state,
+            confirm="DOWNLOAD_ALL_BINARIES",
+            force=force,
+            run_version=run_version,
+            audit_path=switch_paths.audit_path,
+            requested_platform=requested_platform,
+        )
+        if not download_payload["ok"]:
+            raise ValueError(_bootstrap_binary_failure_message(download_payload))
+        binary_readiness = build_binary_readiness_report(
+            cache_root=switch_paths.work_dir,
+            state=state,
+            manifest_url=manifest_url,
+            manifest_file=manifest_file,
+            allow_provider_host=allow_provider_host,
+            requested_platform=requested_platform,
+            require_all=True,
+        )
+        if not binary_readiness["ok"]:
+            raise ValueError(binary_readiness_failure_message(binary_readiness))
+    else:
+        download_payload = None
+        binary_readiness = None
 
     node_role = _initialize_or_validate_role(config, role_value, switch_paths.audit_path)
     if create_profile_flag or update_profile_flag:
@@ -201,22 +250,28 @@ def apply_bootstrap(
             confirm="BACKUP_CREATE",
         )
 
-    download_payload = None
     if manifest_url or manifest_file:
-        download_payload = download_all_binaries(
+        if download_payload is None:
+            download_payload = download_all_binaries(
+                manifest_url=manifest_url,
+                manifest_file=manifest_file,
+                allow_provider_host=allow_provider_host,
+                cache_root=switch_paths.work_dir,
+                state=state,
+                confirm="DOWNLOAD_ALL_BINARIES",
+                force=force,
+                run_version=run_version,
+                audit_path=switch_paths.audit_path,
+                requested_platform=requested_platform,
+            )
+        if not download_payload["ok"]:
+            raise ValueError(_bootstrap_binary_failure_message(download_payload))
+        remember_binary_provider_source(
+            config,
             manifest_url=manifest_url,
             manifest_file=manifest_file,
             allow_provider_host=allow_provider_host,
-            cache_root=switch_paths.work_dir,
-            state=state,
-            confirm="DOWNLOAD_ALL_BINARIES",
-            force=force,
-            run_version=run_version,
-            audit_path=switch_paths.audit_path,
-            requested_platform=requested_platform,
         )
-        if not download_payload["ok"]:
-            raise ValueError(f"Bootstrap binary preparation failed for adapters {download_payload['failed_adapters']}")
 
     profile = existing_profile
     profile_created = False
@@ -311,6 +366,7 @@ def apply_bootstrap(
         ),
         "backup": backup_payload,
         "binary_download_all": download_payload,
+        "binary_readiness": binary_readiness,
         "staged_switch": staged_payload,
         "bundle_import": bundle_payload,
         "bundle_export": export_payload,
@@ -663,6 +719,37 @@ def _save_runtime(
     save_registry(registry, registry_path)
 
 
+def _ensure_binary_first_ready(
+    *,
+    state: AppState,
+    switch_paths: SwitchPaths,
+    manifest_url: str | None,
+    manifest_file: Path | None,
+    allow_provider_host: str | None,
+    requested_platform: str | None,
+    allow_incomplete_binaries_for_tests_only: bool,
+    required: bool,
+) -> dict[str, Any] | None:
+    if not required or allow_incomplete_binaries_for_tests_only:
+        return None
+    if not (manifest_url or manifest_file):
+        raise ValueError(
+            "Binary-first bootstrap requires --manifest-url or --manifest-file unless --allow-incomplete-binaries-for-tests-only is set"
+        )
+    payload = build_binary_readiness_report(
+        cache_root=switch_paths.work_dir,
+        state=state,
+        manifest_url=manifest_url,
+        manifest_file=manifest_file,
+        allow_provider_host=allow_provider_host,
+        requested_platform=requested_platform,
+        require_all=True,
+    )
+    if not payload["ok"]:
+        raise ValueError(binary_readiness_failure_message(payload))
+    return payload
+
+
 def _failure(message: str) -> dict[str, Any]:
     return {
         "ok": False,
@@ -673,6 +760,17 @@ def _failure(message: str) -> dict[str, Any]:
         "firewall_touched": False,
         "routes_touched": False,
     }
+
+
+def _bootstrap_binary_failure_message(payload: dict[str, Any]) -> str:
+    readiness = payload.get("binary_readiness")
+    if isinstance(readiness, dict):
+        return binary_readiness_failure_message(readiness)
+    message = payload.get("message")
+    if isinstance(message, str) and message:
+        return message
+    failed_adapters = payload.get("failed_adapters") or []
+    return f"Bootstrap binary preparation failed for adapters {failed_adapters}"
 
 
 def _resolved_profile_ports(

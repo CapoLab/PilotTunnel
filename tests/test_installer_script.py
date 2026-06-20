@@ -24,6 +24,10 @@ class InstallerScriptTests(unittest.TestCase):
             "--repo-url",
             "--ref",
             "--install-dir",
+            "--with-binaries",
+            "--manifest-url",
+            "--manifest-file",
+            "--allow-provider-host",
             "--confirm",
             "INSTALL_PILOTTUNNEL",
         ):

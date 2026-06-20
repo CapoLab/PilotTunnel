@@ -46,12 +46,13 @@ python -m pilottunnel.cli version
 
 - `scripts/install.sh` is a Linux-focused installer/bootstrap helper for non-production smoke testing.
 - It requires an explicit role, supports dry-run planning, and requires exact confirmation for apply mode.
+- It supports a binary-first workflow with `--with-binaries` so all required v0.1 Layer 4 adapter binaries are prepared before bootstrap or profile work continues.
 - It clones or updates the requested repo ref into a PilotTunnel-owned install directory and runs only safe setup checks.
 - By default it does not write to `/etc/systemd/system`, does not call daemon reload, does not start services, does not modify firewall or routes, and does not execute tunnel adapter binaries.
 
 ```bash
-sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --dry-run
-sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --confirm INSTALL_PILOTTUNNEL
+sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --dry-run
+sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm INSTALL_PILOTTUNNEL
 ```
 
 ## Dry-Run Safety Model
@@ -206,6 +207,7 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - `systemd status` inspects only PilotTunnel-managed service names discovered from staged unit files.
 - Remote provider hosts must be allowlisted with `--allow-provider-host`.
 - `binary download-all` prepares every required Layer 4 provider-managed adapter in one run.
+- `binary status --require-all --json` fails until every required v0.1 Layer 4 adapter binary is imported and verified from the chosen manifest.
 - `binary provider generate-manifest` scans a local provider source tree and writes a manifest without downloading anything.
 - `binary provider verify-manifest` validates schema, URLs, checksums, and required adapter coverage without changing the host.
 - `bootstrap command` prints safe copy-paste prepare commands for controller and worker roles.
@@ -234,6 +236,8 @@ python -m pilottunnel.cli binary provider inspect --manifest-file <MANIFEST_FILE
 python -m pilottunnel.cli binary download --adapter backhaul --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_BINARY
 python -m pilottunnel.cli binary download-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_ALL_BINARIES
 python -m pilottunnel.cli binary download-all --manifest-file <MANIFEST_FILE> --confirm DOWNLOAD_ALL_BINARIES
+python -m pilottunnel.cli binary status --require-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --json
+python -m pilottunnel.cli binary status --require-all --manifest-file <MANIFEST_FILE> --json
 python -m pilottunnel.cli bootstrap command --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --bundle-file <BUNDLE_FILE>
 python -m pilottunnel.cli bootstrap plan --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
 python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --confirm BOOTSTRAP_APPLY

@@ -11,20 +11,29 @@ REF="main"
 INSTALL_DIR=""
 DRY_RUN=0
 CONFIRM_VALUE=""
+MANIFEST_URL=""
+MANIFEST_FILE=""
+ALLOW_PROVIDER_HOST=""
+WITH_BINARIES=0
 
 usage() {
   cat <<'EOF'
 PilotTunnel safe Linux installer/bootstrap
 
 Usage:
-  bash scripts/install.sh --role <controller|worker> --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --dry-run
-  bash scripts/install.sh --role <controller|worker> --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --confirm INSTALL_PILOTTUNNEL
+  bash scripts/install.sh --role <controller|worker> --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --dry-run
+  bash scripts/install.sh --role <controller|worker> --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm INSTALL_PILOTTUNNEL
 
 Options:
   --role <ROLE>           Required. Use controller or worker.
   --repo-url <REPO_URL>   Required. Supports HTTPS, SSH, or a local path.
   --ref <REF>             Optional. Defaults to main.
   --install-dir <DIR>     Required. PilotTunnel-owned base directory.
+  --with-binaries         Require complete v0.1 Layer 4 binary coverage before setup continues.
+  --manifest-url <URL>    Allowlisted provider manifest URL for binary-first bootstrap.
+  --manifest-file <FILE>  Local provider manifest file for binary-first bootstrap.
+  --allow-provider-host <HOST>
+                          Required for remote provider manifests and remote binary artifacts.
   --dry-run               Print the safe installation plan without writing files.
   --confirm <TOKEN>       Required for apply mode. Must be INSTALL_PILOTTUNNEL.
   --help                  Show this help text.
@@ -92,6 +101,25 @@ parse_args() {
         INSTALL_DIR="$2"
         shift 2
         ;;
+      --with-binaries)
+        WITH_BINARIES=1
+        shift
+        ;;
+      --manifest-url)
+        [[ $# -ge 2 ]] || fail "--manifest-url requires a value"
+        MANIFEST_URL="$2"
+        shift 2
+        ;;
+      --manifest-file)
+        [[ $# -ge 2 ]] || fail "--manifest-file requires a value"
+        MANIFEST_FILE="$2"
+        shift 2
+        ;;
+      --allow-provider-host)
+        [[ $# -ge 2 ]] || fail "--allow-provider-host requires a value"
+        ALLOW_PROVIDER_HOST="$2"
+        shift 2
+        ;;
       --dry-run)
         DRY_RUN=1
         shift
@@ -117,6 +145,12 @@ validate_args() {
   [[ "$ROLE" == "controller" || "$ROLE" == "worker" ]] || fail "--role must be controller or worker"
   [[ -n "$REPO_URL" ]] || fail "--repo-url is required"
   [[ -n "$INSTALL_DIR" ]] || fail "--install-dir is required"
+  if [[ -n "$MANIFEST_URL" && -n "$MANIFEST_FILE" ]]; then
+    fail "Use exactly one of --manifest-url or --manifest-file."
+  fi
+  if [[ $WITH_BINARIES -eq 1 && -z "$MANIFEST_URL" && -z "$MANIFEST_FILE" ]]; then
+    fail "--with-binaries requires --manifest-url or --manifest-file"
+  fi
   if [[ $DRY_RUN -eq 1 && -n "$CONFIRM_VALUE" ]]; then
     fail "Use either --dry-run or --confirm ${CONFIRM_TOKEN}, not both."
   fi
@@ -210,6 +244,17 @@ pt_cli() {
     "$@"
 }
 
+binary_first_args() {
+  if [[ -n "$MANIFEST_URL" ]]; then
+    printf '%s\n' "--manifest-url" "$MANIFEST_URL"
+  elif [[ -n "$MANIFEST_FILE" ]]; then
+    printf '%s\n' "--manifest-file" "$MANIFEST_FILE"
+  fi
+  if [[ -n "$ALLOW_PROVIDER_HOST" ]]; then
+    printf '%s\n' "--allow-provider-host" "$ALLOW_PROVIDER_HOST"
+  fi
+}
+
 config_profile_count() {
   "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
 import json
@@ -258,6 +303,10 @@ run_safe_checks() {
     cd "$REPO_DIR"
     "$PYTHON_BIN" -m pilottunnel.cli version
     "$PYTHON_BIN" -m compileall pilottunnel
+    if [[ $WITH_BINARIES -eq 1 ]]; then
+      mapfile -t binary_args < <(binary_first_args)
+      pt_cli binary status --require-all "${binary_args[@]}" --json
+    fi
     maybe_init_role
     pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT" --json
     local profile_count
@@ -271,6 +320,37 @@ run_safe_checks() {
   )
 }
 
+prepare_binaries() {
+  if [[ $WITH_BINARIES -eq 0 ]]; then
+    return
+  fi
+  mapfile -t binary_args < <(binary_first_args)
+  (
+    cd "$REPO_DIR"
+    pt_cli binary download-all "${binary_args[@]}" --confirm DOWNLOAD_ALL_BINARIES
+    pt_cli binary status --require-all "${binary_args[@]}" --json
+  )
+}
+
+dry_run_binary_status() {
+  if [[ $WITH_BINARIES -eq 0 ]]; then
+    return
+  fi
+  mapfile -t binary_args < <(binary_first_args)
+  (
+    cd "$SOURCE_REPO_ROOT"
+    "$PYTHON_BIN" -m pilottunnel.cli \
+      --config "$CONFIG_FILE" \
+      --state "$STATE_FILE" \
+      --registry "$REGISTRY_FILE" \
+      --audit-log "$AUDIT_LOG" \
+      --lock-dir "$LOCK_DIR" \
+      --work-dir "$WORK_DIR" \
+      --staging-root "$STAGING_ROOT" \
+      binary status --require-all "${binary_args[@]}" --json || true
+  )
+}
+
 print_plan() {
   local redacted_repo
   redacted_repo="$(redact_repo_url "$REPO_URL")"
@@ -281,6 +361,7 @@ PilotTunnel installer plan
   repo_url: $redacted_repo
   ref: $REF
   install_dir: $BASE_DIR
+  with_binaries: $( [[ $WITH_BINARIES -eq 1 ]] && printf '%s' 'true' || printf '%s' 'false' )
   repo_dir: $REPO_DIR
   config_file: $CONFIG_FILE
   runtime_dir: $RUNTIME_DIR
@@ -304,6 +385,7 @@ EOF
 }
 
 main() {
+  SOURCE_REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
   parse_args "$@"
   validate_args
   require_tools
@@ -311,12 +393,14 @@ main() {
   prepare_layout
   print_plan
   if [[ $DRY_RUN -eq 1 ]]; then
+    dry_run_binary_status
     exit 0
   fi
 
   check_apply_permissions
   ensure_layout_dirs
   sync_repo
+  prepare_binaries
   run_safe_checks
   info "PilotTunnel installer apply completed without starting services or modifying systemd targets."
 }

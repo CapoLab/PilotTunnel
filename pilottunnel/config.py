@@ -69,6 +69,7 @@ class ProfileSafety:
 class BinaryResolutionSettings:
     managed_install_dir: str = ""
     provider_manifest: str = ""
+    provider_allow_host: str = ""
     allow_system_path: bool = False
     prefer_managed_install: bool = True
 

@@ -357,6 +357,21 @@ def download_all_binaries(
         "routes_touched": False,
         **attempt,
     }
+    from .binary_readiness import build_binary_readiness_report
+
+    readiness = build_binary_readiness_report(
+        cache_root=cache_root,
+        state=state,
+        manifest_url=manifest_url,
+        manifest_file=manifest_file,
+        allow_provider_host=allow_provider_host,
+        requested_platform=platform_id,
+        require_all=True,
+    )
+    payload["binary_readiness"] = readiness
+    if not readiness["ok"]:
+        payload["ok"] = False
+        payload["failed_adapters"] = sorted(set(payload["failed_adapters"]) | set(readiness["missing_adapters"]))
     _audit("binary-download-all", "all", payload, audit_path)
     return payload
 
@@ -562,7 +577,9 @@ def validate_manifest_url(url: str, allow_provider_host: str | None, *, require_
     if require_allowlisted_remote_host and parsed.hostname not in LOCAL_HOSTS and not allow_provider_host:
         raise ValueError("Remote binary provider usage requires --allow-provider-host")
     if allow_provider_host and parsed.hostname.lower() != allow_provider_host.lower():
-        raise ValueError(f"Manifest URL host '{parsed.hostname}' does not match allowlisted host '{allow_provider_host}'")
+        raise ValueError(
+            f"Manifest URL host '{parsed.hostname}' does not match allowlisted host --allow-provider-host '{allow_provider_host}'"
+        )
     return url
 
 
@@ -580,7 +597,9 @@ def _validated_url(value: Any, allow_provider_host: str | None, *, require_allow
         raise ValueError("Binary URL host is required")
     if allow_provider_host:
         if parsed.hostname.lower() != allow_provider_host.lower():
-            raise ValueError(f"Binary URL host '{parsed.hostname}' does not match allowlisted host '{allow_provider_host}'")
+            raise ValueError(
+                f"Binary URL host '{parsed.hostname}' does not match allowlisted host --allow-provider-host '{allow_provider_host}'"
+            )
     elif require_allowlisted_remote_host and parsed.hostname not in LOCAL_HOSTS:
         raise ValueError("Remote binary URLs require --allow-provider-host")
     if ".." in parsed.path.split("/"):

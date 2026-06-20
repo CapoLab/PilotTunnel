@@ -15,6 +15,7 @@ from .__version__ import version_payload
 from .audit import write_audit_log
 from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
 from .binary_provider import download_all_binaries, download_binary, generate_manifest, inspect_manifest, verify_manifest_file
+from .binary_readiness import build_binary_readiness_report, remember_binary_provider_source
 from .binary_install import apply_binary_install, build_binary_install_plan, list_binary_installations
 from .bootstrap import apply_bootstrap, build_bootstrap_command, build_bootstrap_plan
 from .bundles import build_worker_bundle, import_bundle, inspect_bundle
@@ -472,6 +473,11 @@ def build_parser() -> argparse.ArgumentParser:
     binary_import.add_argument("--force", action="store_true")
     binary_status = binary_subparsers.add_parser("status")
     binary_status.add_argument("--adapter")
+    binary_status.add_argument("--require-all", action="store_true")
+    binary_status.add_argument("--manifest-url")
+    binary_status.add_argument("--manifest-file", type=Path)
+    binary_status.add_argument("--allow-provider-host")
+    binary_status.add_argument("--platform", default="auto")
     binary_verify = binary_subparsers.add_parser("verify")
     binary_verify.add_argument("--adapter", required=True)
     binary_verify.add_argument("--run-version", action="store_true")
@@ -607,6 +613,7 @@ def build_parser() -> argparse.ArgumentParser:
         bootstrap_parser.add_argument("--backup-root", type=Path, default=None)
         bootstrap_parser.add_argument("--platform", default="auto")
         bootstrap_parser.add_argument("--force", action="store_true")
+        bootstrap_parser.add_argument("--allow-incomplete-binaries-for-tests-only", action="store_true", help=argparse.SUPPRESS)
         bootstrap_parser.add_argument("--json", action="store_true")
     bootstrap_apply.add_argument("--confirm")
     bootstrap_apply.add_argument("--run-version", action="store_true")
@@ -2125,6 +2132,7 @@ def main(argv: list[str] | None = None) -> int:
                 bundle_file=args.bundle_file,
                 backup_root=args.backup_root,
                 requested_platform=args.platform,
+                allow_incomplete_binaries_for_tests_only=args.allow_incomplete_binaries_for_tests_only,
             )
         except (KeyError, ValueError, PermissionError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
@@ -2165,6 +2173,7 @@ def main(argv: list[str] | None = None) -> int:
                 confirm=args.confirm,
                 force=args.force,
                 run_version=args.run_version,
+                allow_incomplete_binaries_for_tests_only=args.allow_incomplete_binaries_for_tests_only,
             )
         except (KeyError, ValueError, PermissionError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
@@ -2343,6 +2352,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "binary" and args.binary_command == "status":
+        if args.require_all:
+            try:
+                payload = build_binary_readiness_report(
+                    cache_root=switch_paths.work_dir,
+                    state=state,
+                    manifest_url=args.manifest_url,
+                    manifest_file=args.manifest_file,
+                    allow_provider_host=args.allow_provider_host,
+                    requested_platform=args.platform,
+                    require_all=True,
+                )
+            except (KeyError, ValueError) as exc:
+                print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+                return 1
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
         if args.adapter:
             try:
                 print(json.dumps(get_binary_plan(args.adapter, switch_paths.work_dir, state), indent=2))
@@ -2386,6 +2411,13 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
+        if payload["ok"]:
+            remember_binary_provider_source(
+                config,
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+            )
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
@@ -2407,6 +2439,13 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
+        if payload["ok"]:
+            remember_binary_provider_source(
+                config,
+                manifest_url=args.manifest_url,
+                manifest_file=args.manifest_file,
+                allow_provider_host=args.allow_provider_host,
+            )
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
