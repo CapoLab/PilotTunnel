@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import posixpath
+import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,12 @@ from .state import AppState
 
 SCHEMA = "pilottunnel-binary-provider-v1"
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
+GITHUB_PROVIDER_HOSTS = (
+    "github.com",
+    "github-releases.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,7 @@ class ProviderBinary:
     binary_name: str
     version: str
     platform: str
+    filename: str
     url: str
     sha256: str
     size_bytes: int
@@ -51,13 +59,14 @@ def inspect_manifest(
     *,
     manifest_url: str | None = None,
     manifest_file: Path | None = None,
-    allow_provider_host: str | None = None,
+    allow_provider_host: str | list[str] | None = None,
     requested_platform: str | None = None,
 ) -> dict[str, Any]:
+    normalized_allow_provider_host = canonical_provider_host_value(allow_provider_host)
     manifest = load_manifest(
         manifest_url=manifest_url,
         manifest_file=manifest_file,
-        allow_provider_host=allow_provider_host,
+        allow_provider_host=normalized_allow_provider_host,
     )
     platform_id = resolve_platform_id(requested_platform)
     by_adapter = [entry_to_dict(entry) for entry in manifest.binaries if entry.platform == platform_id]
@@ -68,7 +77,8 @@ def inspect_manifest(
         "generated_at": manifest.generated_at,
         "source": manifest.source,
         "platform": platform_id,
-        "allow_provider_host": allow_provider_host or "",
+        "allow_provider_host": normalized_allow_provider_host or "",
+        "allow_provider_hosts": list(normalize_provider_hosts(normalized_allow_provider_host)),
         "binaries": by_adapter,
         "required_provider_adapters": list(provider_required_adapters()),
         "downloads_performed": False,
@@ -85,12 +95,13 @@ def generate_manifest(
     base_url: str,
     source_dir: Path,
     output_path: Path,
+    versions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     validated_provider = _validated_text(provider_name, "provider")
     validated_base_url = _validated_generation_base_url(base_url)
     source_root = _validated_source_dir(source_dir)
     validated_output = _validated_output_path(output_path)
-    entries = _manifest_entries_from_source(source_root, validated_base_url)
+    entries = _manifest_entries_from_source(source_root, validated_base_url, versions=versions)
     if not entries:
         raise ValueError("Source directory does not contain any supported provider binaries")
 
@@ -116,6 +127,125 @@ def generate_manifest(
         "service_started": False,
         "firewall_touched": False,
         "routes_touched": False,
+    }
+
+
+def build_provider_release_plan(
+    *,
+    source_dir: Path,
+    provider_name: str,
+    repo_slug: str,
+    release_tag: str,
+    output_dir: Path,
+    version_overrides: list[str],
+) -> dict[str, Any]:
+    validated_provider = _validated_text(provider_name, "provider")
+    validated_repo_slug = _validated_repo_slug(repo_slug)
+    validated_release_tag = _validated_release_tag(release_tag)
+    resolved_output_dir = _validated_output_dir(output_dir)
+    source_root = _validated_source_dir(source_dir)
+    versions = _parse_version_overrides(version_overrides)
+    release_base_url = _github_release_base_url(validated_repo_slug, validated_release_tag)
+    entries, copies = _release_entries_from_source(
+        source_root=source_root,
+        release_base_url=release_base_url,
+        versions=versions,
+        output_dir=resolved_output_dir,
+    )
+    if not entries:
+        raise ValueError("Source directory does not contain any supported provider binaries")
+    platforms = tuple(sorted({entry.platform for entry in entries}))
+    missing_required = _missing_required_entries(
+        tuple(entries),
+        required_platforms=platforms,
+        required_adapters=provider_required_adapters(),
+    )
+    manifest_path = resolved_output_dir / "provider-manifest.json"
+    return {
+        "ok": not missing_required,
+        "action": "binary-provider-release-plan",
+        "provider": validated_provider,
+        "repo_slug": validated_repo_slug,
+        "release_tag": validated_release_tag,
+        "release_base_url": release_base_url,
+        "release_dir": str(resolved_output_dir),
+        "manifest_output": str(manifest_path),
+        "recommended_allow_provider_hosts": list(_recommended_provider_hosts(release_base_url)),
+        "binaries": [entry_to_dict(entry) for entry in entries],
+        "asset_files": copies,
+        "missing_required": missing_required,
+        "main_repo_remains_source_only": True,
+        "binary_files_committed_to_main_repo": False,
+        "downloads_performed": False,
+        "real_systemd_touched": False,
+        "service_started": False,
+        "firewall_touched": False,
+        "routes_touched": False,
+    }
+
+
+def write_provider_release_assets(
+    *,
+    source_dir: Path,
+    provider_name: str,
+    repo_slug: str,
+    release_tag: str,
+    output_dir: Path,
+    version_overrides: list[str],
+    confirm: str | None,
+    force: bool,
+) -> dict[str, Any]:
+    plan = build_provider_release_plan(
+        source_dir=source_dir,
+        provider_name=provider_name,
+        repo_slug=repo_slug,
+        release_tag=release_tag,
+        output_dir=output_dir,
+        version_overrides=version_overrides,
+    )
+    if confirm != "PREPARE_PROVIDER_RELEASE_ASSETS":
+        return {
+            **plan,
+            "ok": False,
+            "message": "Refusing provider release asset preparation without --confirm PREPARE_PROVIDER_RELEASE_ASSETS",
+            "files_written": [],
+        }
+    if not plan["ok"]:
+        return {
+            **plan,
+            "message": "Provider release assets are incomplete",
+            "files_written": [],
+        }
+
+    manifest_path = Path(plan["manifest_output"])
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    written_files: list[str] = []
+    manifest_entries = plan["binaries"]
+    asset_files = plan["asset_files"]
+    for item in asset_files:
+        source_path = Path(item["source_path"])
+        output_path = Path(item["output_path"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            if not force and _sha256_file(output_path) != _sha256_file(source_path):
+                raise ValueError(f"Release asset already exists with different content: {output_path.name}")
+        if not output_path.exists() or force:
+            shutil.copy2(source_path, output_path)
+        written_files.append(str(output_path))
+    manifest_payload = {
+        "schema": SCHEMA,
+        "provider": plan["provider"],
+        "generated_at": _timestamp(),
+        "binaries": manifest_entries,
+    }
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True), encoding="utf-8")
+    written_files.append(str(manifest_path))
+    return {
+        **plan,
+        "ok": True,
+        "action": "binary-provider-release-assets",
+        "files_written": written_files,
+        "force": force,
     }
 
 
@@ -163,7 +293,7 @@ def download_binary(
     adapter: str,
     manifest_url: str | None,
     manifest_file: Path | None,
-    allow_provider_host: str | None,
+    allow_provider_host: str | list[str] | None,
     cache_root: Path,
     state: AppState,
     confirm: str | None,
@@ -178,7 +308,7 @@ def download_binary(
         "platform": platform_id,
         "manifest_url": manifest_url or "",
         "manifest_file": str(manifest_file) if manifest_file else "",
-        "allow_provider_host": allow_provider_host or "",
+        "allow_provider_host": canonical_provider_host_value(allow_provider_host) or "",
         "confirm": confirm or "",
         "force": force,
         "run_version": run_version,
@@ -198,7 +328,8 @@ def download_binary(
         return payload
 
     try:
-        manifest = load_manifest(manifest_url=manifest_url, manifest_file=manifest_file, allow_provider_host=allow_provider_host)
+        normalized_allow_provider_host = canonical_provider_host_value(allow_provider_host)
+        manifest = load_manifest(manifest_url=manifest_url, manifest_file=manifest_file, allow_provider_host=normalized_allow_provider_host)
         binary = select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id)
         payload = _download_and_import(
             entry=binary,
@@ -207,6 +338,7 @@ def download_binary(
             state=state,
             force=force,
             run_version=run_version,
+            allow_provider_host=normalized_allow_provider_host,
         )
     except Exception as exc:
         payload = {
@@ -228,7 +360,7 @@ def download_all_binaries(
     *,
     manifest_url: str | None,
     manifest_file: Path | None,
-    allow_provider_host: str | None,
+    allow_provider_host: str | list[str] | None,
     cache_root: Path,
     state: AppState,
     confirm: str | None,
@@ -242,7 +374,7 @@ def download_all_binaries(
         "platform": platform_id,
         "manifest_url": manifest_url or "",
         "manifest_file": str(manifest_file) if manifest_file else "",
-        "allow_provider_host": allow_provider_host or "",
+        "allow_provider_host": canonical_provider_host_value(allow_provider_host) or "",
         "confirm": confirm or "",
         "force": force,
         "run_version": run_version,
@@ -262,7 +394,8 @@ def download_all_binaries(
         return payload
 
     try:
-        manifest = load_manifest(manifest_url=manifest_url, manifest_file=manifest_file, allow_provider_host=allow_provider_host)
+        normalized_allow_provider_host = canonical_provider_host_value(allow_provider_host)
+        manifest = load_manifest(manifest_url=manifest_url, manifest_file=manifest_file, allow_provider_host=normalized_allow_provider_host)
     except Exception as exc:
         payload = {
             "ok": False,
@@ -336,6 +469,7 @@ def download_all_binaries(
                 state=state,
                 force=force,
                 run_version=run_version,
+                allow_provider_host=normalized_allow_provider_host,
             )
             payload["result"] = "downloaded"
             results.append(payload)
@@ -364,7 +498,7 @@ def download_all_binaries(
         state=state,
         manifest_url=manifest_url,
         manifest_file=manifest_file,
-        allow_provider_host=allow_provider_host,
+        allow_provider_host=normalized_allow_provider_host,
         requested_platform=platform_id,
         require_all=True,
     )
@@ -380,18 +514,19 @@ def load_manifest(
     *,
     manifest_url: str | None = None,
     manifest_file: Path | None = None,
-    allow_provider_host: str | None = None,
+    allow_provider_host: str | list[str] | None = None,
     require_allowlisted_remote_host: bool = True,
 ) -> ProviderManifest:
+    normalized_allow_provider_host = canonical_provider_host_value(allow_provider_host)
     if bool(manifest_url) == bool(manifest_file):
         raise ValueError("Use exactly one of --manifest-url or --manifest-file")
     if manifest_url:
-        manifest_source = validate_manifest_url(manifest_url, allow_provider_host, require_allowlisted_remote_host=require_allowlisted_remote_host)
-        payload = _read_json_url(manifest_source)
+        manifest_source = validate_manifest_url(manifest_url, normalized_allow_provider_host, require_allowlisted_remote_host=require_allowlisted_remote_host)
+        payload = _read_json_url(manifest_source, allowed_hosts=set(normalize_provider_hosts(normalized_allow_provider_host)))
         return parse_manifest(
             payload,
             source=manifest_source,
-            allow_provider_host=allow_provider_host,
+            allow_provider_host=normalized_allow_provider_host,
             require_allowlisted_remote_host=require_allowlisted_remote_host,
         )
     file_path = validate_manifest_file(manifest_file)
@@ -399,7 +534,7 @@ def load_manifest(
     return parse_manifest(
         payload,
         source=str(file_path),
-        allow_provider_host=allow_provider_host,
+        allow_provider_host=normalized_allow_provider_host,
         require_allowlisted_remote_host=require_allowlisted_remote_host,
     )
 
@@ -408,7 +543,7 @@ def parse_manifest(
     payload: Any,
     *,
     source: str,
-    allow_provider_host: str | None = None,
+    allow_provider_host: str | list[str] | None = None,
     require_allowlisted_remote_host: bool = True,
 ) -> ProviderManifest:
     if not isinstance(payload, dict):
@@ -432,6 +567,7 @@ def parse_manifest(
             binary_name=_validated_text(item.get("binary_name"), "binary_name"),
             version=_validated_text(item.get("version"), "version"),
             platform=_validated_text(item.get("platform"), "platform"),
+            filename=_validated_filename(item.get("filename") or _url_filename(item.get("url"))),
             url=_validated_url(
                 item.get("url"),
                 allow_provider_host,
@@ -444,6 +580,8 @@ def parse_manifest(
             raise ValueError(f"Unsupported platform '{entry.platform}' for adapter '{adapter}'")
         if entry.binary_name != spec.binary_name:
             raise ValueError(f"binary_name '{entry.binary_name}' does not match adapter '{adapter}'")
+        if posixpath.basename(urllib.parse.urlparse(entry.url).path) != entry.filename:
+            raise ValueError(f"filename '{entry.filename}' does not match URL path for adapter '{adapter}'")
         binaries.append(entry)
     return ProviderManifest(schema=SCHEMA, provider=provider, generated_at=generated_at, binaries=tuple(binaries), source=source)
 
@@ -470,6 +608,7 @@ def entry_to_dict(entry: ProviderBinary) -> dict[str, Any]:
         "binary_name": entry.binary_name,
         "version": entry.version,
         "platform": entry.platform,
+        "filename": entry.filename,
         "url": entry.url,
         "sha256": entry.sha256,
         "size_bytes": entry.size_bytes,
@@ -488,6 +627,7 @@ def _download_and_import(
     state: AppState,
     force: bool,
     run_version: bool,
+    allow_provider_host: str | list[str] | None,
 ) -> dict[str, Any]:
     layout = cache_layout(cache_root)
     downloads_dir = layout["downloads_dir"]
@@ -496,7 +636,7 @@ def _download_and_import(
     if layout["root"] not in temp_path.parents:
         raise ValueError(f"Refusing to write outside cache root: {temp_path}")
     try:
-        data = _read_bytes_url(entry.url)
+        data = _read_bytes_url(entry.url, allowed_hosts=set(normalize_provider_hosts(allow_provider_host)))
         temp_path.write_bytes(data)
         actual_sha = _sha256_bytes(data)
         if actual_sha.lower() != entry.sha256.lower():
@@ -561,8 +701,9 @@ def validate_manifest_file(path: Path | None) -> Path:
     return resolved
 
 
-def validate_manifest_url(url: str, allow_provider_host: str | None, *, require_allowlisted_remote_host: bool = True) -> str:
+def validate_manifest_url(url: str, allow_provider_host: str | list[str] | None, *, require_allowlisted_remote_host: bool = True) -> str:
     parsed = urllib.parse.urlparse(url)
+    allowed_hosts = set(normalize_provider_hosts(allow_provider_host))
     if parsed.scheme != "https":
         if parsed.scheme == "http" and (parsed.hostname or "") in LOCAL_HOSTS:
             pass
@@ -574,18 +715,19 @@ def validate_manifest_url(url: str, allow_provider_host: str | None, *, require_
         raise ValueError("Manifest URL host is required")
     if ".." in parsed.path.split("/"):
         raise ValueError("Path traversal blocked in manifest URL")
-    if require_allowlisted_remote_host and parsed.hostname not in LOCAL_HOSTS and not allow_provider_host:
+    if require_allowlisted_remote_host and parsed.hostname not in LOCAL_HOSTS and not allowed_hosts:
         raise ValueError("Remote binary provider usage requires --allow-provider-host")
-    if allow_provider_host and parsed.hostname.lower() != allow_provider_host.lower():
+    if allowed_hosts and parsed.hostname.lower() not in allowed_hosts:
         raise ValueError(
-            f"Manifest URL host '{parsed.hostname}' does not match allowlisted host --allow-provider-host '{allow_provider_host}'"
+            f"Manifest URL host '{parsed.hostname}' does not match allowlisted host --allow-provider-host '{canonical_provider_host_value(allow_provider_host)}'"
         )
     return url
 
 
-def _validated_url(value: Any, allow_provider_host: str | None, *, require_allowlisted_remote_host: bool = True) -> str:
+def _validated_url(value: Any, allow_provider_host: str | list[str] | None, *, require_allowlisted_remote_host: bool = True) -> str:
     url = _validated_text(value, "url")
     parsed = urllib.parse.urlparse(url)
+    allowed_hosts = set(normalize_provider_hosts(allow_provider_host))
     if parsed.scheme == "file":
         raise ValueError("file:// binary URLs are not supported")
     if parsed.scheme != "https":
@@ -595,16 +737,40 @@ def _validated_url(value: Any, allow_provider_host: str | None, *, require_allow
             raise ValueError("Binary URL must use HTTPS unless it targets localhost test fixtures")
     if not parsed.hostname:
         raise ValueError("Binary URL host is required")
-    if allow_provider_host:
-        if parsed.hostname.lower() != allow_provider_host.lower():
+    if allowed_hosts:
+        if parsed.hostname.lower() not in allowed_hosts:
             raise ValueError(
-                f"Binary URL host '{parsed.hostname}' does not match allowlisted host --allow-provider-host '{allow_provider_host}'"
+                f"Binary URL host '{parsed.hostname}' does not match allowlisted host --allow-provider-host '{canonical_provider_host_value(allow_provider_host)}'"
             )
     elif require_allowlisted_remote_host and parsed.hostname not in LOCAL_HOSTS:
         raise ValueError("Remote binary URLs require --allow-provider-host")
     if ".." in parsed.path.split("/"):
         raise ValueError("Path traversal blocked in binary URL")
     return url
+
+
+def normalize_provider_hosts(value: str | list[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    raw_values = value if isinstance(value, list) else [value]
+    hosts: list[str] = []
+    for raw in raw_values:
+        for token in raw.split(","):
+            candidate = token.strip().lower()
+            if not candidate:
+                continue
+            if any(ch in candidate for ch in "/\\:"):
+                raise ValueError(f"Invalid provider host value: {token!r}")
+            if ".." in candidate:
+                raise ValueError(f"Path traversal blocked in provider host value: {token!r}")
+            if candidate not in hosts:
+                hosts.append(candidate)
+    return tuple(hosts)
+
+
+def canonical_provider_host_value(value: str | list[str] | None) -> str:
+    hosts = normalize_provider_hosts(value)
+    return ",".join(hosts)
 
 
 def _validated_text(value: Any, label: str) -> str:
@@ -615,6 +781,13 @@ def _validated_text(value: Any, label: str) -> str:
         if label not in {"version", "generated_at", "provider", "url"}:
             raise ValueError(f"Path traversal blocked in manifest field '{label}'")
     return text
+
+
+def _validated_filename(value: Any) -> str:
+    filename = _validated_text(value, "filename")
+    if "/" in filename or "\\" in filename or filename in {".", ".."}:
+        raise ValueError(f"Path traversal blocked in manifest field 'filename'")
+    return filename
 
 
 def _validated_sha256(value: Any) -> str:
@@ -649,6 +822,23 @@ def _validated_generation_base_url(value: str) -> str:
     return base
 
 
+def _validated_repo_slug(value: str) -> str:
+    parts = [part.strip() for part in value.split("/") if part.strip()]
+    if len(parts) != 2:
+        raise ValueError("Repository slug must look like <OWNER>/<REPO>")
+    for part in parts:
+        if ".." in part or any(ch in part for ch in "\\:"):
+            raise ValueError("Repository slug contains invalid characters")
+    return "/".join(parts)
+
+
+def _validated_release_tag(value: str) -> str:
+    tag = _validated_text(value, "release_tag")
+    if "/" in tag or "\\" in tag:
+        raise ValueError("Release tag must not contain path separators")
+    return tag
+
+
 def _validated_source_dir(source_dir: Path) -> Path:
     if ".." in source_dir.parts:
         raise ValueError(f"Path traversal blocked for source dir: {source_dir!r}")
@@ -666,8 +856,39 @@ def _validated_output_path(output_path: Path) -> Path:
     return output_path.resolve()
 
 
-def _manifest_entries_from_source(source_root: Path, base_url: str) -> tuple[ProviderBinary, ...]:
+def _validated_output_dir(output_dir: Path) -> Path:
+    if ".." in output_dir.parts:
+        raise ValueError(f"Path traversal blocked for output dir: {output_dir!r}")
+    return output_dir.resolve()
+
+
+def _manifest_entries_from_source(source_root: Path, base_url: str, *, versions: dict[str, str] | None = None) -> tuple[ProviderBinary, ...]:
     binaries: list[ProviderBinary] = []
+    for item in _source_binaries(source_root, versions=versions):
+        url = _join_manifest_url(base_url, item["relative_path"])
+        binaries.append(
+            ProviderBinary(
+                adapter=item["adapter"],
+                binary_name=item["binary_name"],
+                version=item["version"],
+                platform=item["platform"],
+                filename=item["filename"],
+                url=url,
+                sha256=item["sha256"],
+                size_bytes=item["size_bytes"],
+            )
+        )
+    return tuple(binaries)
+
+
+def _join_manifest_url(base_url: str, relative_path: str) -> str:
+    quoted_parts = [urllib.parse.quote(part) for part in relative_path.split("/")]
+    return f"{base_url}/{posixpath.join(*quoted_parts)}"
+
+
+def _source_binaries(source_root: Path, versions: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    binaries: list[dict[str, Any]] = []
+    version_map = versions or {}
     for path in sorted(source_root.rglob("*")):
         if path.is_dir():
             continue
@@ -694,22 +915,106 @@ def _manifest_entries_from_source(source_root: Path, base_url: str) -> tuple[Pro
             raise ValueError(f"Unexpected binary name '{filename}' for adapter '{adapter_name}' on platform '{platform_id}'")
         data = resolved_path.read_bytes()
         binaries.append(
-            ProviderBinary(
-                adapter=adapter_name,
-                binary_name=spec.binary_name,
-                version="provider-current",
-                platform=platform_id,
-                url=_join_manifest_url(base_url, relative.as_posix()),
-                sha256=_sha256_bytes(data),
-                size_bytes=len(data),
-            )
+            {
+                "adapter": adapter_name,
+                "binary_name": spec.binary_name,
+                "platform": platform_id,
+                "filename": filename,
+                "version": version_map.get(adapter_name, "provider-current"),
+                "sha256": _sha256_bytes(data),
+                "size_bytes": len(data),
+                "source_path": str(resolved_path),
+                "relative_path": relative.as_posix(),
+            }
         )
-    return tuple(binaries)
+    return binaries
 
 
-def _join_manifest_url(base_url: str, relative_path: str) -> str:
-    quoted_parts = [urllib.parse.quote(part) for part in relative_path.split("/")]
-    return f"{base_url}/{posixpath.join(*quoted_parts)}"
+def _parse_version_overrides(values: list[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for raw in values:
+        for token in raw.split(","):
+            candidate = token.strip()
+            if not candidate:
+                continue
+            if "=" not in candidate:
+                raise ValueError("Provider release versions must use adapter=version format")
+            adapter_name, version = candidate.split("=", 1)
+            adapter_key = adapter_name.strip()
+            version_value = version.strip()
+            binary_spec(adapter_key)
+            if not version_value:
+                raise ValueError(f"Version override cannot be empty for adapter '{adapter_key}'")
+            overrides[adapter_key] = version_value
+    return overrides
+
+
+def _release_entries_from_source(
+    *,
+    source_root: Path,
+    release_base_url: str,
+    versions: dict[str, str],
+    output_dir: Path,
+) -> tuple[list[ProviderBinary], list[dict[str, Any]]]:
+    items = _source_binaries(source_root, versions=versions)
+    adapters_present = {item["adapter"] for item in items}
+    missing_versions = sorted(adapter for adapter in adapters_present if adapter not in versions)
+    if missing_versions:
+        raise ValueError(f"Release asset preparation requires pinned --version adapter=version for {missing_versions}")
+    entries: list[ProviderBinary] = []
+    copies: list[dict[str, Any]] = []
+    for item in items:
+        release_filename = _normalized_release_filename(
+            adapter=item["adapter"],
+            platform_id=item["platform"],
+            version=item["version"],
+            source_filename=item["filename"],
+        )
+        output_path = (output_dir / release_filename).resolve()
+        if output_dir not in output_path.parents:
+            raise ValueError(f"Refusing to write outside output dir: {output_path}")
+        entry = ProviderBinary(
+            adapter=item["adapter"],
+            binary_name=item["binary_name"],
+            version=item["version"],
+            platform=item["platform"],
+            filename=release_filename,
+            url=_join_manifest_url(release_base_url, release_filename),
+            sha256=item["sha256"],
+            size_bytes=item["size_bytes"],
+        )
+        entries.append(entry)
+        copies.append(
+            {
+                "adapter": item["adapter"],
+                "platform": item["platform"],
+                "version": item["version"],
+                "source_path": item["source_path"],
+                "output_path": str(output_path),
+                "filename": release_filename,
+            }
+        )
+    return entries, copies
+
+
+def _normalized_release_filename(*, adapter: str, platform_id: str, version: str, source_filename: str) -> str:
+    safe_version = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in version)
+    return f"{adapter}-{platform_id}-{safe_version}-{source_filename}"
+
+
+def _github_release_base_url(repo_slug: str, release_tag: str) -> str:
+    owner, repo = repo_slug.split("/", 1)
+    return (
+        f"https://github.com/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}/releases/download/"
+        f"{urllib.parse.quote(release_tag)}"
+    )
+
+
+def _recommended_provider_hosts(base_url: str) -> tuple[str, ...]:
+    host = urllib.parse.urlparse(base_url).hostname or ""
+    if host == "github.com":
+        return GITHUB_PROVIDER_HOSTS
+    return (host,)
 
 
 def _duplicate_manifest_keys(entries: tuple[ProviderBinary, ...]) -> list[dict[str, str]]:
@@ -751,16 +1056,31 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _read_json_url(url: str) -> Any:
-    data = _read_bytes_url(url)
+def _read_json_url(url: str, *, allowed_hosts: set[str] | None = None) -> Any:
+    data = _read_bytes_url(url, allowed_hosts=allowed_hosts)
     return json.loads(data.decode("utf-8"))
 
 
-def _read_bytes_url(url: str) -> bytes:
-    request = urllib.request.Request(url, method="GET")
+def _read_bytes_url(url: str, *, allowed_hosts: set[str] | None = None) -> bytes:
     opener = urllib.request.build_opener(_NoRedirectHandler)
-    with opener.open(request, timeout=10) as response:
-        return response.read()
+    current_url = url
+    for _ in range(6):
+        request = urllib.request.Request(current_url, method="GET")
+        try:
+            with opener.open(request, timeout=10) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {301, 302, 303, 307, 308}:
+                raise
+            location = exc.headers.get("Location") if exc.headers else None
+            if not location:
+                raise ValueError(f"Redirect response did not include a Location header for {current_url}")
+            redirect_url = urllib.parse.urljoin(current_url, location)
+            redirect_host = urllib.parse.urlparse(redirect_url).hostname or ""
+            if allowed_hosts and redirect_host.lower() not in allowed_hosts and redirect_host.lower() not in LOCAL_HOSTS:
+                raise ValueError(f"Redirect host '{redirect_host}' is not allowlisted by --allow-provider-host")
+            current_url = redirect_url
+    raise ValueError(f"Too many redirects while downloading {url}")
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -775,3 +1095,12 @@ def _audit(action: str, profile: str, details: dict[str, Any], path: Path) -> No
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _url_filename(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Manifest field 'url' is required")
+    filename = posixpath.basename(urllib.parse.urlparse(value).path)
+    if not filename:
+        raise ValueError("Manifest URL must end with a filename")
+    return filename

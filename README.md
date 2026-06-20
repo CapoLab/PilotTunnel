@@ -64,33 +64,35 @@ sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF>
 
 ## v0.1 Operator Workflow
 
-1. Inspect available upstream binary sources.
-2. Fetch source binaries into a local provider source directory.
-3. Prepare a provider manifest.
-4. Install managed binaries into a local managed install directory.
-5. Render and inspect a runtime plan.
-6. Render staged service unit files.
-7. Review a staged service install plan.
-8. Optionally run guarded daemon-reload later if the operator intentionally installs units.
-9. Start or stop managed services manually through the guarded lifecycle commands.
-10. Use guarded manual switch planning and apply when changing the active tunnel.
-11. Run `rc check` for a read-only release-candidate validation pass.
-12. Run `rc smoke` for a safe local smoke pass that stages artifacts without touching real services by default.
+1. Inspect available upstream binary sources on an admin workstation.
+2. Fetch known-good binaries into a local provider source directory.
+3. Prepare a user-owned binary release directory and `provider-manifest.json`.
+4. Upload release assets and `provider-manifest.json` to a separate binary repository release.
+5. Install managed binaries into a local managed install directory from that pinned manifest.
+6. Render and inspect a runtime plan.
+7. Render staged service unit files.
+8. Review a staged service install plan.
+9. Optionally run guarded daemon-reload later if the operator intentionally installs units.
+10. Start or stop managed services manually through the guarded lifecycle commands.
+11. Use guarded manual switch planning and apply when changing the active tunnel.
+12. Run `rc check` for a read-only release-candidate validation pass.
+13. Run `rc smoke` for a safe local smoke pass that stages artifacts without touching real services by default.
 
 ## Final Operator Checklist
 
 1. Clone or pull the repository into a local working directory.
 2. Initialize the local node role with `python -m pilottunnel.cli init --role controller` or `python -m pilottunnel.cli init --role worker`.
-3. Inspect and fetch upstream binary sources into `<SOURCE_DIR>`.
-4. Prepare a provider manifest at `<MANIFEST_FILE>`.
-5. Install managed binaries into `<INSTALL_DIR>`.
-6. Render a runtime plan into `<RUNTIME_DIR>`.
-7. Render staged service files into `<SERVICE_STAGING_DIR>`.
-8. Review and apply the staged service install into `<SYSTEMD_TARGET_DIR>` only when ready.
-9. Run guarded `systemd reload` and guarded start or stop commands only after staged files are in place.
-10. Use guarded manual switch planning before any active tunnel change.
-11. Run `rc check` and `rc smoke` before any real deployment step.
-12. Keep backup and restore steps available before production rollout.
+3. Inspect and fetch upstream binary sources into `<SOURCE_DIR>` on an admin workstation.
+4. Prepare a binary release directory for `<BINARY_REPO>` and `<BINARY_RELEASE_TAG>`.
+5. Upload the release assets and `provider-manifest.json` to the user-owned binary repository release.
+6. Install managed binaries into `<INSTALL_DIR>` from `<MANIFEST_URL>`.
+7. Render a runtime plan into `<RUNTIME_DIR>`.
+8. Render staged service files into `<SERVICE_STAGING_DIR>`.
+9. Review and apply the staged service install into `<SYSTEMD_TARGET_DIR>` only when ready.
+10. Run guarded `systemd reload` and guarded start or stop commands only after staged files are in place.
+11. Use guarded manual switch planning before any active tunnel change.
+12. Run `rc check` and `rc smoke` before any real deployment step.
+13. Keep backup and restore steps available before production rollout.
 
 ## v0.1 Limitations
 
@@ -192,9 +194,14 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 
 - Binary provider manifests are required for managed downloads.
 - SHA256 verification is mandatory before any binary is imported.
+- The main `PilotTunnel` source repository remains source-only.
+- Production installs must not fetch adapter binaries from upstream projects during server setup.
+- A separate user-owned binary repository, such as `PilotTunnel-Binaries`, should hold release assets and `provider-manifest.json`.
 - `binary source list` shows the built-in upstream catalog without contacting external hosts.
-- `binary source fetch` downloads only from the known upstream release catalog and stores verified binaries under a local provider source tree.
-- `binary provider prepare` combines upstream fetch, manifest generation, and manifest verification for one platform without uploading anything.
+- `binary source fetch` downloads only from the known upstream release catalog, requires explicit pinned tags for every external adapter, and stores verified binaries under a local provider source tree.
+- `binary provider prepare` combines explicit-tag upstream fetch, manifest generation, and manifest verification for one platform without uploading anything.
+- `binary provider release-plan` builds a local upload plan for a user-owned GitHub release without writing files.
+- `binary provider release-assets` writes normalized release asset filenames plus `provider-manifest.json` into a chosen local release directory.
 - `binary install plan` shows how managed adapter binaries would be resolved from a provider manifest, the local cache, and optionally the system PATH.
 - `binary install apply` copies verified adapter binaries into a chosen managed install directory without executing them.
 - `binary install list` inspects the managed install directory and install summary file.
@@ -210,15 +217,18 @@ python -m pilottunnel.cli binary verify --adapter rathole --run-version
 - `binary status --require-all --json` fails until every required v0.1 Layer 4 adapter binary is imported and verified from the chosen manifest.
 - `binary provider generate-manifest` scans a local provider source tree and writes a manifest without downloading anything.
 - `binary provider verify-manifest` validates schema, URLs, checksums, and required adapter coverage without changing the host.
+- Manifest entries pin exact versions, exact SHA256, exact filenames, and exact asset URLs.
 - `bootstrap command` prints safe copy-paste prepare commands for controller and worker roles.
 - `bootstrap` prepares role, profile, bundle, staging, backup, and readiness state without real deployment.
 - Real deploy remains a separate gated workflow.
 
 ```bash
 python -m pilottunnel.cli binary source list
-python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --dry-run
-python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --confirm FETCH_UPSTREAM_BINARIES
-python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --base-url https://<PROVIDER_HOST>/<BASE_PATH> --platform <PLATFORM> --output <MANIFEST_FILE> --confirm PREPARE_PROVIDER_BINARIES
+python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION> --dry-run
+python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION> --confirm FETCH_UPSTREAM_BINARIES
+python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --base-url https://<PROVIDER_HOST>/<BASE_PATH> --platform <PLATFORM> --output <MANIFEST_FILE> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION> --confirm PREPARE_PROVIDER_BINARIES
+python -m pilottunnel.cli binary provider release-plan --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --repo-slug <BINARY_REPO> --release-tag <BINARY_RELEASE_TAG> --output-dir <RELEASE_DIR> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION>
+python -m pilottunnel.cli binary provider release-assets --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --repo-slug <BINARY_REPO> --release-tag <BINARY_RELEASE_TAG> --output-dir <RELEASE_DIR> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION> --confirm PREPARE_PROVIDER_RELEASE_ASSETS
 python -m pilottunnel.cli binary install plan --manifest <MANIFEST_FILE> --platform <PLATFORM>
 python -m pilottunnel.cli binary install apply --manifest <MANIFEST_FILE> --platform <PLATFORM> --install-dir <INSTALL_DIR> --confirm INSTALL_PROVIDER_BINARIES
 python -m pilottunnel.cli binary install list --install-dir <INSTALL_DIR>
@@ -241,11 +251,16 @@ python -m pilottunnel.cli binary status --require-all --manifest-file <MANIFEST_
 python -m pilottunnel.cli bootstrap command --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --bundle-file <BUNDLE_FILE>
 python -m pilottunnel.cli bootstrap plan --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
 python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --confirm BOOTSTRAP_APPLY
+python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host github.com --confirm BOOTSTRAP_APPLY
 ```
 
 - Upstream fetch uses only the built-in adapter catalog for `backhaul`, `rathole`, `frp`, `gost`, `chisel`, `realm`, and `bore`.
+- The upstream catalog is for admin-side mirroring only, not for server install.
 - `ssh_reverse` remains a host system dependency and is intentionally skipped by upstream fetch.
 - Upstream fetch writes a local `pilottunnel-source-summary.json` file under `<SOURCE_DIR>` for audit-friendly review.
+- `binary provider release-assets` writes normalized files and `provider-manifest.json` under `<RELEASE_DIR>` so they can be uploaded to a user-owned GitHub release.
+- Admin-side upstream fetches must always use explicit pinned tags; PilotTunnel does not allow dynamic upstream release resolution.
+- GitHub release downloads may require a comma-separated provider allowlist such as `github.com,release-assets.githubusercontent.com,objects.githubusercontent.com,github-releases.githubusercontent.com`.
 - Managed install writes a local `pilottunnel-binary-install-summary.json` file under `<INSTALL_DIR>` and does not require root.
 - Runtime planning writes adapter config files only under `<RUNTIME_DIR>` and keeps them in dry-run mode.
 - No upstream fetch, provider prepare, managed install, runtime plan, service render, service install, guarded `systemd` status/reload, or bootstrap command in this stage starts services, changes firewall or routes, or executes downloaded binaries.
@@ -268,8 +283,8 @@ python -m pilottunnel.cli bootstrap apply --role controller --profile <PROFILE> 
 - It does not start processes, bind ports, create `systemd` units, or execute adapter binaries.
 
 ```bash
-python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --confirm FETCH_UPSTREAM_BINARIES
-python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --base-url https://<PROVIDER_HOST>/<BASE_PATH> --platform <PLATFORM> --output <MANIFEST_FILE> --confirm PREPARE_PROVIDER_BINARIES
+python -m pilottunnel.cli binary source fetch --source-dir <SOURCE_DIR> --platform <PLATFORM> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION> --confirm FETCH_UPSTREAM_BINARIES
+python -m pilottunnel.cli binary provider prepare --source-dir <SOURCE_DIR> --provider-name <PROVIDER_NAME> --base-url https://<PROVIDER_HOST>/<BASE_PATH> --platform <PLATFORM> --output <MANIFEST_FILE> --version backhaul=<BACKHAUL_VERSION> --version rathole=<RATHOLE_VERSION> --version frp=<FRP_VERSION> --version gost=<GOST_VERSION> --version chisel=<CHISEL_VERSION> --version realm=<REALM_VERSION> --version bore=<BORE_VERSION> --confirm PREPARE_PROVIDER_BINARIES
 python -m pilottunnel.cli binary install apply --manifest <MANIFEST_FILE> --platform <PLATFORM> --install-dir <INSTALL_DIR> --confirm INSTALL_PROVIDER_BINARIES
 python -m pilottunnel.cli --config <CONFIG_FILE> runtime plan --runtime-dir <RUNTIME_DIR>
 ```

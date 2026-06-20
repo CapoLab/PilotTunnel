@@ -102,6 +102,16 @@ class InstallerScriptTests(unittest.TestCase):
     def test_install_script_does_not_run_adapter_binaries(self) -> None:
         self.assertNotRegex(self.script_text, r"\b(?:backhaul|rathole|frpc|gost|chisel|realm|bore)\b.*(?:--version|\s)")
 
+    def test_install_script_uses_manifest_only_binary_workflow(self) -> None:
+        self.assertIn("binary download-all", self.script_text)
+        self.assertIn("binary status --require-all", self.script_text)
+        self.assertNotIn("binary source fetch", self.script_text)
+        self.assertNotIn("binary provider prepare", self.script_text)
+
+    def test_install_script_does_not_reference_dynamic_upstream_release_endpoints(self) -> None:
+        self.assertNotIn("api.github.com", self.script_text)
+        self.assertNotRegex(self.script_text, r"releases/(?:[A-Za-z_]+)")
+
     def test_readme_documents_safe_one_command_setup(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("One-Command Non-Production Server Setup", readme)

@@ -234,6 +234,7 @@ def fetch_upstream_sources(
     resolved_platform = _resolve_platform_id(platform_id)
     selected_adapters = _resolve_adapters(adapter_filters)
     requested_versions = _resolve_versions(version_filters or [], selected_adapters)
+    _require_explicit_versions(selected_adapters, requested_versions)
     attempt = {
         "action": "binary-source-fetch",
         "source_dir": str(resolved_source_dir),
@@ -381,6 +382,7 @@ def prepare_provider_binaries(
     output_path: Path,
     cache_root: Path,
     confirm: str | None,
+    version_filters: list[str] | None,
     audit_path: Path,
 ) -> dict[str, Any]:
     resolved_platform = _resolve_platform_id(platform_id)
@@ -399,7 +401,7 @@ def prepare_provider_binaries(
         force=False,
         dry_run=False,
         adapter_filters=list(provider_required_adapters()) + ["ssh_reverse"],
-        version_filters=[],
+        version_filters=version_filters,
         audit_path=audit_path,
         expected_confirm="PREPARE_PROVIDER_BINARIES",
     )
@@ -506,10 +508,24 @@ def _resolve_versions(values: list[str], adapters: list[str]) -> dict[str, str]:
     return versions
 
 
+def _require_explicit_versions(adapters: list[str], versions: dict[str, str]) -> None:
+    missing = [
+        adapter
+        for adapter in adapters
+        if upstream_source(adapter).category == "external_binary" and not versions.get(adapter)
+    ]
+    if missing:
+        raise ValueError(
+            "Upstream source fetch requires an explicit version/tag; dynamic latest releases are not allowed"
+        )
+
+
 def _load_release_metadata(source: UpstreamSource, version: str | None) -> dict[str, Any]:
     if source.upstream_type != "github_release":
         raise ValueError(f"Adapter '{source.adapter}' does not support upstream release downloads")
-    endpoint = f"releases/tags/{urllib.parse.quote(version)}" if version else "releases/latest"
+    if not version or not version.strip():
+        raise ValueError("Upstream source fetch requires an explicit version/tag; dynamic latest releases are not allowed")
+    endpoint = f"releases/tags/{urllib.parse.quote(version.strip())}"
     url = f"https://{GITHUB_API_HOST}/repos/{source.repo_slug}/{endpoint}"
     payload = _read_json_url(url, allowed_hosts={GITHUB_API_HOST})
     if not isinstance(payload, dict):

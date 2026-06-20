@@ -32,7 +32,7 @@ Options:
   --with-binaries         Require complete v0.1 Layer 4 binary coverage before setup continues.
   --manifest-url <URL>    Allowlisted provider manifest URL for binary-first bootstrap.
   --manifest-file <FILE>  Local provider manifest file for binary-first bootstrap.
-  --allow-provider-host <HOST>
+  --allow-provider-host <HOST[,HOST...]>
                           Required for remote provider manifests and remote binary artifacts.
   --dry-run               Print the safe installation plan without writing files.
   --confirm <TOKEN>       Required for apply mode. Must be INSTALL_PILOTTUNNEL.

@@ -4,6 +4,7 @@ import io
 import json
 import tarfile
 import tempfile
+import urllib.parse
 import unittest
 import zipfile
 from contextlib import redirect_stdout
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from pilottunnel import cli
 from pilottunnel.binaries import all_binary_adapters, binary_spec, current_platform_id, provider_required_adapters
 from pilottunnel.bootstrap import build_bootstrap_command
-from pilottunnel.upstream_sources import SOURCE_SUMMARY_FILENAME, upstream_source
+from pilottunnel.upstream_sources import SOURCE_SUMMARY_FILENAME, _load_release_metadata, upstream_source
 from testsupport import allocate_tcp_ports, static_http_server
 
 
@@ -70,6 +71,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         size_bytes: int,
         platform_id: str | None = None,
         binary_name: str | None = None,
+        filename: str | None = None,
     ) -> dict[str, object]:
         spec = binary_spec(adapter)
         return {
@@ -77,6 +79,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "binary_name": binary_name or spec.binary_name,
             "version": "v0.0.1",
             "platform": platform_id or current_platform_id(),
+            "filename": filename or Path(urllib.parse.urlparse(url).path).name,
             "url": url,
             "sha256": sha256,
             "size_bytes": size_bytes,
@@ -271,6 +274,12 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "--ports",
             "auto",
         ]
+
+    def _release_version_args(self, adapters: tuple[str, ...]) -> list[str]:
+        args: list[str] = []
+        for adapter in adapters:
+            args.extend(["--version", f"{adapter}=v0.0.1"])
+        return args
 
     def _init_and_create_profile(self, root: Path, profile: str, ports: list[int]) -> None:
         init_code, init_output = self.run_cli(root, "init", "--role", "controller")
@@ -485,8 +494,135 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         for adapter, info in metadata.items():
             key = (adapter, str(info["platform"]))
             self.assertIn(key, entries)
+            self.assertEqual(entries[key]["filename"], Path(str(info["relative_path"])).name)
             self.assertEqual(entries[key]["sha256"], info["sha256"])
             self.assertEqual(entries[key]["size_bytes"], info["size_bytes"])
+
+    def test_provider_release_plan_generates_pinned_user_owned_github_asset_urls(self) -> None:
+        selected = tuple(provider_required_adapters())
+        source_root, _metadata = self._provider_source_tree(selected)
+        output_dir = self.base / "provider-release-plan"
+        repo_slug = "example/PilotTunnel-Binaries"
+        release_tag = "v0.0.1-binaries"
+        code, output = self.run_cli(
+            self.base / "provider-release-plan-root",
+            "binary",
+            "provider",
+            "release-plan",
+            "--source-dir",
+            str(source_root),
+            "--provider-name",
+            "generic-provider",
+            "--repo-slug",
+            repo_slug,
+            "--release-tag",
+            release_tag,
+            "--output-dir",
+            str(output_dir),
+            *self._release_version_args(selected),
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["main_repo_remains_source_only"])
+        self.assertFalse(payload["binary_files_committed_to_main_repo"])
+        self.assertIn("github.com", payload["recommended_allow_provider_hosts"])
+        self.assertIn("release-assets.githubusercontent.com", payload["recommended_allow_provider_hosts"])
+        self.assertTrue(payload["binaries"])
+        self.assertIn("/releases/download/", payload["release_base_url"])
+        self.assertIn(urllib.parse.quote(release_tag), payload["release_base_url"])
+        for item in payload["binaries"]:
+            self.assertEqual(item["version"], "v0.0.1")
+            self.assertIn(f"/releases/download/{urllib.parse.quote(release_tag)}/", item["url"])
+            self.assertIn("example/PilotTunnel-Binaries", item["url"])
+            self.assertTrue(item["filename"].startswith(f"{item['adapter']}-{item['platform']}-v0.0.1-"))
+
+    def test_provider_release_assets_writes_manifest_and_normalized_files(self) -> None:
+        selected = tuple(provider_required_adapters())
+        source_root, _metadata = self._provider_source_tree(selected)
+        output_dir = self.base / "provider-release-assets"
+        code, output = self.run_cli(
+            self.base / "provider-release-assets-root",
+            "binary",
+            "provider",
+            "release-assets",
+            "--source-dir",
+            str(source_root),
+            "--provider-name",
+            "generic-provider",
+            "--repo-slug",
+            "example/PilotTunnel-Binaries",
+            "--release-tag",
+            "v0.0.1-binaries",
+            "--output-dir",
+            str(output_dir),
+            *self._release_version_args(selected),
+            "--confirm",
+            "PREPARE_PROVIDER_RELEASE_ASSETS",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        manifest_path = output_dir / "provider-manifest.json"
+        self.assertTrue(manifest_path.exists())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for item in manifest["binaries"]:
+            self.assertIn("filename", item)
+            self.assertTrue((output_dir / item["filename"]).exists())
+            self.assertEqual(item["version"], "v0.0.1")
+        self.assertIn(str(manifest_path), payload["files_written"])
+
+    def test_provider_release_assets_blocks_missing_required_entries(self) -> None:
+        source_root, _metadata = self._provider_source_tree(("backhaul",))
+        output_dir = self.base / "provider-release-missing"
+        code, output = self.run_cli(
+            self.base / "provider-release-missing-root",
+            "binary",
+            "provider",
+            "release-plan",
+            "--source-dir",
+            str(source_root),
+            "--provider-name",
+            "generic-provider",
+            "--repo-slug",
+            "example/PilotTunnel-Binaries",
+            "--release-tag",
+            "v0.0.1-binaries",
+            "--output-dir",
+            str(output_dir),
+            "--version",
+            "backhaul=v0.0.1",
+        )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["missing_required"])
+
+    def test_manifest_accepts_comma_separated_allowlisted_hosts(self) -> None:
+        fixture_root, metadata = self._provider_fixture(("backhaul",))
+        manifest_path = self._write_manifest(
+            fixture_root,
+            [
+                self._manifest_entry(
+                    adapter="backhaul",
+                    url="https://release-assets.githubusercontent.com/backhaul-amd64",
+                    sha256=str(metadata["backhaul"]["sha256"]),
+                    size_bytes=int(metadata["backhaul"]["size_bytes"]),
+                    filename="backhaul-amd64",
+                )
+            ],
+        )
+        code, output = self.run_cli(
+            self.base / "comma-allow-hosts",
+            "binary",
+            "provider",
+            "inspect",
+            "--manifest-file",
+            str(manifest_path),
+            "--allow-provider-host",
+            "github.com,release-assets.githubusercontent.com",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertIn("release-assets.githubusercontent.com", payload["allow_provider_hosts"])
 
     def test_provider_generate_manifest_rejects_unknown_adapter(self) -> None:
         source_root = self.base / "provider-source-unknown"
@@ -571,6 +707,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "--source-dir",
             str(source_dir),
             "--dry-run",
+            *self._release_version_args(tuple(provider_required_adapters())),
         )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
@@ -591,9 +728,40 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "fetch",
             "--source-dir",
             str(root / "provider-source"),
+            *self._release_version_args(tuple(provider_required_adapters())),
         )
         self.assertEqual(code, 1)
         self.assertIn("FETCH_UPSTREAM_BINARIES", output)
+
+    def test_binary_source_fetch_requires_explicit_version_tags(self) -> None:
+        root = self.base / "source-fetch-no-version"
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "source",
+            "fetch",
+            "--source-dir",
+            str(root / "provider-source"),
+            "--dry-run",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("explicit version/tag", output)
+        self.assertIn("dynamic latest releases are not allowed", output)
+
+    @patch("pilottunnel.upstream_sources._read_json_url")
+    def test_binary_source_fetch_uses_explicit_github_tag_endpoint(self, mock_read_json_url) -> None:
+        mock_read_json_url.return_value = {
+            "tag_name": "v1.2.3",
+            "assets": [
+                {
+                    "name": "backhaul_linux_amd64.tar.gz",
+                    "browser_download_url": "https://github.com/Musixal/Backhaul/releases/download/v1.2.3/backhaul_linux_amd64.tar.gz",
+                }
+            ],
+        }
+        _load_release_metadata(upstream_source("backhaul"), "v1.2.3")
+        request_url = mock_read_json_url.call_args.args[0]
+        self.assertIn("releases/tags/v1.2.3", request_url)
 
     def test_binary_source_fetch_rejects_unknown_adapter(self) -> None:
         root = self.base / "source-fetch-unknown"
@@ -628,6 +796,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             str(source_dir),
             "--confirm",
             "FETCH_UPSTREAM_BINARIES",
+            *self._release_version_args(tuple(provider_required_adapters())),
         )
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
@@ -665,6 +834,8 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "frp",
             "--confirm",
             "FETCH_UPSTREAM_BINARIES",
+            "--version",
+            "frp=v0.0.1",
         )
         self.assertEqual(code, 1)
         self.assertIn("path traversal", output.lower())
@@ -693,6 +864,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             current_platform_id(),
             "--output",
             str(output_path),
+            *self._release_version_args(tuple(provider_required_adapters())),
             "--confirm",
             "PREPARE_PROVIDER_BINARIES",
         )
@@ -1570,9 +1742,13 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "<PROVIDER_HOST>",
             "<SOURCE_DIR>",
             "<MANIFEST_FILE>",
+            "<BINARY_REPO>",
+            "<BINARY_RELEASE_TAG>",
+            "<RELEASE_DIR>",
             "<BUNDLE_FILE>",
             "<BUNDLE_OUTPUT>",
         ):
             self.assertIn(placeholder, readme)
+        self.assertIn("provider-manifest.json", readme)
         self.assertNotRegex(readme, r"--(?:main|target|control|service|check)-port\s+\d+")
         self.assertNotRegex(readme, r"--profile\s+[A-Za-z][A-Za-z0-9._-]*-\d+[A-Za-z0-9._-]*")

@@ -14,7 +14,15 @@ from .adapters.base import AdapterContext
 from .__version__ import version_payload
 from .audit import write_audit_log
 from .backup import apply_restore, build_backup_plan, build_restore_plan, create_backup, inspect_backup, list_backups, verify_backup
-from .binary_provider import download_all_binaries, download_binary, generate_manifest, inspect_manifest, verify_manifest_file
+from .binary_provider import (
+    build_provider_release_plan,
+    download_all_binaries,
+    download_binary,
+    generate_manifest,
+    inspect_manifest,
+    verify_manifest_file,
+    write_provider_release_assets,
+)
 from .binary_readiness import build_binary_readiness_report, remember_binary_provider_source
 from .binary_install import apply_binary_install, build_binary_install_plan, list_binary_installations
 from .bootstrap import apply_bootstrap, build_bootstrap_command, build_bootstrap_plan
@@ -551,8 +559,27 @@ def build_parser() -> argparse.ArgumentParser:
     binary_provider_prepare.add_argument("--base-url", required=True)
     binary_provider_prepare.add_argument("--platform", default="auto")
     binary_provider_prepare.add_argument("--output", type=Path, required=True)
+    binary_provider_prepare.add_argument("--version", action="append", default=[])
     binary_provider_prepare.add_argument("--confirm")
     binary_provider_prepare.add_argument("--json", action="store_true")
+    binary_provider_release_plan = binary_provider_subparsers.add_parser("release-plan")
+    binary_provider_release_plan.add_argument("--source-dir", type=Path, required=True)
+    binary_provider_release_plan.add_argument("--provider-name", required=True)
+    binary_provider_release_plan.add_argument("--repo-slug", required=True)
+    binary_provider_release_plan.add_argument("--release-tag", required=True)
+    binary_provider_release_plan.add_argument("--output-dir", type=Path, required=True)
+    binary_provider_release_plan.add_argument("--version", action="append", default=[])
+    binary_provider_release_plan.add_argument("--json", action="store_true")
+    binary_provider_release_assets = binary_provider_subparsers.add_parser("release-assets")
+    binary_provider_release_assets.add_argument("--source-dir", type=Path, required=True)
+    binary_provider_release_assets.add_argument("--provider-name", required=True)
+    binary_provider_release_assets.add_argument("--repo-slug", required=True)
+    binary_provider_release_assets.add_argument("--release-tag", required=True)
+    binary_provider_release_assets.add_argument("--output-dir", type=Path, required=True)
+    binary_provider_release_assets.add_argument("--version", action="append", default=[])
+    binary_provider_release_assets.add_argument("--confirm")
+    binary_provider_release_assets.add_argument("--force", action="store_true")
+    binary_provider_release_assets.add_argument("--json", action="store_true")
 
     bundle = subparsers.add_parser("bundle")
     bundle_subparsers = bundle.add_subparsers(dest="bundle_command", required=True)
@@ -2313,7 +2340,42 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=args.output,
                 cache_root=switch_paths.work_dir,
                 confirm=args.confirm,
+                version_filters=args.version,
                 audit_path=switch_paths.audit_path,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "release-plan":
+        try:
+            payload = build_provider_release_plan(
+                source_dir=args.source_dir,
+                provider_name=args.provider_name,
+                repo_slug=args.repo_slug,
+                release_tag=args.release_tag,
+                output_dir=args.output_dir,
+                version_overrides=args.version,
+            )
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "release-assets":
+        try:
+            payload = write_provider_release_assets(
+                source_dir=args.source_dir,
+                provider_name=args.provider_name,
+                repo_slug=args.repo_slug,
+                release_tag=args.release_tag,
+                output_dir=args.output_dir,
+                version_overrides=args.version,
+                confirm=args.confirm,
+                force=args.force,
             )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
