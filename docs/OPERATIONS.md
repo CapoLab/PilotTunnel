@@ -15,10 +15,12 @@ PilotTunnel is meant to be operated conservatively. Review plans first, prefer d
 The top-level bootstrap helper is:
 
 ```bash
+bash scripts/install.sh
 bash scripts/install.sh --role <ROLE> --layer layer4 --dry-run
 bash scripts/install.sh --role <ROLE> --layer layer4 --confirm INSTALL_PILOTTUNNEL
 ```
 
+- running the script with no arguments on a TTY enters the interactive controller/worker flow
 - the script defaults to the public source repository and public provider manifest
 - it does not start services or modify firewall, routes, or interfaces
 - it records unsupported known layers as planned-only preferences

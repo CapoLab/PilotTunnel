@@ -44,6 +44,14 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("--dry-run", result.stdout)
             self.assertIn("--repo-url", result.stdout)
+            self.assertIn("bash install.sh", result.stdout)
+
+    def test_install_script_documents_interactive_zero_arg_mode(self) -> None:
+        self.assertIn("PilotTunnel interactive installer", self.script_text)
+        self.assertIn("Select this server role:", self.script_text)
+        self.assertIn("Controller / primary decision node", self.script_text)
+        self.assertIn("Worker / secondary endpoint node", self.script_text)
+        self.assertIn("multi-layer", self.script_text)
 
     def test_install_script_refuses_apply_without_exact_confirmation(self) -> None:
         bash_bin = shutil.which("bash")
@@ -119,10 +127,20 @@ class InstallerScriptTests(unittest.TestCase):
 
     def test_readme_documents_safe_one_command_setup(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
+        lower_readme = readme.lower()
         self.assertIn("One-line install", readme)
         self.assertIn("scripts/install.sh", readme)
-        self.assertIn("--confirm INSTALL_PILOTTUNNEL", readme)
+        self.assertIn("Run the same installer on each server and choose the role interactively.", readme)
         self.assertIn(
             "https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh",
             readme,
+        )
+        self.assertIn("multi-layer", lower_readme)
+        self.assertIn(
+            "bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh)",
+            readme,
+        )
+        self.assertRegex(
+            readme,
+            r"## One-line install\s+```bash\s+bash <\(curl -fsSL https://raw\.githubusercontent\.com/CapoLab/PilotTunnel/main/scripts/install\.sh\)\s+```",
         )

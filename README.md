@@ -1,30 +1,27 @@
 # PilotTunnel
 
-Safety-first CLI for planning and managing Layer 4 tunnel workflows between a controller and worker.
+Safety-first multi-layer tunnel orchestration CLI with guarded service workflows.
 
-PilotTunnel provides role-aware setup, managed binary verification, readiness checks, runtime planning, and guarded service workflows from one Python CLI. It is config-driven and designed to make every host-affecting action explicit.
+PilotTunnel gives you one installer and one CLI for controller/worker tunnel operations, with plans and confirmation gates before host-affecting steps.
 
 ## One-line install
 
-Controller:
-
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role controller --layer layer4 --confirm INSTALL_PILOTTUNNEL
+bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh)
 ```
 
-Worker:
+Run the same installer on each server and choose the role interactively.
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role worker --layer layer4 --confirm INSTALL_PILOTTUNNEL
-```
-
-Dry-run:
+<details>
+<summary>Non-interactive examples</summary>
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role controller --layer layer4 --dry-run
+bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role controller --layer layer4 --confirm INSTALL_PILOTTUNNEL
+bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role worker --layer layer4 --confirm INSTALL_PILOTTUNNEL
 ```
 
-Review downloaded scripts before running them. The installer prepares PilotTunnel but does not start tunnel services.
+</details>
 
 ## Common commands
 
@@ -43,7 +40,7 @@ python -m pilottunnel.cli readiness report --json
 
 No auto-switch. No background monitoring.
 
-## Documentation
+## Docs
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Operations guide](docs/OPERATIONS.md)

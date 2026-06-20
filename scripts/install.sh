@@ -14,6 +14,7 @@ DEFAULT_MANIFEST_NAME="provider-manifest.json"
 DEFAULT_RELEASES_SEGMENT="releases"
 DEFAULT_DOWNLOAD_SEGMENT="download"
 DEFAULT_PROVIDER_HOSTS="github.com,github-releases.githubusercontent.com,objects.githubusercontent.com,release-assets.githubusercontent.com"
+ORIGINAL_ARG_COUNT=$#
 
 ROLE=""
 LAYER="$DEFAULT_LAYER"
@@ -36,9 +37,10 @@ PYTHON_BIN=""
 
 usage() {
   cat <<EOF
-PilotTunnel production-oriented Linux bootstrap helper
+PilotTunnel safety-first multi-layer tunnel bootstrap helper
 
 Usage:
+  bash ${SCRIPT_NAME}
   bash ${SCRIPT_NAME} --role <controller|worker> --layer layer4 --dry-run
   bash ${SCRIPT_NAME} --role <controller|worker> --layer layer4 --confirm ${CONFIRM_TOKEN}
 
@@ -63,7 +65,8 @@ Safety:
   - No daemon reload is performed.
   - No firewall, route, or interface changes are performed.
   - No tunnel adapter binaries are executed.
-  - Layer 4 is runnable in v0.1; other known layers are planned-only.
+  - Public install flow is presented as multi-layer.
+  - The current runnable workflow defaults to layer4 in v0.1.
 EOF
 }
 
@@ -78,6 +81,10 @@ info() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+interactive_console_available() {
+  [ -t 0 ] && [ -t 1 ]
 }
 
 find_python() {
@@ -120,6 +127,66 @@ detect_os_release() {
   esac
 }
 
+prompt_interactive_role() {
+  while true; do
+    printf '%s\n' ""
+    printf '%s\n' "Select this server role:"
+    printf '%s\n' "  1. Controller / primary decision node"
+    printf '%s\n' "  2. Worker / secondary endpoint node"
+    printf '%s' "> "
+    IFS= read -r selection || fail "Interactive installer input was interrupted."
+    case "$(printf '%s' "$selection" | tr '[:upper:]' '[:lower:]')" in
+      1|controller)
+        ROLE="controller"
+        return
+        ;;
+      2|worker)
+        ROLE="worker"
+        return
+        ;;
+      *)
+        info "Enter 1 for controller or 2 for worker."
+        ;;
+    esac
+  done
+}
+
+prompt_interactive_mode() {
+  while true; do
+    printf '%s\n' ""
+    printf '%s\n' "Select installer mode:"
+    printf '%s\n' "  1. Dry-run review (default)"
+    printf '%s\n' "  2. Apply after confirmation"
+    printf '%s' "> "
+    IFS= read -r selection || fail "Interactive installer input was interrupted."
+    case "$(printf '%s' "$selection" | tr '[:upper:]' '[:lower:]')" in
+      ""|1|dry-run|dryrun)
+        DRY_RUN=1
+        return
+        ;;
+      2|apply)
+        DRY_RUN=0
+        printf 'Type %s to continue: ' "$CONFIRM_TOKEN"
+        IFS= read -r CONFIRM_VALUE || fail "Interactive installer input was interrupted."
+        return
+        ;;
+      *)
+        info "Enter 1 for dry-run or 2 for apply."
+        ;;
+    esac
+  done
+}
+
+run_interactive_setup() {
+  cat <<EOF
+PilotTunnel interactive installer
+Safety-first multi-layer tunnel orchestration with guarded service workflows.
+The current runnable workflow defaults to ${DEFAULT_LAYER} in v0.1.
+EOF
+  prompt_interactive_role
+  prompt_interactive_mode
+}
+
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -150,6 +217,9 @@ validate_layer() {
 }
 
 apply_defaults_and_validate() {
+  if [ -z "$ROLE" ] && [ "$ORIGINAL_ARG_COUNT" -eq 0 ] && interactive_console_available; then
+    run_interactive_setup
+  fi
   [ -n "$ROLE" ] || fail "Role is required in non-interactive mode. Use --role controller or --role worker."
   [ "$ROLE" = "controller" ] || [ "$ROLE" = "worker" ] || fail "--role must be controller or worker"
   validate_layer
