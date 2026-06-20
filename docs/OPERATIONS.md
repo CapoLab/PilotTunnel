@@ -39,6 +39,10 @@ python -m pilottunnel.cli binary download-all --manifest-url <MANIFEST_URL> --al
 python -m pilottunnel.cli binary status --require-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --json
 ```
 
+Provider releases use a pinned `provider-manifest.json`. Prepare release assets from
+`<SOURCE_DIR>` into `<RELEASE_DIR>`, write the local manifest to `<MANIFEST_FILE>`,
+and publish it under `<BINARY_REPO>` at `<BINARY_RELEASE_TAG>` before server setup.
+
 ## Readiness And Planning
 
 ```bash
@@ -46,6 +50,11 @@ python -m pilottunnel.cli readiness report --json
 python -m pilottunnel.cli bootstrap command --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --bundle-file <BUNDLE_FILE>
 python -m pilottunnel.cli bootstrap plan --role controller --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --create-profile --target-host <TARGET_HOST> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
 ```
+
+For explicit port planning, use placeholders rather than copied production values:
+`<MAIN_PORT>`, `<TARGET_PORT>`, `<CONTROL_PORT>`, `<SERVICE_PORT>`, and
+`<CHECK_PORT>`. Controller/worker handoff paths should likewise remain generic as
+`<BUNDLE_OUTPUT>` and `<BUNDLE_FILE>`.
 
 ## Safety Notes
 

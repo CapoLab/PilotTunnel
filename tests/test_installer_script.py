@@ -119,7 +119,10 @@ class InstallerScriptTests(unittest.TestCase):
 
     def test_readme_documents_safe_one_command_setup(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
-        self.assertIn("Quick Start", readme)
+        self.assertIn("One-line install", readme)
         self.assertIn("scripts/install.sh", readme)
         self.assertIn("--confirm INSTALL_PILOTTUNNEL", readme)
-        self.assertIn("<INSTALLER_URL>", readme)
+        self.assertIn(
+            "https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh",
+            readme,
+        )

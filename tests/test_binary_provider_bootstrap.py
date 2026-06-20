@@ -1891,8 +1891,13 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertTrue(payload["backup"]["ok"])
         self.assertIn("readiness", payload)
 
-    def test_readme_uses_placeholders_for_provider_workflow(self) -> None:
-        readme = Path("README.md").read_text(encoding="utf-8")
+    def test_public_docs_use_placeholders_for_provider_workflow(self) -> None:
+        public_docs = "\n".join(
+            [
+                Path("README.md").read_text(encoding="utf-8"),
+                Path("docs/OPERATIONS.md").read_text(encoding="utf-8"),
+            ]
+        )
         for placeholder in (
             "<PROFILE>",
             "<ADAPTER>",
@@ -1913,7 +1918,10 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             "<BUNDLE_FILE>",
             "<BUNDLE_OUTPUT>",
         ):
-            self.assertIn(placeholder, readme)
-        self.assertIn("provider-manifest.json", readme)
-        self.assertNotRegex(readme, r"--(?:main|target|control|service|check)-port\s+\d+")
-        self.assertNotRegex(readme, r"--profile\s+[A-Za-z][A-Za-z0-9._-]*-\d+[A-Za-z0-9._-]*")
+            self.assertIn(placeholder, public_docs)
+        self.assertIn("provider-manifest.json", public_docs)
+        self.assertNotRegex(public_docs, r"--(?:main|target|control|service|check)-port\s+\d+")
+        self.assertNotRegex(
+            public_docs,
+            r"--profile\s+[A-Za-z][A-Za-z0-9._-]*-\d+[A-Za-z0-9._-]*",
+        )
