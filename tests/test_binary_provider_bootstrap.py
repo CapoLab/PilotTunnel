@@ -2,19 +2,27 @@ import hashlib
 import gzip
 import io
 import json
+import socket
 import tarfile
 import tempfile
+import urllib.error
 import urllib.parse
 import unittest
 import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pilottunnel import cli
 from pilottunnel.binaries import all_binary_adapters, binary_spec, current_platform_id, provider_required_adapters
 from pilottunnel.bootstrap import build_bootstrap_command
-from pilottunnel.upstream_sources import SOURCE_SUMMARY_FILENAME, _load_release_metadata, upstream_source
+from pilottunnel.upstream_sources import (
+    SOURCE_SUMMARY_FILENAME,
+    _download_url_bytes,
+    _extract_binary_bytes,
+    _load_release_metadata,
+    upstream_source,
+)
 from testsupport import allocate_tcp_ports, static_http_server
 
 
@@ -211,6 +219,25 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 archive.writestr(member_name, payload)
             return buffer.getvalue()
         raise AssertionError(f"Unsupported archive type for test fixture: {archive_type}")
+
+    def _tar_gz_payload_from_entries(self, entries: list[tuple[str, bytes, int]]) -> bytes:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for name, payload, mode in entries:
+                info = tarfile.TarInfo(name=name)
+                info.mode = mode
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+        return buffer.getvalue()
+
+    def _zip_payload_from_entries(self, entries: list[tuple[str, bytes, int]]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w") as archive:
+            for name, payload, mode in entries:
+                info = zipfile.ZipInfo(name)
+                info.external_attr = mode << 16
+                archive.writestr(info, payload)
+        return buffer.getvalue()
 
     def _fake_release_fixtures(self, adapters: tuple[str, ...] | None = None) -> tuple[dict[str, dict[str, object]], dict[str, bytes]]:
         platform_id = current_platform_id()
@@ -762,6 +789,127 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         _load_release_metadata(upstream_source("backhaul"), "v1.2.3")
         request_url = mock_read_json_url.call_args.args[0]
         self.assertIn("releases/tags/v1.2.3", request_url)
+
+    def test_extract_tar_gz_selects_nested_expected_binary_and_ignores_docs(self) -> None:
+        payload = self._tar_gz_payload_from_entries(
+            [
+                ("backhaul_linux_amd64/README.md", b"readme", 0o644),
+                ("backhaul_linux_amd64/LICENSE", b"license", 0o644),
+                ("backhaul_linux_amd64/bin/backhaul", b"binary-payload", 0o755),
+            ]
+        )
+        extracted = _extract_binary_bytes(
+            source=upstream_source("backhaul"),
+            platform_id="linux-amd64",
+            asset_name="backhaul_linux_amd64.tar.gz",
+            archive_type="tar.gz",
+            payload=payload,
+        )
+        self.assertEqual(extracted, b"binary-payload")
+
+    def test_extract_tar_gz_selects_top_level_expected_binary_and_ignores_docs(self) -> None:
+        payload = self._tar_gz_payload_from_entries(
+            [
+                ("LICENSE", b"license", 0o644),
+                ("README.md", b"readme", 0o644),
+                ("backhaul", b"top-level-backhaul", 0o755),
+            ]
+        )
+        extracted = _extract_binary_bytes(
+            source=upstream_source("backhaul"),
+            platform_id="linux-amd64",
+            asset_name="backhaul_linux_amd64.tar.gz",
+            archive_type="tar.gz",
+            payload=payload,
+        )
+        self.assertEqual(extracted, b"top-level-backhaul")
+
+    def test_extract_zip_selects_nested_expected_binary_and_ignores_docs(self) -> None:
+        payload = self._zip_payload_from_entries(
+            [
+                ("rathole-x86_64-unknown-linux-gnu/README.md", b"readme", 0o644),
+                ("rathole-x86_64-unknown-linux-gnu/LICENSE", b"license", 0o644),
+                ("rathole-x86_64-unknown-linux-gnu/bin/rathole", b"zip-binary", 0o755),
+            ]
+        )
+        extracted = _extract_binary_bytes(
+            source=upstream_source("rathole"),
+            platform_id="linux-amd64",
+            asset_name="rathole-x86_64-unknown-linux-gnu.zip",
+            archive_type="zip",
+            payload=payload,
+        )
+        self.assertEqual(extracted, b"zip-binary")
+
+    def test_extract_zip_selects_top_level_expected_binary(self) -> None:
+        payload = self._zip_payload_from_entries(
+            [
+                ("rathole", b"top-level-rathole", 0o755),
+            ]
+        )
+        extracted = _extract_binary_bytes(
+            source=upstream_source("rathole"),
+            platform_id="linux-amd64",
+            asset_name="rathole-x86_64-unknown-linux-gnu.zip",
+            archive_type="zip",
+            payload=payload,
+        )
+        self.assertEqual(extracted, b"top-level-rathole")
+
+    def test_extract_tar_gz_selects_top_level_gost_binary_and_ignores_extra_readmes(self) -> None:
+        payload = self._tar_gz_payload_from_entries(
+            [
+                ("LICENSE", b"license", 0o644),
+                ("README.md", b"readme", 0o644),
+                ("README_en.md", b"readme-en", 0o644),
+                ("gost", b"top-level-gost", 0o755),
+            ]
+        )
+        extracted = _extract_binary_bytes(
+            source=upstream_source("gost"),
+            platform_id="linux-amd64",
+            asset_name="gost_3.2.6_linux_amd64.tar.gz",
+            archive_type="tar.gz",
+            payload=payload,
+        )
+        self.assertEqual(extracted, b"top-level-gost")
+
+    def test_extract_tar_gz_rejects_ambiguous_binary_candidates(self) -> None:
+        payload = self._tar_gz_payload_from_entries(
+            [
+                ("aa/backhaul", b"binary-a", 0o755),
+                ("bb/backhaul", b"binary-b", 0o755),
+            ]
+        )
+        with self.assertRaises(ValueError) as exc:
+            _extract_binary_bytes(
+                source=upstream_source("backhaul"),
+                platform_id="linux-amd64",
+                asset_name="backhaul_linux_amd64.tar.gz",
+                archive_type="tar.gz",
+                payload=payload,
+            )
+        self.assertIn("Ambiguous binary payloads", str(exc.exception))
+
+    @patch("pilottunnel.upstream_sources.time.sleep")
+    @patch("pilottunnel.upstream_sources.urllib.request.build_opener")
+    def test_download_url_retries_timeout_once_before_success(self, mock_build_opener, mock_sleep) -> None:
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b"downloaded"
+
+        opener = Mock()
+        opener.open.side_effect = [
+            urllib.error.URLError(socket.timeout("timed out")),
+            response,
+        ]
+        mock_build_opener.return_value = opener
+
+        data = _download_url_bytes("https://github.com/example/release.tar.gz", allowed_hosts={"github.com"})
+        self.assertEqual(data, b"downloaded")
+        self.assertEqual(opener.open.call_count, 2)
+        mock_sleep.assert_called_once()
 
     def test_binary_source_fetch_rejects_unknown_adapter(self) -> None:
         root = self.base / "source-fetch-unknown"

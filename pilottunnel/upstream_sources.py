@@ -9,8 +9,10 @@ import io
 import json
 import os
 import posixpath
+import socket
 import stat
 import tarfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +34,50 @@ GITHUB_RELEASE_HOSTS = {
     "github-releases.githubusercontent.com",
 }
 SOURCE_SUMMARY_FILENAME = "pilottunnel-source-summary.json"
+DOWNLOAD_TIMEOUT_SECONDS = 30
+DOWNLOAD_RETRY_ATTEMPTS = 3
+DOWNLOAD_RETRY_DELAY_SECONDS = 0.25
+
+IGNORED_ARCHIVE_SUFFIXES = (
+    ".md",
+    ".txt",
+    ".rst",
+    ".html",
+    ".htm",
+    ".json",
+    ".sha256",
+    ".sha512",
+    ".sig",
+    ".asc",
+    ".pem",
+)
+IGNORED_ARCHIVE_BASENAMES = {
+    "license",
+    "licenses",
+    "copying",
+    "copying.txt",
+    "notice",
+    "notices",
+    "authors",
+    "contributors",
+    "readme",
+    "changelog",
+    "news",
+    "checksums",
+    "sha256sum",
+    "sha256sums",
+    "sha512sum",
+    "sha512sums",
+}
+
+
+@dataclass(frozen=True)
+class ArchiveCandidate:
+    name: str
+    payload: bytes
+    executable_like: bool
+    depth: int
+    basename_length: int
 
 
 @dataclass(frozen=True)
@@ -616,19 +662,26 @@ def _extract_binary_bytes(
     payload: bytes,
 ) -> bytes:
     patterns = source.extracted_binary_path_patterns.get(platform_id, ())
+    expected_names = _expected_binary_names(source.binary_name, platform_id)
     if archive_type == "raw":
         return payload
     if archive_type == "gz":
         return gzip.decompress(payload)
     if archive_type == "tar.gz":
-        return _extract_from_tar_gz(payload, patterns, source.adapter, asset_name)
+        return _extract_from_tar_gz(payload, patterns, source.adapter, asset_name, expected_names)
     if archive_type == "zip":
-        return _extract_from_zip(payload, patterns, source.adapter, asset_name)
+        return _extract_from_zip(payload, patterns, source.adapter, asset_name, expected_names)
     raise ValueError(f"Unsupported archive handling '{archive_type}' for adapter '{source.adapter}'")
 
 
-def _extract_from_tar_gz(payload: bytes, patterns: tuple[str, ...], adapter: str, asset_name: str) -> bytes:
-    candidates: list[tuple[str, bytes]] = []
+def _extract_from_tar_gz(
+    payload: bytes,
+    patterns: tuple[str, ...],
+    adapter: str,
+    asset_name: str,
+    expected_names: tuple[str, ...],
+) -> bytes:
+    candidates: list[ArchiveCandidate] = []
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         for member in archive.getmembers():
             normalized = _safe_archive_name(member.name)
@@ -636,19 +689,25 @@ def _extract_from_tar_gz(payload: bytes, patterns: tuple[str, ...], adapter: str
                 raise ValueError(f"Archive symlink entries are not allowed for adapter '{adapter}'")
             if not member.isfile():
                 continue
-            if not _matches_member(normalized, patterns):
+            if _should_ignore_archive_member(normalized):
+                continue
+            if not _matches_member(normalized, patterns, expected_names):
                 continue
             extracted = archive.extractfile(member)
             if extracted is None:
                 continue
-            candidates.append((normalized, extracted.read()))
-    if len(candidates) != 1:
-        raise ValueError(f"Expected exactly one binary payload in '{asset_name}' for adapter '{adapter}'")
-    return candidates[0][1]
+            candidates.append(_archive_candidate(normalized, extracted.read(), _tar_member_is_executable(member)))
+    return _select_archive_candidate(candidates, adapter, asset_name)
 
 
-def _extract_from_zip(payload: bytes, patterns: tuple[str, ...], adapter: str, asset_name: str) -> bytes:
-    candidates: list[tuple[str, bytes]] = []
+def _extract_from_zip(
+    payload: bytes,
+    patterns: tuple[str, ...],
+    adapter: str,
+    asset_name: str,
+    expected_names: tuple[str, ...],
+) -> bytes:
+    candidates: list[ArchiveCandidate] = []
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         for member in archive.infolist():
             normalized = _safe_archive_name(member.filename)
@@ -656,19 +715,85 @@ def _extract_from_zip(payload: bytes, patterns: tuple[str, ...], adapter: str, a
                 raise ValueError(f"Archive symlink entries are not allowed for adapter '{adapter}'")
             if member.is_dir():
                 continue
-            if not _matches_member(normalized, patterns):
+            if _should_ignore_archive_member(normalized):
                 continue
-            candidates.append((normalized, archive.read(member)))
-    if len(candidates) != 1:
-        raise ValueError(f"Expected exactly one binary payload in '{asset_name}' for adapter '{adapter}'")
-    return candidates[0][1]
+            if not _matches_member(normalized, patterns, expected_names):
+                continue
+            candidates.append(_archive_candidate(normalized, archive.read(member), _zip_member_is_executable(member)))
+    return _select_archive_candidate(candidates, adapter, asset_name)
 
 
-def _matches_member(name: str, patterns: tuple[str, ...]) -> bool:
+def _matches_member(name: str, patterns: tuple[str, ...], expected_names: tuple[str, ...]) -> bool:
+    basename = PurePosixPath(name).name.lower()
+    if basename not in expected_names:
+        return False
     for pattern in patterns:
-        if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(PurePosixPath(name).name, pattern):
+        pattern_name = PurePosixPath(pattern).name
+        if (
+            fnmatch.fnmatch(name, pattern)
+            or fnmatch.fnmatch(basename, pattern.lower())
+            or fnmatch.fnmatch(basename, pattern_name.lower())
+        ):
             return True
     return False
+
+
+def _expected_binary_names(binary_name: str, platform_id: str) -> tuple[str, ...]:
+    names = {binary_name.lower()}
+    if platform_id.startswith("windows") and not binary_name.lower().endswith(".exe"):
+        names.add(f"{binary_name.lower()}.exe")
+    return tuple(sorted(names))
+
+
+def _should_ignore_archive_member(name: str) -> bool:
+    basename = PurePosixPath(name).name.lower()
+    if not basename:
+        return True
+    stem = PurePosixPath(basename).stem.lower()
+    if basename in IGNORED_ARCHIVE_BASENAMES or stem in IGNORED_ARCHIVE_BASENAMES:
+        return True
+    return basename.endswith(IGNORED_ARCHIVE_SUFFIXES)
+
+
+def _archive_candidate(name: str, payload: bytes, executable_like: bool) -> ArchiveCandidate:
+    path = PurePosixPath(name)
+    return ArchiveCandidate(
+        name=name,
+        payload=payload,
+        executable_like=executable_like,
+        depth=len(path.parts),
+        basename_length=len(path.name),
+    )
+
+
+def _select_archive_candidate(candidates: list[ArchiveCandidate], adapter: str, asset_name: str) -> bytes:
+    if not candidates:
+        raise ValueError(f"Expected exactly one binary payload in '{asset_name}' for adapter '{adapter}'")
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            0 if item.executable_like else 1,
+            item.depth,
+            len(item.name),
+            item.name,
+        ),
+    )
+    best = ordered[0]
+    tied = [
+        item
+        for item in ordered
+        if (
+            item.executable_like == best.executable_like
+            and item.depth == best.depth
+            and len(item.name) == len(best.name)
+        )
+    ]
+    if len(tied) > 1:
+        names = ", ".join(item.name for item in tied[:3])
+        raise ValueError(
+            f"Ambiguous binary payloads in '{asset_name}' for adapter '{adapter}': {names}"
+        )
+    return best.payload
 
 
 def _safe_archive_name(name: str) -> str:
@@ -688,6 +813,15 @@ def _safe_archive_name(name: str) -> str:
 def _zip_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     mode = member.external_attr >> 16
     return stat.S_ISLNK(mode)
+
+
+def _tar_member_is_executable(member: tarfile.TarInfo) -> bool:
+    return bool(member.mode & 0o111)
+
+
+def _zip_member_is_executable(member: zipfile.ZipInfo) -> bool:
+    mode = member.external_attr >> 16
+    return bool(mode & 0o111)
 
 
 def _validate_release_asset_url(source: UpstreamSource, url: str) -> None:
@@ -748,20 +882,41 @@ def _download_url_bytes(url: str, *, allowed_hosts: set[str], max_redirects: int
     for _ in range(max_redirects + 1):
         _validate_download_url(current_url, allowed_hosts)
         request = urllib.request.Request(current_url, headers=request_headers, method="GET")
-        try:
-            with opener.open(request, timeout=20) as response:
-                return response.read()
-        except urllib.error.HTTPError as exc:
-            if exc.code not in {301, 302, 303, 307, 308}:
-                raise
-            location = exc.headers.get("Location", "").strip()
-            if not location:
-                raise ValueError("Redirect response did not include a Location header") from exc
-            next_url = urllib.parse.urljoin(current_url, location)
-            _validate_download_url(next_url, allowed_hosts)
-            current_url = next_url
+        for attempt in range(DOWNLOAD_RETRY_ATTEMPTS):
+            try:
+                with opener.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                    return response.read()
+            except urllib.error.HTTPError as exc:
+                if exc.code not in {301, 302, 303, 307, 308}:
+                    raise
+                location = exc.headers.get("Location", "").strip()
+                if not location:
+                    raise ValueError("Redirect response did not include a Location header") from exc
+                next_url = urllib.parse.urljoin(current_url, location)
+                _validate_download_url(next_url, allowed_hosts)
+                current_url = next_url
+                break
+            except Exception as exc:
+                if attempt >= DOWNLOAD_RETRY_ATTEMPTS - 1 or not _is_retryable_download_error(exc):
+                    raise
+                time.sleep(DOWNLOAD_RETRY_DELAY_SECONDS)
+        else:
             continue
+        continue
     raise ValueError(f"Too many redirects while downloading '{url}'")
+
+
+def _is_retryable_download_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return True
+        if isinstance(reason, str):
+            return "timed out" in reason.lower() or "timeout" in reason.lower()
+        return "timed out" in str(reason).lower() or "timeout" in str(reason).lower()
+    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
 
 
 def _validate_download_url(url: str, allowed_hosts: set[str]) -> None:
