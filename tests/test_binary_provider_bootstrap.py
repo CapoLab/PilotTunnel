@@ -1151,6 +1151,23 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("DOWNLOAD_ALL_BINARIES", output)
 
+    def test_worker_role_allows_binary_download_all_action_name(self) -> None:
+        root = self.base / "download-all-worker-role"
+        init_code, init_output = self.run_cli(root, "init", "--role", "worker", "--force")
+        self.assertEqual(init_code, 0, msg=init_output)
+
+        code, output = self.run_cli(
+            root,
+            "binary",
+            "download-all",
+            "--manifest-file",
+            str(root / "missing-provider-manifest.json"),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("DOWNLOAD_ALL_BINARIES", output)
+        self.assertNotIn("blocked for node role", output)
+
     def test_binary_download_deletes_temp_file_on_checksum_mismatch(self) -> None:
         fixture_root, metadata = self._provider_fixture(("backhaul",))
         with static_http_server(fixture_root) as base_url:

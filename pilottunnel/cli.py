@@ -693,7 +693,7 @@ def _action_name(args: argparse.Namespace) -> str | None:
             return f"binary_source_{args.binary_source_command}"
         if args.binary_command == "provider":
             return f"binary_provider_{args.binary_provider_command}"
-        return f"binary_{args.binary_command}"
+        return f"binary_{args.binary_command.replace('-', '_')}"
     if args.command == "backup":
         return f"backup_{args.backup_command}"
     if args.command == "bundle":
