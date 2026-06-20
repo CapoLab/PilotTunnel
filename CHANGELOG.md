@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Polished the public repository layout with architecture, operations, contributing, and security documentation.
+- Added conservative editor and CI defaults for public development.
+- Added generic GitHub issue and pull request templates focused on safety and public-hygiene checks.
+
 ## 0.1.1-dev - 2026-06-20
 
 - Bumped project metadata to the post-`v0.1.0` development stage.

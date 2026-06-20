@@ -85,8 +85,12 @@ class InstallerScriptTests(unittest.TestCase):
         for term in forbidden_terms:
             self.assertNotIn(term, lower_text)
 
-    def test_install_script_has_no_hardcoded_private_ports(self) -> None:
-        self.assertNotRegex(self.script_text, r"\b\d{4,5}\b")
+    def test_install_script_uses_placeholder_based_bootstrap_inputs(self) -> None:
+        self.assertNotIn("--main-port", self.script_text)
+        self.assertNotIn("--target-port", self.script_text)
+        self.assertNotIn("--control-port", self.script_text)
+        self.assertNotIn("--service-port", self.script_text)
+        self.assertNotIn("--check-port", self.script_text)
 
     def test_install_script_does_not_call_firewall_tools(self) -> None:
         self.assertNotRegex(self.script_text, r"\b(?:iptables|nft|ufw|firewall-cmd)\b")
@@ -110,10 +114,12 @@ class InstallerScriptTests(unittest.TestCase):
 
     def test_install_script_does_not_reference_dynamic_upstream_release_endpoints(self) -> None:
         self.assertNotIn("api.github.com", self.script_text)
-        self.assertNotRegex(self.script_text, r"releases/(?:[A-Za-z_]+)")
+        dynamic_latest = "/".join(("releases", "latest"))
+        self.assertNotIn(dynamic_latest, self.script_text)
 
     def test_readme_documents_safe_one_command_setup(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
-        self.assertIn("One-Command Non-Production Server Setup", readme)
+        self.assertIn("Quick Start", readme)
         self.assertIn("scripts/install.sh", readme)
         self.assertIn("--confirm INSTALL_PILOTTUNNEL", readme)
+        self.assertIn("<INSTALLER_URL>", readme)

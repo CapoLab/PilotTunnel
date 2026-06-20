@@ -1,6 +1,6 @@
 # PilotTunnel
 
-PilotTunnel is a server-only Python CLI project for managing multiple tunnel adapters behind a stable public port. There is no UI, no dashboard, and no frontend. The current development line is `0.1.1-dev`, continuing the safe Layer 4 orchestration model introduced in `v0.1.0`.
+PilotTunnel is a safety-first Python CLI for server-side Layer 4 tunnel operations. It helps operators manage controller and worker roles, profile-driven planning, provider-managed binaries, runtime rendering, and guarded service workflows without adding any UI, dashboard, or hidden automation.
 
 ## Current Status
 
@@ -8,6 +8,32 @@ PilotTunnel is a server-only Python CLI project for managing multiple tunnel ada
 - Only `layer4` is active in `v0.1`; other layers remain listed as metadata and are intentionally blocked.
 - Backhaul and Rathole now have richer dry-run planning for `controller` and `worker` roles.
 - Real remote coordination, real systemd changes, firewall rules, and host networking changes are still not implemented.
+
+## What PilotTunnel Does
+
+- Plans and renders Layer 4 tunnel workflows through a single CLI
+- Keeps controller and worker behavior explicit and role-aware
+- Tracks config, state, registry, and audit data separately
+- Uses pinned provider manifests for managed binary download workflows
+- Preserves guarded confirmation steps for host-affecting operations
+
+## What PilotTunnel Does Not Do
+
+- No UI, dashboard, or frontend
+- No automatic failover or background monitoring in `v0.1`
+- No hidden firewall, route, or interface changes
+- No uncontrolled service lifecycle changes
+- No dynamic upstream `latest` binary fetching during install or bootstrap
+
+## Architecture Overview
+
+- Roles: `controller` and `worker`
+- Layers: `layer4` runnable now, other known layers planned-only
+- Profiles: operator-defined ports, target endpoint placeholders, and adapter candidates
+- Binary provider: pinned manifest, exact versions, exact SHA256
+- Runtime flow: plan first, inspect readiness, then apply only guarded steps
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/OPERATIONS.md](docs/OPERATIONS.md), [SECURITY.md](SECURITY.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for the public project layout and operating model.
 
 ## Current Development Version
 
@@ -42,17 +68,33 @@ python -m pilottunnel.cli version
 - Prints the project name, version, release phase, supported scope, and safety notes.
 - Confirms that auto-switch and background monitoring are not part of the current development stage.
 
-## One-Command Non-Production Server Setup
-
-- `scripts/install.sh` is a Linux-focused installer/bootstrap helper for non-production smoke testing.
-- It requires an explicit role, supports dry-run planning, and requires exact confirmation for apply mode.
-- It supports a binary-first workflow with `--with-binaries` so all required v0.1 Layer 4 adapter binaries are prepared before bootstrap or profile work continues.
-- It clones or updates the requested repo ref into a PilotTunnel-owned install directory and runs only safe setup checks.
-- By default it does not write to `/etc/systemd/system`, does not call daemon reload, does not start services, does not modify firewall or routes, and does not execute tunnel adapter binaries.
+## Quick Start
 
 ```bash
-sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --dry-run
-sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF> --install-dir <INSTALL_DIR> --with-binaries --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm INSTALL_PILOTTUNNEL
+bash scripts/install.sh --role controller --layer layer4 --dry-run
+bash scripts/install.sh --role controller --layer layer4 --confirm INSTALL_PILOTTUNNEL
+bash scripts/install.sh --role worker --layer layer4 --confirm INSTALL_PILOTTUNNEL
+curl -fsSL <INSTALLER_URL> | sh -s -- --role controller --layer layer4 --dry-run
+curl -fsSL <INSTALLER_URL> | sh -s -- --role worker --layer layer4 --confirm INSTALL_PILOTTUNNEL
+```
+
+- The bootstrap helper is Linux-focused and safety-first.
+- It defaults to the public source repository and the public provider manifest.
+- It does not start services, perform daemon reloads, modify firewall rules, modify routes, or execute adapter binaries during bootstrap.
+
+## Public Safety Guarantees
+
+- Dry-run first where planning output already exists
+- Exact confirm tokens for host-affecting apply paths
+- Provider-managed binaries must pass manifest and checksum checks
+- Public examples use placeholders and generic `controller`/`worker` roles only
+
+## Development Commands
+
+```bash
+python -m compileall pilottunnel
+python -m unittest discover -s tests -v
+git diff --check
 ```
 
 ## Dry-Run Safety Model
@@ -124,25 +166,28 @@ sudo bash scripts/install.sh --role controller --repo-url <REPO_URL> --ref <REF>
 ## Example Commands
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init --role controller
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name <PROFILE> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter rathole --transport tcp
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --audit-log <AUDIT_LOG> --lock-dir <LOCK_DIR> --work-dir <WORK_DIR> init --role controller
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> layer select --layer layer4
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> profile create --name <PROFILE> --main-port <MAIN_PORT> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT> --candidate backhaul:tcp --candidate backhaul:tcpmux --candidate rathole:tcp
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> adapter list
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> bootstrap command --profile <PROFILE> --adapter <ADAPTER> --transport <TRANSPORT> --ports auto --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --bundle-output <BUNDLE_OUTPUT> --bundle-file <BUNDLE_FILE>
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> switch --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> switch --profile <PROFILE> --adapter rathole --transport tcp
 ```
 
 ## Dry-Run CLI Workflow
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log --lock-dir ./tmp/locks --work-dir ./tmp/work init --role controller
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json profile create --name <PROFILE> --main-port <MAIN_PORT> --target-host <TARGET_HOST> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT>
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json adapter show --name backhaul
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json switch --profile <PROFILE> --adapter rathole --transport tcp
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json status --profile <PROFILE>
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --audit-log ./tmp/audit.log logs --profile <PROFILE> --limit 10
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json registry check
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --audit-log <AUDIT_LOG> --lock-dir <LOCK_DIR> --work-dir <WORK_DIR> init --role controller
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> layer select --layer layer4
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> profile create --name <PROFILE> --main-port <MAIN_PORT> --target-host <TARGET_HOST> --target-port <TARGET_PORT> --role controller --control-port <CONTROL_PORT> --service-port <SERVICE_PORT> --check-port <CHECK_PORT>
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> adapter list
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> adapter show --name backhaul
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> switch --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> switch --profile <PROFILE> --adapter rathole --transport tcp
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> status --profile <PROFILE>
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --audit-log <AUDIT_LOG> logs --profile <PROFILE> --limit 10
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> registry check
 ```
 
 ## Staged Apply Mode
@@ -154,10 +199,10 @@ python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --
 In this stage, `--apply` does not call `systemctl`, does not touch real systemd locations, does not modify firewall rules or routes, and does not download or execute tunnel binaries.
 
 ```bash
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging plan --profile <PROFILE> --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging --apply switch --profile <PROFILE> --adapter backhaul --transport tcpmux
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged list
-python -m pilottunnel.cli --config ./tmp/config.json --state ./tmp/state.json --registry ./tmp/registry.json --staging-root .var/pilottunnel/staging staged show --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --staging-root <STAGING_ROOT> plan --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --staging-root <STAGING_ROOT> --apply switch --profile <PROFILE> --adapter backhaul --transport tcpmux
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --staging-root <STAGING_ROOT> staged list
+python -m pilottunnel.cli --config <CONFIG_FILE> --state <STATE_FILE> --registry <REGISTRY_FILE> --staging-root <STAGING_ROOT> staged show --profile <PROFILE> --adapter backhaul --transport tcpmux
 ```
 
 ## Host Preflight And Binary Planning

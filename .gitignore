@@ -9,3 +9,8 @@ venv/
 *.log
 .DS_Store
 Thumbs.db
+.var/
+.provider-source/
+.provider-release/
+.provider-debug/
+gcm-diagnose.log

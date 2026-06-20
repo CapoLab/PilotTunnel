@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement for PilotTunnel
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep requests generic and safety-aware. Do not include production values or private infrastructure examples.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What operator need or workflow gap are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired CLI or workflow behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: Mention any dry-run, confirmation, or host-safety expectations.
