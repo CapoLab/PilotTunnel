@@ -17,10 +17,12 @@ The top-level bootstrap helper is:
 ```bash
 bash scripts/install.sh
 bash scripts/install.sh --role <ROLE> --layer layer4 --dry-run
-bash scripts/install.sh --role <ROLE> --layer layer4 --confirm INSTALL_PILOTTUNNEL
+bash scripts/install.sh --no-menu --role <ROLE>
 ```
 
-- running the script with no arguments on a TTY enters the interactive controller/worker flow
+- running the script with no arguments prepares PilotTunnel and opens the terminal menu
+- role selection happens later under `Setup / Configure this server`
+- use `--no-menu --role <ROLE>` for explicit non-interactive initialization
 - the script defaults to the public source repository and public provider manifest
 - it does not start services or modify firewall, routes, or interfaces
 - it records unsupported known layers as planned-only preferences
@@ -38,7 +40,7 @@ python -m pilottunnel.cli layer status
 ```bash
 python -m pilottunnel.cli binary provider inspect --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
 python -m pilottunnel.cli binary download-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --confirm DOWNLOAD_ALL_BINARIES
-python -m pilottunnel.cli binary status --require-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST> --json
+python -m pilottunnel.cli binary status --require-all --manifest-url <MANIFEST_URL> --allow-provider-host <PROVIDER_HOST>
 ```
 
 Provider releases use a pinned `provider-manifest.json`. Prepare release assets from

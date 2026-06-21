@@ -2,7 +2,6 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-CONFIRM_TOKEN="INSTALL_PILOTTUNNEL"
 
 DEFAULT_REPO_URL="https://github.com/CapoLab/PilotTunnel.git"
 DEFAULT_REF="main"
@@ -14,15 +13,13 @@ DEFAULT_MANIFEST_NAME="provider-manifest.json"
 DEFAULT_RELEASES_SEGMENT="releases"
 DEFAULT_DOWNLOAD_SEGMENT="download"
 DEFAULT_PROVIDER_HOSTS="github.com,github-releases.githubusercontent.com,objects.githubusercontent.com,release-assets.githubusercontent.com"
-ORIGINAL_ARG_COUNT=$#
-
 ROLE=""
 LAYER="$DEFAULT_LAYER"
 REPO_URL="$DEFAULT_REPO_URL"
 REF="$DEFAULT_REF"
 INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 DRY_RUN=0
-CONFIRM_VALUE=""
+NO_MENU=0
 MANIFEST_URL=""
 MANIFEST_FILE=""
 ALLOW_PROVIDER_HOST="$DEFAULT_PROVIDER_HOSTS"
@@ -41,23 +38,24 @@ PilotTunnel safety-first multi-layer tunnel bootstrap helper
 
 Usage:
   bash ${SCRIPT_NAME}
-  bash ${SCRIPT_NAME} --role <controller|worker> --layer layer4 --dry-run
-  bash ${SCRIPT_NAME} --role <controller|worker> --layer layer4 --confirm ${CONFIRM_TOKEN}
+  bash ${SCRIPT_NAME} --no-menu --role <controller|worker>
+  bash ${SCRIPT_NAME} --dry-run
 
 Options:
-  --role <ROLE>           Required in non-interactive mode. Use controller or worker.
+  --no-menu              Prepare PilotTunnel without launching the terminal menu.
+  --role <ROLE>           Initialize controller or worker in non-interactive mode.
   --layer <LAYER>         Optional. Defaults to layer4.
   --repo-url <REPO_URL>   Optional. Defaults to the public PilotTunnel repo.
   --ref <REF>             Optional. Defaults to main.
   --install-dir <DIR>     Optional. Defaults to /opt/pilottunnel.
   --with-binaries         Download, import, and verify required provider binaries.
   --without-binaries      Skip binary download/import/verify during bootstrap.
+  --no-binaries           Alias for --without-binaries.
   --manifest-url <URL>    Optional provider manifest URL override.
   --manifest-file <FILE>  Optional local provider manifest file override.
   --allow-provider-host <HOST[,HOST...]>
                           Optional provider manifest/artifact allowlist.
   --dry-run               Print the safe bootstrap plan without cloning or writing files.
-  --confirm <TOKEN>       Required for apply mode. Must be ${CONFIRM_TOKEN}.
   --help                  Show this help text.
 
 Safety:
@@ -65,7 +63,8 @@ Safety:
   - No daemon reload is performed.
   - No firewall, route, or interface changes are performed.
   - No tunnel adapter binaries are executed.
-  - Public install flow is presented as multi-layer.
+  - Basic installation needs no typed confirmation.
+  - Public install flow is presented as multi-layer and opens a terminal menu.
   - The current runnable workflow defaults to layer4 in v0.1.
 EOF
 }
@@ -81,10 +80,6 @@ info() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
-}
-
-interactive_console_available() {
-  [ -t 0 ] && [ -t 1 ]
 }
 
 find_python() {
@@ -127,66 +122,6 @@ detect_os_release() {
   esac
 }
 
-prompt_interactive_role() {
-  while true; do
-    printf '%s\n' ""
-    printf '%s\n' "Select this server role:"
-    printf '%s\n' "  1. Controller / primary decision node"
-    printf '%s\n' "  2. Worker / secondary endpoint node"
-    printf '%s' "> "
-    IFS= read -r selection || fail "Interactive installer input was interrupted."
-    case "$(printf '%s' "$selection" | tr '[:upper:]' '[:lower:]')" in
-      1|controller)
-        ROLE="controller"
-        return
-        ;;
-      2|worker)
-        ROLE="worker"
-        return
-        ;;
-      *)
-        info "Enter 1 for controller or 2 for worker."
-        ;;
-    esac
-  done
-}
-
-prompt_interactive_mode() {
-  while true; do
-    printf '%s\n' ""
-    printf '%s\n' "Select installer mode:"
-    printf '%s\n' "  1. Dry-run review (default)"
-    printf '%s\n' "  2. Apply after confirmation"
-    printf '%s' "> "
-    IFS= read -r selection || fail "Interactive installer input was interrupted."
-    case "$(printf '%s' "$selection" | tr '[:upper:]' '[:lower:]')" in
-      ""|1|dry-run|dryrun)
-        DRY_RUN=1
-        return
-        ;;
-      2|apply)
-        DRY_RUN=0
-        printf 'Type %s to continue: ' "$CONFIRM_TOKEN"
-        IFS= read -r CONFIRM_VALUE || fail "Interactive installer input was interrupted."
-        return
-        ;;
-      *)
-        info "Enter 1 for dry-run or 2 for apply."
-        ;;
-    esac
-  done
-}
-
-run_interactive_setup() {
-  cat <<EOF
-PilotTunnel interactive installer
-Safety-first multi-layer tunnel orchestration with guarded service workflows.
-The current runnable workflow defaults to ${DEFAULT_LAYER} in v0.1.
-EOF
-  prompt_interactive_role
-  prompt_interactive_mode
-}
-
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -195,13 +130,13 @@ parse_args() {
       --repo-url) [ $# -ge 2 ] || fail "--repo-url requires a value"; REPO_URL="$2"; shift 2 ;;
       --ref) [ $# -ge 2 ] || fail "--ref requires a value"; REF="$2"; shift 2 ;;
       --install-dir) [ $# -ge 2 ] || fail "--install-dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
+      --no-menu) NO_MENU=1; shift ;;
       --with-binaries) WITH_BINARIES=1; shift ;;
-      --without-binaries) WITH_BINARIES=0; shift ;;
+      --without-binaries|--no-binaries) WITH_BINARIES=0; shift ;;
       --manifest-url) [ $# -ge 2 ] || fail "--manifest-url requires a value"; MANIFEST_URL="$2"; shift 2 ;;
       --manifest-file) [ $# -ge 2 ] || fail "--manifest-file requires a value"; MANIFEST_FILE="$2"; shift 2 ;;
       --allow-provider-host) [ $# -ge 2 ] || fail "--allow-provider-host requires a value"; ALLOW_PROVIDER_HOST="$2"; shift 2 ;;
       --dry-run) DRY_RUN=1; shift ;;
-      --confirm) [ $# -ge 2 ] || fail "--confirm requires a value"; CONFIRM_VALUE="$2"; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "Unknown argument: $1" ;;
     esac
@@ -217,11 +152,9 @@ validate_layer() {
 }
 
 apply_defaults_and_validate() {
-  if [ -z "$ROLE" ] && [ "$ORIGINAL_ARG_COUNT" -eq 0 ] && interactive_console_available; then
-    run_interactive_setup
+  if [ -n "$ROLE" ]; then
+    [ "$ROLE" = "controller" ] || [ "$ROLE" = "worker" ] || fail "--role must be controller or worker"
   fi
-  [ -n "$ROLE" ] || fail "Role is required in non-interactive mode. Use --role controller or --role worker."
-  [ "$ROLE" = "controller" ] || [ "$ROLE" = "worker" ] || fail "--role must be controller or worker"
   validate_layer
 
   if [ "$WITH_BINARIES" -eq 1 ] && [ -z "$MANIFEST_URL" ] && [ -z "$MANIFEST_FILE" ]; then
@@ -232,12 +165,6 @@ apply_defaults_and_validate() {
   fi
   if [ "$WITH_BINARIES" -eq 1 ] && [ -z "$MANIFEST_URL" ] && [ -z "$MANIFEST_FILE" ]; then
     fail "Binary-first bootstrap requires a provider manifest."
-  fi
-  if [ "$DRY_RUN" -eq 1 ] && [ -n "$CONFIRM_VALUE" ]; then
-    fail "Use either --dry-run or --confirm ${CONFIRM_TOKEN}, not both."
-  fi
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CONFIRM_VALUE" != "$CONFIRM_TOKEN" ]; then
-    fail "Apply mode requires --confirm INSTALL_PILOTTUNNEL"
   fi
 }
 
@@ -281,6 +208,7 @@ prepare_layout() {
   WORK_DIR="${BASE_DIR}/work"
   STAGING_ROOT="${BASE_DIR}/staging"
   RUNTIME_DIR="${BASE_DIR}/runtime"
+  BIN_DIR="${BASE_DIR}/bin"
   SERVICE_DIR="${BASE_DIR}/service-staging"
   TARGET_DIR="${BASE_DIR}/systemd-target"
   INSTALL_ROOT="${BASE_DIR}/install-root"
@@ -296,7 +224,7 @@ print_plan() {
   cat <<EOF
 PilotTunnel installer plan
   mode: $( [ "$DRY_RUN" -eq 1 ] && printf '%s' 'dry-run' || printf '%s' 'apply' )
-  role: $ROLE
+  role: ${ROLE:-deferred until Setup / Configure this server}
   layer: $LAYER
   layer_supported_now: $( [ "$LAYER_SUPPORTED" -eq 1 ] && printf '%s' 'true' || printf '%s' 'false' )
   repo_url: $redacted_repo
@@ -328,13 +256,17 @@ run_quiet_git() {
 }
 
 sync_repo() {
-  mkdir -p "$BASE_DIR" "$STATE_DIR" "$WORK_DIR" "$STAGING_ROOT" "$RUNTIME_DIR" "$SERVICE_DIR" "$TARGET_DIR" "$INSTALL_ROOT"
+  mkdir -p "$BASE_DIR" "$BIN_DIR" "$STATE_DIR" "$WORK_DIR" "$STAGING_ROOT" "$RUNTIME_DIR" "$SERVICE_DIR" "$TARGET_DIR" "$INSTALL_ROOT"
   if [ ! -d "$REPO_DIR/.git" ]; then
     run_quiet_git git clone "$REPO_URL" "$REPO_DIR"
   else
     run_quiet_git git -C "$REPO_DIR" fetch --tags --prune origin
   fi
-  run_quiet_git git -C "$REPO_DIR" checkout "$REF"
+  if git -C "$REPO_DIR" rev-parse --verify --quiet "refs/remotes/origin/${REF}" >/dev/null; then
+    run_quiet_git git -C "$REPO_DIR" checkout --detach "refs/remotes/origin/${REF}"
+  else
+    run_quiet_git git -C "$REPO_DIR" checkout --detach "$REF"
+  fi
 }
 
 pt_cli() {
@@ -364,19 +296,61 @@ prepare_binaries() {
   (
     cd "$REPO_DIR"
     pt_cli binary download-all "${binary_args[@]}" --confirm DOWNLOAD_ALL_BINARIES
-    pt_cli binary status --require-all "${binary_args[@]}" --json
+    pt_cli binary status --require-all "${binary_args[@]}"
   )
 }
 
-run_safe_checks() {
+configured_role() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except (OSError, ValueError):
+    raise SystemExit(0)
+node = payload.get("node") or {}
+if node.get("initialized"):
+    print(node.get("normalized_role") or node.get("node_role") or "")
+PY
+}
+
+initialize_role_if_requested() {
+  [ -n "$ROLE" ] || return
+  existing_role="$(configured_role)"
+  if [ -n "$existing_role" ]; then
+    [ "$existing_role" = "$ROLE" ] || fail "Node is already initialized as '$existing_role'. Use the Setup menu to change it safely."
+    info "Node role is already initialized as '$ROLE'."
+    return
+  fi
   (
     cd "$REPO_DIR"
-    pt_cli init --role "$ROLE" --force
+    pt_cli init --role "$ROLE"
     pt_cli layer select --layer "$LAYER"
     pt_cli node status
     pt_cli layer status
     pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT" --json
   )
+}
+
+install_menu_launcher() {
+  menu_source="${REPO_DIR}/scripts/pilottunnel-menu"
+  [ -f "$menu_source" ] || fail "Installed repository does not contain scripts/pilottunnel-menu."
+  chmod 0755 "$menu_source"
+  ln -sfn "$menu_source" "${BIN_DIR}/pilottunnel-menu"
+}
+
+launch_menu_if_requested() {
+  if [ "$NO_MENU" -eq 1 ]; then
+    info "PilotTunnel prepared. Run ${BIN_DIR}/pilottunnel-menu when you are ready to configure this server."
+    return
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    info "PilotTunnel prepared without an interactive terminal. Run ${BIN_DIR}/pilottunnel-menu from a TTY."
+    return
+  fi
+  "${BIN_DIR}/pilottunnel-menu" --base-dir "$BASE_DIR"
 }
 
 main() {
@@ -395,8 +369,10 @@ main() {
 
   sync_repo
   prepare_binaries
-  run_safe_checks
-  info "PilotTunnel bootstrap apply completed without starting services or modifying systemd targets."
+  install_menu_launcher
+  initialize_role_if_requested
+  info "PilotTunnel installation completed without starting services or modifying systemd targets."
+  launch_menu_if_requested
 }
 
 main "$@"

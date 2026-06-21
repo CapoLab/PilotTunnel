@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+DEFAULT_BASE_DIR="/opt/pilottunnel"
+BASE_DIR="$DEFAULT_BASE_DIR"
+PYTHON_BIN=""
+
+fail() {
+  printf '%s\n' "Error: $*" >&2
+  exit 1
+}
+
+info() {
+  printf '%s\n' "$*"
+}
+
+usage() {
+  cat <<EOF
+PilotTunnel terminal menu
+
+Usage:
+  pilottunnel-menu [--base-dir <DIR>]
+
+Options:
+  --base-dir <DIR>  PilotTunnel installation root. Defaults to ${DEFAULT_BASE_DIR}.
+  --help            Show this help text.
+EOF
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base-dir) [ $# -ge 2 ] || fail "--base-dir requires a value"; BASE_DIR="$2"; shift 2 ;;
+      --help|-h) usage; exit 0 ;;
+      *) fail "Unknown argument: $1" ;;
+    esac
+  done
+}
+
+find_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "python3"
+  elif command -v python >/dev/null 2>&1; then
+    printf '%s\n' "python"
+  else
+    printf '%s\n' ""
+  fi
+}
+
+prepare_paths() {
+  case "$BASE_DIR" in
+    /*) ;;
+    *) BASE_DIR="$(cd "$BASE_DIR" 2>/dev/null && pwd -P)" || fail "Base directory does not exist: $BASE_DIR" ;;
+  esac
+  REPO_DIR="${BASE_DIR}/repo"
+  STATE_DIR="${BASE_DIR}/state"
+  WORK_DIR="${BASE_DIR}/work"
+  STAGING_ROOT="${BASE_DIR}/staging"
+  INSTALL_ROOT="${BASE_DIR}/install-root"
+  CONFIG_FILE="${STATE_DIR}/config.json"
+  STATE_FILE="${STATE_DIR}/state.json"
+  REGISTRY_FILE="${STATE_DIR}/registry.json"
+  AUDIT_LOG="${STATE_DIR}/audit.log"
+  LOCK_DIR="${STATE_DIR}/locks"
+  [ -d "$REPO_DIR/pilottunnel" ] || fail "PilotTunnel repository is not installed under $REPO_DIR"
+}
+
+pt_cli() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" -m pilottunnel.cli \
+      --config "$CONFIG_FILE" \
+      --state "$STATE_FILE" \
+      --registry "$REGISTRY_FILE" \
+      --audit-log "$AUDIT_LOG" \
+      --lock-dir "$LOCK_DIR" \
+      --work-dir "$WORK_DIR" \
+      --staging-root "$STAGING_ROOT" \
+      "$@"
+  )
+}
+
+installed_version() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" -c 'from pilottunnel.__version__ import VERSION; print(VERSION)'
+  ) 2>/dev/null || printf '%s\n' "unknown"
+}
+
+configured_role() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except (OSError, ValueError):
+    raise SystemExit(0)
+node = payload.get("node") or {}
+if node.get("initialized"):
+    print(node.get("normalized_role") or node.get("node_role") or "")
+PY
+}
+
+show_header() {
+  current_role="$(configured_role)"
+  printf '\033[2J\033[H'
+  printf '%s\n' "PilotTunnel Menu"
+  printf '%s\n' "================"
+  printf 'Version: %s\n' "$(installed_version)"
+  printf 'Node role: %s\n' "${current_role:-not configured}"
+  printf 'Install root: %s\n\n' "$BASE_DIR"
+}
+
+pause_menu() {
+  printf '\nPress Enter to return to the menu...'
+  IFS= read -r _ || true
+}
+
+map_role_selection() {
+  case "$1" in
+    1|controller) printf '%s\n' "controller" ;;
+    2|worker) printf '%s\n' "worker" ;;
+    *) return 1 ;;
+  esac
+}
+
+prompt_role() {
+  while true; do
+    printf '%s\n' "Setup / Configure this server"
+    printf '%s\n' "  1. Main entry server / controller"
+    printf '%s\n' "  2. Remote endpoint server / worker"
+    printf '%s' "> "
+    IFS= read -r selection || return 1
+    if SELECTED_ROLE="$(map_role_selection "$selection")"; then
+      return 0
+    fi
+    info "Enter 1 for the main entry server or 2 for the remote endpoint server."
+  done
+}
+
+setup_server() {
+  prompt_role || return
+  role="$SELECTED_ROLE"
+  existing_role="$(configured_role)"
+  force_args=()
+
+  if [ -n "$existing_role" ] && [ "$existing_role" != "$role" ]; then
+    pt_cli node status || true
+    printf 'Type CHANGE_NODE_ROLE to replace role %s with %s: ' "$existing_role" "$role"
+    IFS= read -r confirmation || return
+    if [ "$confirmation" != "CHANGE_NODE_ROLE" ]; then
+      info "Role change cancelled."
+      return
+    fi
+    force_args=(--force)
+  elif [ "$existing_role" = "$role" ]; then
+    info "This node is already configured as '$role'."
+    pt_cli layer select --layer layer4
+    pt_cli node status
+    return
+  fi
+
+  pt_cli init --role "$role" "${force_args[@]}" || return
+  pt_cli layer select --layer layer4 || return
+  pt_cli node status
+}
+
+show_status() {
+  pt_cli node status || true
+  pt_cli layer status || true
+}
+
+show_readiness() {
+  pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT"
+}
+
+show_binary_status() {
+  pt_cli binary status --require-all
+}
+
+prompt_service_identity() {
+  printf 'Profile: '
+  IFS= read -r SERVICE_PROFILE || return 1
+  printf 'Adapter: '
+  IFS= read -r SERVICE_ADAPTER || return 1
+  printf 'Transport: '
+  IFS= read -r SERVICE_TRANSPORT || return 1
+  [ -n "$SERVICE_PROFILE" ] && [ -n "$SERVICE_ADAPTER" ] && [ -n "$SERVICE_TRANSPORT" ] || {
+    info "Profile, adapter, and transport are required."
+    return 1
+  }
+}
+
+prompt_service_action() {
+  printf 'Action (start/stop/restart/enable/disable): '
+  IFS= read -r SERVICE_ACTION || return 1
+  case "$SERVICE_ACTION" in
+    start) SERVICE_CONFIRM_TOKEN="START_SERVICE" ;;
+    stop) SERVICE_CONFIRM_TOKEN="STOP_SERVICE" ;;
+    restart) SERVICE_CONFIRM_TOKEN="RESTART_SERVICE" ;;
+    enable) SERVICE_CONFIRM_TOKEN="ENABLE_SERVICE" ;;
+    disable) SERVICE_CONFIRM_TOKEN="DISABLE_SERVICE" ;;
+    *) info "Unsupported service action."; return 1 ;;
+  esac
+}
+
+service_plan() {
+  prompt_service_identity || return
+  prompt_service_action || return
+  pt_cli service plan \
+    --profile "$SERVICE_PROFILE" \
+    --adapter "$SERVICE_ADAPTER" \
+    --transport "$SERVICE_TRANSPORT" \
+    --action "$SERVICE_ACTION"
+}
+
+service_status() {
+  prompt_service_identity || return
+  pt_cli service status \
+    --profile "$SERVICE_PROFILE" \
+    --adapter "$SERVICE_ADAPTER" \
+    --transport "$SERVICE_TRANSPORT" \
+    --real-systemd
+}
+
+service_apply() {
+  prompt_service_identity || return
+  prompt_service_action || return
+  pt_cli service plan \
+    --profile "$SERVICE_PROFILE" \
+    --adapter "$SERVICE_ADAPTER" \
+    --transport "$SERVICE_TRANSPORT" \
+    --action "$SERVICE_ACTION" || return
+  printf 'Type %s to apply this action: ' "$SERVICE_CONFIRM_TOKEN"
+  IFS= read -r confirmation || return
+  if [ "$confirmation" != "$SERVICE_CONFIRM_TOKEN" ]; then
+    info "Service action cancelled."
+    return
+  fi
+  pt_cli service "$SERVICE_ACTION" \
+    --profile "$SERVICE_PROFILE" \
+    --adapter "$SERVICE_ADAPTER" \
+    --transport "$SERVICE_TRANSPORT" \
+    --real-systemd \
+    --confirm "$SERVICE_CONFIRM_TOKEN"
+}
+
+service_menu() {
+  while true; do
+    printf '%s\n' "" "Service management"
+    printf '%s\n' "  1. Read-only service status"
+    printf '%s\n' "  2. Plan an action"
+    printf '%s\n' "  3. Apply a guarded action"
+    printf '%s\n' "  4. Back"
+    printf '%s' "> "
+    IFS= read -r selection || return
+    case "$selection" in
+      1) service_status; pause_menu ;;
+      2) service_plan; pause_menu ;;
+      3) service_apply; pause_menu ;;
+      4) return ;;
+      *) info "Enter a number from 1 to 4." ;;
+    esac
+  done
+}
+
+backup_restore_menu() {
+  while true; do
+    printf '%s\n' "" "Backup / Restore"
+    printf '%s\n' "  1. List backups"
+    printf '%s\n' "  2. Create a guarded backup"
+    printf '%s\n' "  3. Plan a restore"
+    printf '%s\n' "  4. Apply a guarded restore"
+    printf '%s\n' "  5. Back"
+    printf '%s' "> "
+    IFS= read -r selection || return
+    case "$selection" in
+      1) pt_cli backup list; pause_menu ;;
+      2)
+        pt_cli backup plan || { pause_menu; continue; }
+        printf 'Type BACKUP_CREATE to create the backup: '
+        IFS= read -r confirmation || return
+        [ "$confirmation" = "BACKUP_CREATE" ] && pt_cli backup create --confirm BACKUP_CREATE || info "Backup cancelled."
+        pause_menu
+        ;;
+      3)
+        printf 'Backup ID: '
+        IFS= read -r backup_id || return
+        pt_cli restore plan --backup-id "$backup_id"
+        pause_menu
+        ;;
+      4)
+        printf 'Backup ID: '
+        IFS= read -r backup_id || return
+        pt_cli restore plan --backup-id "$backup_id" || { pause_menu; continue; }
+        printf 'Type RESTORE_APPLY to restore this backup: '
+        IFS= read -r confirmation || return
+        [ "$confirmation" = "RESTORE_APPLY" ] && pt_cli restore apply --backup-id "$backup_id" --confirm RESTORE_APPLY || info "Restore cancelled."
+        pause_menu
+        ;;
+      5) return ;;
+      *) info "Enter a number from 1 to 5." ;;
+    esac
+  done
+}
+
+main_menu() {
+  while true; do
+    show_header
+    printf '%s\n' "  1. Setup / Configure this server"
+    printf '%s\n' "  2. Status"
+    printf '%s\n' "  3. Readiness report"
+    printf '%s\n' "  4. Binary status"
+    printf '%s\n' "  5. Service management"
+    printf '%s\n' "  6. Backup / Restore"
+    printf '%s\n' "  7. Exit"
+    printf '%s' "> "
+    IFS= read -r selection || return
+    case "$selection" in
+      1) setup_server; pause_menu ;;
+      2) show_status; pause_menu ;;
+      3) show_readiness; pause_menu ;;
+      4) show_binary_status; pause_menu ;;
+      5) service_menu ;;
+      6) backup_restore_menu ;;
+      7) info "Goodbye."; return ;;
+      *) info "Enter a number from 1 to 7."; pause_menu ;;
+    esac
+  done
+}
+
+main() {
+  parse_args "$@"
+  PYTHON_BIN="$(find_python)"
+  [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
+  prepare_paths
+  [ -t 0 ] && [ -t 1 ] || fail "PilotTunnel Menu requires an interactive terminal."
+  main_menu
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

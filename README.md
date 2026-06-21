@@ -2,7 +2,7 @@
 
 Safety-first multi-layer tunnel orchestration CLI with guarded service workflows.
 
-PilotTunnel gives you one installer and one CLI for controller/worker tunnel operations, with plans and confirmation gates before host-affecting steps.
+PilotTunnel gives you one installer and one menu for controller/worker tunnel operations, with plans and confirmation gates before host-affecting steps.
 
 ## One-line install
 
@@ -10,15 +10,15 @@ PilotTunnel gives you one installer and one CLI for controller/worker tunnel ope
 bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh)
 ```
 
-Run the same installer on each server and choose the role interactively.
+Run the same installer on every server. It prepares PilotTunnel, verifies the managed binaries, and opens the terminal menu. Choose its role later from the menu under **Setup / Configure this server**.
 
 <details>
 <summary>Non-interactive examples</summary>
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role controller --layer layer4 --dry-run
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role controller --layer layer4 --confirm INSTALL_PILOTTUNNEL
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --role worker --layer layer4 --confirm INSTALL_PILOTTUNNEL
+bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --no-menu --role controller
+bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --no-menu --role worker
+bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --no-menu --no-binaries --dry-run
 ```
 
 </details>
