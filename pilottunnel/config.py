@@ -86,7 +86,48 @@ class LinkProfile:
     iran_main_port: int | None = None
     kharej_address: str = ""
     status: str = "configured"
+    pairing_state: str = ""
+    pairing_secret: str = ""
+    pairing_version: str = ""
+    pairing_issued_at: str = ""
+    pairing_checksum: str = ""
+    detected_controller_address: str = ""
+    detected_worker_address: str = ""
     candidates: list[Candidate] = field(default_factory=list)
+
+    @property
+    def controller_address(self) -> str:
+        return self.iran_address
+
+    @property
+    def worker_address(self) -> str:
+        return self.kharej_address
+
+    @property
+    def controller_user_facing_port(self) -> int | None:
+        return self.iran_main_port
+
+    @property
+    def transport_port(self) -> int:
+        return self.tunnel_port
+
+    @property
+    def worker_service_port(self) -> int:
+        return self.config_port
+
+    @property
+    def effective_pairing_state(self) -> str:
+        if self.pairing_state:
+            return self.pairing_state
+        if self.pairing_secret and self.detected_worker_address:
+            return "paired"
+        if self.pairing_secret:
+            return "awaiting_worker_import"
+        if self.kharej_address and self.iran_main_port is not None:
+            return "legacy_manual_controller"
+        if self.iran_address:
+            return "legacy_manual_worker"
+        return "unconfigured"
 
 
 @dataclass
@@ -238,15 +279,27 @@ def _profile_from_dict(data: dict[str, Any]) -> Profile:
 
 
 def _link_from_dict(data: dict[str, Any]) -> LinkProfile:
+    controller_address = data.get("iran_address", data.get("controller_address", ""))
+    worker_address = data.get("kharej_address", data.get("worker_address", ""))
+    user_facing_port = data.get("iran_main_port", data.get("controller_user_facing_port"))
+    transport_port = data.get("tunnel_port", data.get("transport_port"))
+    service_port = data.get("config_port", data.get("service_port"))
     return LinkProfile(
         id=data.get("id") or data["label"],
         label=data["label"],
-        iran_address=data["iran_address"],
-        iran_main_port=data.get("iran_main_port"),
-        tunnel_port=data["tunnel_port"],
-        config_port=data["config_port"],
-        kharej_address=data.get("kharej_address", ""),
+        iran_address=controller_address,
+        iran_main_port=user_facing_port,
+        tunnel_port=transport_port,
+        config_port=service_port,
+        kharej_address=worker_address,
         status=data.get("status", "configured"),
+        pairing_state=data.get("pairing_state", ""),
+        pairing_secret=data.get("pairing_secret", ""),
+        pairing_version=data.get("pairing_version", ""),
+        pairing_issued_at=data.get("pairing_issued_at", data.get("issued_at", "")),
+        pairing_checksum=data.get("pairing_checksum", data.get("checksum", "")),
+        detected_controller_address=data.get("detected_controller_address", controller_address),
+        detected_worker_address=data.get("detected_worker_address", ""),
         candidates=[Candidate(**item) for item in data.get("candidates", [])],
     )
 

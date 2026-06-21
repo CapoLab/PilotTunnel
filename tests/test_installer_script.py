@@ -569,24 +569,31 @@ class InstallerScriptTests(unittest.TestCase):
             self.write_config_fixture(base_dir)
             result = self.run_menu(
                 base_dir,
-                "1\n1\niran.example.invalid\n41011\n41012\n41013\nworker.example.invalid\n\n\n7\n",
+                "1\n1\nworker.example.invalid\n41013\n41012\n41011\n\n7\n",
+                extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "198.51.100.10"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Setup complete", result.stdout)
             self.assertIn("Side: Iran side / controller", result.stdout)
-            self.assertIn("Link label: link-001", result.stdout)
-            self.assertIn("Main public port: 41011", result.stdout)
-            self.assertIn("Kharej address: worker.example.invalid", result.stdout)
+            self.assertIn("Detected local address: 198.51.100.10", result.stdout)
+            self.assertIn("Remote address: worker.example.invalid", result.stdout)
+            self.assertIn("Iran user-facing port: 41011", result.stdout)
+            self.assertIn("Kharej service port: 41013", result.stdout)
+            self.assertIn("Pairing code:", result.stdout)
+            self.assertIn("ptlink://v1/", result.stdout)
+            self.assertIn("Copy this code to the Kharej server", result.stdout)
             self.assertNotIn('{"ok":', result.stdout)
             config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config_data["node"]["normalized_role"], "controller")
             self.assertEqual(config_data["node"]["active_link_label"], "link-001")
             self.assertEqual(config_data["links"][0]["label"], "link-001")
-            self.assertEqual(config_data["links"][0]["iran_address"], "iran.example.invalid")
+            self.assertEqual(config_data["links"][0]["iran_address"], "198.51.100.10")
             self.assertEqual(config_data["links"][0]["iran_main_port"], 41011)
             self.assertEqual(config_data["links"][0]["tunnel_port"], 41012)
             self.assertEqual(config_data["links"][0]["config_port"], 41013)
             self.assertEqual(config_data["links"][0]["kharej_address"], "worker.example.invalid")
+            self.assertEqual(config_data["links"][0]["pairing_state"], "awaiting_worker_import")
+            self.assertTrue(config_data["links"][0]["pairing_secret"])
             self.assertEqual(config_data["links"][0]["candidates"], [])
 
     def test_setup_wizard_shows_clean_current_role_and_keep_current_role(self) -> None:
@@ -618,7 +625,7 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertIn("Current setup:", result.stdout)
             self.assertIn("Side: Iran side / controller", result.stdout)
             self.assertIn("Setup complete", result.stdout)
-            self.assertIn("Link label: demo_link", result.stdout)
+            self.assertIn("Pairing state:", result.stdout)
             self.assertNotIn('{"ok": false', result.stdout)
             self.assertNotIn('"message":', result.stdout)
 
@@ -645,15 +652,20 @@ class InstallerScriptTests(unittest.TestCase):
             )
             result = self.run_menu(
                 base_dir,
-                "1\n2\n2\niran.example.invalid\n41041\n41042\nrelinked_worker\n\n7\n",
+                "1\n2\n2\n2\niran.example.invalid\n41041\n41042\n\n7\n",
+                extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "198.51.100.20"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertNotIn("CHANGE_NODE_ROLE", result.stdout)
             self.assertIn("Side: Kharej side / worker", result.stdout)
-            self.assertIn("Link label: relinked_worker", result.stdout)
+            self.assertIn("Detected local address: 198.51.100.20", result.stdout)
+            self.assertIn("Remote address: iran.example.invalid", result.stdout)
+            self.assertIn("Pairing state: manual_worker", result.stdout)
             config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config_data["node"]["normalized_role"], "worker")
-            self.assertEqual(config_data["links"][0]["label"], "relinked_worker")
+            self.assertEqual(config_data["links"][0]["label"], "demo_link")
+            self.assertEqual(config_data["links"][0]["kharej_address"], "198.51.100.20")
+            self.assertEqual(config_data["links"][0]["pairing_state"], "manual_worker")
             self.assertEqual(config_data["links"][0]["tunnel_port"], 41041)
             self.assertEqual(config_data["links"][0]["config_port"], 41042)
 
@@ -662,16 +674,21 @@ class InstallerScriptTests(unittest.TestCase):
             self.write_config_fixture(base_dir)
             result = self.run_menu(
                 base_dir,
-                "1\n2\niran.example.invalid\n41051\n41052\nedge_worker\n\n7\n",
+                "1\n2\n2\niran.example.invalid\n41051\n41052\n\n7\n",
+                extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "198.51.100.20"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Side: Kharej side / worker", result.stdout)
-            self.assertIn("Link label: edge_worker", result.stdout)
-            self.assertNotIn("Main public port:", result.stdout)
+            self.assertIn("Detected local address: 198.51.100.20", result.stdout)
+            self.assertIn("Remote address: iran.example.invalid", result.stdout)
+            self.assertIn("Pairing state: manual_worker", result.stdout)
+            self.assertNotIn("Pairing code:", result.stdout)
             config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config_data["node"]["normalized_role"], "worker")
-            self.assertEqual(config_data["links"][0]["label"], "edge_worker")
+            self.assertEqual(config_data["links"][0]["label"], "link-001")
             self.assertEqual(config_data["links"][0]["iran_address"], "iran.example.invalid")
+            self.assertEqual(config_data["links"][0]["kharej_address"], "198.51.100.20")
+            self.assertEqual(config_data["links"][0]["pairing_state"], "manual_worker")
             self.assertEqual(config_data["links"][0]["tunnel_port"], 41051)
             self.assertEqual(config_data["links"][0]["config_port"], 41052)
 
@@ -698,7 +715,8 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Side: Kharej side / worker", result.stdout)
             self.assertIn("Initialized: yes", result.stdout)
-            self.assertIn("Active link: edge_worker", result.stdout)
+            self.assertIn("Detected local address:", result.stdout)
+            self.assertIn("Pairing state:", result.stdout)
             self.assertIn("Allowed actions:", result.stdout)
             self.assertIn("Blocked actions:", result.stdout)
             self.assertNotIn("allowed_actions", result.stdout)

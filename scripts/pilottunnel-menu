@@ -35,12 +35,16 @@ NODE_CONFIG_PATH=""
 NODE_PREFERRED_LAYER=""
 NODE_MANAGED_ENDPOINT_COUNT="0"
 CURRENT_LINK_COUNT="0"
+CURRENT_LINK_ID=""
 CURRENT_LINK_LABEL=""
-CURRENT_IRAN_ADDRESS=""
+CURRENT_LOCAL_SIDE=""
+CURRENT_LOCAL_ADDRESS=""
+CURRENT_REMOTE_ADDRESS=""
 CURRENT_IRAN_MAIN_PORT=""
 CURRENT_TUNNEL_PORT=""
 CURRENT_CONFIG_PORT=""
-CURRENT_KHAREJ_ADDRESS=""
+CURRENT_PAIRING_STATE=""
+CURRENT_NEXT_ACTION=""
 CURRENT_LINK_STATUS=""
 
 fail() {
@@ -317,19 +321,24 @@ from pathlib import Path
 import sys
 
 from pilottunnel.config import load_config
-from pilottunnel.links import get_active_link
+from pilottunnel.links import get_active_link, link_payload
 
 config = load_config(Path(sys.argv[1]))
 link = get_active_link(config)
+payload = link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role) if link else {}
 values = [
     str(len(config.links)),
-    getattr(link, "label", "") or "",
-    getattr(link, "iran_address", "") or "",
-    "" if getattr(link, "iran_main_port", None) is None else str(link.iran_main_port),
-    "" if link is None else str(link.tunnel_port),
-    "" if link is None else str(link.config_port),
-    getattr(link, "kharej_address", "") or "",
-    getattr(link, "status", "") or "",
+    payload.get("id", "") or "",
+    payload.get("label", "") or "",
+    payload.get("local_side", "") or "",
+    payload.get("detected_local_address", "") or "",
+    payload.get("remote_address", "") or "",
+    "" if payload.get("controller_user_facing_port") is None else str(payload.get("controller_user_facing_port")),
+    "" if payload.get("transport_port") is None else str(payload.get("transport_port")),
+    "" if payload.get("worker_service_port") is None else str(payload.get("worker_service_port")),
+    payload.get("pairing_state", "") or "",
+    payload.get("next_action", "") or "",
+    payload.get("status", "") or "",
 ]
 for value in values:
     print(str(value).replace("\n", " ").strip())
@@ -340,13 +349,17 @@ PY
 load_link_snapshot() {
   mapfile -t snapshot < <(current_link_snapshot)
   CURRENT_LINK_COUNT="$(normalize_input "${snapshot[0]:-0}")"
-  CURRENT_LINK_LABEL="$(normalize_input "${snapshot[1]:-}")"
-  CURRENT_IRAN_ADDRESS="$(normalize_input "${snapshot[2]:-}")"
-  CURRENT_IRAN_MAIN_PORT="$(normalize_input "${snapshot[3]:-}")"
-  CURRENT_TUNNEL_PORT="$(normalize_input "${snapshot[4]:-}")"
-  CURRENT_CONFIG_PORT="$(normalize_input "${snapshot[5]:-}")"
-  CURRENT_KHAREJ_ADDRESS="$(normalize_input "${snapshot[6]:-}")"
-  CURRENT_LINK_STATUS="$(normalize_input "${snapshot[7]:-}")"
+  CURRENT_LINK_ID="$(normalize_input "${snapshot[1]:-}")"
+  CURRENT_LINK_LABEL="$(normalize_input "${snapshot[2]:-}")"
+  CURRENT_LOCAL_SIDE="$(normalize_input "${snapshot[3]:-}")"
+  CURRENT_LOCAL_ADDRESS="$(normalize_input "${snapshot[4]:-}")"
+  CURRENT_REMOTE_ADDRESS="$(normalize_input "${snapshot[5]:-}")"
+  CURRENT_IRAN_MAIN_PORT="$(normalize_input "${snapshot[6]:-}")"
+  CURRENT_TUNNEL_PORT="$(normalize_input "${snapshot[7]:-}")"
+  CURRENT_CONFIG_PORT="$(normalize_input "${snapshot[8]:-}")"
+  CURRENT_PAIRING_STATE="$(normalize_input "${snapshot[9]:-}")"
+  CURRENT_NEXT_ACTION="$(normalize_input "${snapshot[10]:-}")"
+  CURRENT_LINK_STATUS="$(normalize_input "${snapshot[11]:-}")"
 }
 
 run_cli_capture() {
@@ -388,6 +401,21 @@ if text:
 stderr = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
 if stderr:
     print(" ".join(stderr.split()))
+PY
+}
+
+capture_json_field() {
+  "$PYTHON_BIN" - "$LAST_CAPTURE_STDOUT" "$1" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"))
+field = sys.argv[2]
+value = payload.get(field, "")
+if value is None:
+    value = ""
+print(str(value).replace("\n", " ").strip())
 PY
 }
 
@@ -477,8 +505,8 @@ show_node_status_summary() {
 import sys
 from pathlib import Path
 
-from pilottunnel.config import load_config
 from pilottunnel.node_role import node_status_payload
+from pilottunnel.config import load_config
 
 config_path = Path(sys.argv[1])
 config = load_config(config_path)
@@ -491,10 +519,17 @@ role_label = {
 print(f"Side: {role_label}")
 print(f"Initialized: {'yes' if payload.get('initialized') else 'no'}")
 print(f"Node ID: {payload.get('node_id') or 'not assigned'}")
-if role == "controller":
+print(f"Detected local address: {payload.get('detected_local_address') or 'not detected'}")
+link = payload.get("active_link") or {}
+if link:
+    print(f"Remote address: {link.get('remote_address') or 'not configured'}")
+    print(f"Iran user-facing port: {link.get('controller_user_facing_port') or 'not configured'}")
+    print(f"Tunnel transport port: {link.get('transport_port') or 'not configured'}")
+    print(f"Kharej service port: {link.get('worker_service_port') or 'not configured'}")
+    print(f"Pairing state: {link.get('pairing_state') or 'not configured'}")
+    print(f"Next action: {link.get('next_action') or 'not configured'}")
+else:
     print(f"Link count: {payload.get('link_count', 0)}")
-elif role == "worker":
-    print(f"Active link: {payload.get('active_link_label') or 'not configured'}")
 print(f"Config path: {payload.get('config_path')}")
 print(f"Preferred layer: {payload.get('preferred_layer') or 'not selected'}")
 print(f"Allowed actions: {len(payload.get('allowed_actions') or [])}")
@@ -697,17 +732,22 @@ prompt_with_default() {
 
 show_setup_summary() {
   role_value="$1"
+  pairing_code="${2:-}"
   load_link_snapshot
   show_header
   section_heading "Setup complete"
-  printf '%bSide: %s%b\n' "$VALUE_COLOR$BOLD" "$(role_label "$role_value")" "$RESET"
-  printf '%bLink label: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_LINK_LABEL:-not configured}" "$RESET"
-  printf '%bIran address: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_IRAN_ADDRESS:-not configured}" "$RESET"
-  printf '%bTunnel port: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_TUNNEL_PORT:-not configured}" "$RESET"
-  printf '%bConfig port: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_CONFIG_PORT:-not configured}" "$RESET"
-  if [ "$role_value" = "controller" ]; then
-    printf '%bMain public port: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_IRAN_MAIN_PORT:-not configured}" "$RESET"
-    printf '%bKharej address: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_KHAREJ_ADDRESS:-not configured}" "$RESET"
+  printf '%bSide: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_LOCAL_SIDE:-$(role_label "$role_value")}" "$RESET"
+  printf '%bDetected local address: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_LOCAL_ADDRESS:-not detected}" "$RESET"
+  printf '%bRemote address: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_REMOTE_ADDRESS:-not configured}" "$RESET"
+  printf '%bIran user-facing port: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_IRAN_MAIN_PORT:-not configured}" "$RESET"
+  printf '%bTunnel transport port: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_TUNNEL_PORT:-not configured}" "$RESET"
+  printf '%bKharej service port: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_CONFIG_PORT:-not configured}" "$RESET"
+  printf '%bPairing state: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_PAIRING_STATE:-not configured}" "$RESET"
+  if [ -n "$pairing_code" ]; then
+    printf '\n%bPairing code:%b\n%s\n' "$ACCENT$BOLD" "$RESET" "$pairing_code"
+    printf '%bNext:%b Copy this code to the Kharej server and choose Import pairing code.\n' "$ACCENT$BOLD" "$RESET"
+  elif [ -n "$CURRENT_NEXT_ACTION" ]; then
+    printf '%bNext:%b %s\n' "$ACCENT$BOLD" "$RESET" "$CURRENT_NEXT_ACTION"
   fi
 
   binary_summary="$(show_binary_status_summary)"
@@ -717,26 +757,19 @@ show_setup_summary() {
     printf '%bBinary readiness:%b warning\n' "$VALUE_COLOR$BOLD" "$RESET"
   fi
   printf '\n%s\n' "$binary_summary"
-  printf '\n%bNext step:%b ' "$ACCENT$BOLD" "$RESET"
-  if [ "$role_value" = "controller" ]; then
-    printf '%s\n' "generate tunnel candidates for this link."
-  else
-    printf '%s\n' "prepare this endpoint for candidate testing."
-  fi
 }
 
 show_current_setup_panel() {
   printf '%bCurrent setup:%b\n' "$VALUE_COLOR$BOLD" "$RESET"
-  printf 'Side: %s\n' "$NODE_ROLE_LABEL"
+  printf 'Side: %s\n' "${CURRENT_LOCAL_SIDE:-$NODE_ROLE_LABEL}"
   if [ -n "$CURRENT_LINK_LABEL" ]; then
     printf 'Link label: %s\n' "$CURRENT_LINK_LABEL"
-    printf 'Iran address: %s\n' "$CURRENT_IRAN_ADDRESS"
-    printf 'Tunnel port: %s\n' "$CURRENT_TUNNEL_PORT"
-    printf 'Config port: %s\n' "$CURRENT_CONFIG_PORT"
-    if [ "$NODE_ROLE" = "controller" ]; then
-      printf 'Main public port: %s\n' "$CURRENT_IRAN_MAIN_PORT"
-      printf 'Kharej address: %s\n' "$CURRENT_KHAREJ_ADDRESS"
-    fi
+    printf 'Detected local address: %s\n' "${CURRENT_LOCAL_ADDRESS:-not detected}"
+    printf 'Remote address: %s\n' "${CURRENT_REMOTE_ADDRESS:-not configured}"
+    printf 'Iran user-facing port: %s\n' "${CURRENT_IRAN_MAIN_PORT:-not configured}"
+    printf 'Tunnel transport port: %s\n' "${CURRENT_TUNNEL_PORT:-not configured}"
+    printf 'Kharej service port: %s\n' "${CURRENT_CONFIG_PORT:-not configured}"
+    printf 'Pairing state: %s\n' "${CURRENT_PAIRING_STATE:-not configured}"
   else
     printf 'Link label: not configured\n'
   fi
@@ -821,10 +854,10 @@ select_role_for_setup() {
 
     show_header
     section_heading "Choose the side for this server"
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Iran side" "$RESET"
-    menu_hint "   Public/user-facing entry side. This side will manage future tunnel candidates."
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Kharej side" "$RESET"
-    menu_hint "   Remote endpoint side. This side will be prepared for future candidate testing."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Iran / Controller" "$RESET"
+    menu_hint "   Decision-maker side. This side creates the link and pairing code first."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Kharej / Worker" "$RESET"
+    menu_hint "   Remote endpoint side. This side imports the pairing code or uses manual fallback."
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
     prompt_input
     IFS= read -r selection || return 1
@@ -854,44 +887,6 @@ run_setup_wizard() {
   fi
 
   while true; do
-    show_header
-    section_heading "Link setup"
-    if [ "$SELECTED_ROLE" = "controller" ]; then
-      menu_hint "Iran side stores one or more Kharej links for future candidate generation."
-      prompt_required_text "Iran IP / domain" "$CURRENT_IRAN_ADDRESS" || return
-      iran_address="$PROMPT_RESULT"
-      printf '\n'
-      prompt_port_value "Main public/user-facing port on Iran side" "$CURRENT_IRAN_MAIN_PORT" || return
-      main_port="$PROMPT_RESULT"
-      printf '\n'
-      prompt_port_value "Tunnel port between Iran and Kharej" "$CURRENT_TUNNEL_PORT" || return
-      tunnel_port="$PROMPT_RESULT"
-      printf '\n'
-      prompt_port_value "Config/service port" "$CURRENT_CONFIG_PORT" || return
-      config_port="$PROMPT_RESULT"
-      printf '\n'
-      prompt_required_text "Kharej IP / domain" "$CURRENT_KHAREJ_ADDRESS" || return
-      kharej_address="$PROMPT_RESULT"
-      printf '\n'
-      prompt_optional_label_value "Optional link label" "$CURRENT_LINK_LABEL" || return
-      link_label="$PROMPT_RESULT"
-      printf '\n'
-    else
-      menu_hint "Kharej side stores the active endpoint link for future candidate testing."
-      prompt_required_text "Iran IP / domain" "$CURRENT_IRAN_ADDRESS" || return
-      iran_address="$PROMPT_RESULT"
-      printf '\n'
-      prompt_port_value "Tunnel port between Iran and Kharej" "$CURRENT_TUNNEL_PORT" || return
-      tunnel_port="$PROMPT_RESULT"
-      printf '\n'
-      prompt_port_value "Config/service port" "$CURRENT_CONFIG_PORT" || return
-      config_port="$PROMPT_RESULT"
-      printf '\n'
-      prompt_optional_label_value "Optional link label" "$CURRENT_LINK_LABEL" || return
-      link_label="$PROMPT_RESULT"
-      printf '\n'
-    fi
-
     if [ "$ROLE_CHANGE_MODE" = "new" ]; then
       apply_role_change "$SELECTED_ROLE" "false" || return
     elif [ "$ROLE_CHANGE_MODE" = "reconfigure" ]; then
@@ -899,31 +894,149 @@ run_setup_wizard() {
     fi
 
     if [ "$SELECTED_ROLE" = "controller" ]; then
-      cli_args=(link setup-iran --iran-address "$iran_address" --main-port "$main_port" --tunnel-port "$tunnel_port" --config-port "$config_port" --kharej-address "$kharej_address")
-    else
-      cli_args=(link setup-kharej --iran-address "$iran_address" --tunnel-port "$tunnel_port" --config-port "$config_port")
-    fi
-    if [ -n "$link_label" ]; then
-      cli_args+=(--label "$link_label")
-    fi
-    if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
-      cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
-    fi
+      show_header
+      section_heading "Controller pairing setup"
+      menu_hint "Create the link on the Iran/controller side first, then export one pairing code for the Kharej/worker side."
+      prompt_required_text "Kharej public IP / domain" "$CURRENT_REMOTE_ADDRESS" || return
+      worker_address="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Kharej VPN service/config port" "$CURRENT_CONFIG_PORT" || return
+      service_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Tunnel transport port between the servers" "$CURRENT_TUNNEL_PORT" || return
+      transport_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Iran user-facing port" "${CURRENT_IRAN_MAIN_PORT:-$service_port}" || return
+      user_facing_port="$PROMPT_RESULT"
+      printf '\n'
 
-    if ! run_cli_capture "${cli_args[@]}"; then
-      message="$(capture_json_message)"
+      cli_args=(link create-controller --worker-address "$worker_address" --service-port "$service_port" --transport-port "$transport_port" --user-facing-port "$user_facing_port")
+      if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+        cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
+      fi
+      if ! run_cli_capture "${cli_args[@]}"; then
+        message="$(capture_json_message)"
+        debug_capture_if_enabled
+        cleanup_capture
+        warning "${message:-Unable to create the controller link. Please try again.}"
+        pause_menu
+        continue
+      fi
       debug_capture_if_enabled
       cleanup_capture
-      warning "${message:-Unable to save link setup. Please try again.}"
-      pause_menu
-      continue
+      load_node_snapshot
+      load_link_snapshot
+
+      if ! run_cli_capture link export-pairing-code --label "$CURRENT_LINK_LABEL"; then
+        message="$(capture_json_message)"
+        debug_capture_if_enabled
+        cleanup_capture
+        warning "${message:-Unable to export the pairing code.}"
+        pause_menu
+        return
+      fi
+      pairing_code="$(capture_json_field pairing_code)"
+      debug_capture_if_enabled
+      cleanup_capture
+      show_setup_summary "$SELECTED_ROLE" "$pairing_code"
+      return
     fi
-    debug_capture_if_enabled
-    cleanup_capture
-    load_node_snapshot
-    load_link_snapshot
-    show_setup_summary "$SELECTED_ROLE"
-    return
+
+    show_header
+    section_heading "Worker pairing setup"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Import pairing code (recommended)" "$RESET"
+    menu_hint "   Paste the ptlink code generated on the Iran/controller server."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Manual setup" "$RESET"
+    menu_hint "   Use this only if pairing code import is not available yet."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
+    printf '\n'
+    prompt_input
+    IFS= read -r worker_mode || return
+    worker_mode="$(normalize_input "$worker_mode")"
+    case "$worker_mode" in
+      1)
+        prompt_required_text "Paste pairing code" "" || return
+        pairing_code_input="$PROMPT_RESULT"
+        cli_args=(link import-pairing-code --code "$pairing_code_input")
+        if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+          cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
+        fi
+        if ! run_cli_capture "${cli_args[@]}"; then
+          message="$(capture_json_message)"
+          if printf '%s' "$message" | grep -q -- "--confirm-address-mismatch"; then
+            warning "$message"
+            printf '%bContinue and accept this address mismatch? [y/N]:%b ' "$WARN_COLOR$BOLD" "$RESET"
+            IFS= read -r mismatch_answer || return
+            mismatch_answer="$(normalize_input "$mismatch_answer")"
+            case "$mismatch_answer" in
+              y|Y|yes|YES)
+                confirm_args=("${cli_args[@]}" --confirm-address-mismatch)
+                if ! run_cli_capture "${confirm_args[@]}"; then
+                  message="$(capture_json_message)"
+                  debug_capture_if_enabled
+                  cleanup_capture
+                  warning "${message:-Unable to import the pairing code.}"
+                  pause_menu
+                  continue
+                fi
+                ;;
+              *)
+                cleanup_capture
+                warning "Pairing import cancelled."
+                pause_menu
+                continue
+                ;;
+            esac
+          else
+            debug_capture_if_enabled
+            cleanup_capture
+            warning "${message:-Unable to import the pairing code.}"
+            pause_menu
+            continue
+          fi
+        fi
+        debug_capture_if_enabled
+        cleanup_capture
+        load_node_snapshot
+        load_link_snapshot
+        show_setup_summary "$SELECTED_ROLE"
+        return
+        ;;
+      2)
+        prompt_required_text "Iran/controller IP / domain" "$CURRENT_REMOTE_ADDRESS" || return
+        controller_address="$PROMPT_RESULT"
+        printf '\n'
+        prompt_port_value "Tunnel transport port between the servers" "$CURRENT_TUNNEL_PORT" || return
+        transport_port="$PROMPT_RESULT"
+        printf '\n'
+        prompt_port_value "Local VPN service/config port" "$CURRENT_CONFIG_PORT" || return
+        service_port="$PROMPT_RESULT"
+        printf '\n'
+        cli_args=(link setup-worker-manual --controller-address "$controller_address" --transport-port "$transport_port" --service-port "$service_port")
+        if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+          cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
+        fi
+        if ! run_cli_capture "${cli_args[@]}"; then
+          message="$(capture_json_message)"
+          debug_capture_if_enabled
+          cleanup_capture
+          warning "${message:-Unable to save manual worker setup.}"
+          pause_menu
+          continue
+        fi
+        debug_capture_if_enabled
+        cleanup_capture
+        load_node_snapshot
+        load_link_snapshot
+        show_setup_summary "$SELECTED_ROLE"
+        return
+        ;;
+      3) return ;;
+      *)
+        warning "Enter a number from 1 to 3."
+        pause_menu
+        ;;
+    esac
   done
 }
 

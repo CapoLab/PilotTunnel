@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .config import AppConfig, side_label_for_role
+from .links import get_active_link, link_payload
 
 SAFE_INSPECT_ACTIONS = {
     "adapter_list",
@@ -32,6 +33,7 @@ SAFE_INSPECT_ACTIONS = {
     "layer_status",
     "link_list",
     "link_show",
+    "link_inspect_pairing_code",
     "node_status",
     "readiness_report",
     "preflight",
@@ -50,6 +52,8 @@ SAFE_INSPECT_ACTIONS = {
 
 CONTROLLER_ONLY_ACTIONS = {
     "link_setup_iran",
+    "link_create_controller",
+    "link_export_pairing_code",
     "profile_create",
     "profile_list",
     "profile_show",
@@ -128,6 +132,8 @@ ROLE_ALLOWED_ACTIONS = {
         "install_apply",
         "install_rollback",
         "link_setup_kharej",
+        "link_import_pairing_code",
+        "link_setup_worker_manual",
         "restore_apply",
         "restore_plan",
         "service_start",
@@ -175,6 +181,7 @@ def require_worker(action: str, role: str | None) -> None:
 def node_status_payload(config: AppConfig, config_path: str) -> dict:
     role = config.node.normalized_role
     side_label = config.node.side_label or (side_label_for_role(role) if role else "")
+    active_link = get_active_link(config)
     return {
         "node_role": config.node.node_role,
         "normalized_role": config.node.normalized_role,
@@ -190,4 +197,6 @@ def node_status_payload(config: AppConfig, config_path: str) -> dict:
         "preferred_layer_selected_at": config.node.preferred_layer_selected_at,
         "link_count": len(config.links),
         "active_link_label": config.node.active_link_label,
+        "detected_local_address": config.node.endpoint_address,
+        "active_link": link_payload(active_link, active_label=config.node.active_link_label, role=role) if active_link else None,
     }

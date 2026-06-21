@@ -199,118 +199,114 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Unsupported role", output)
 
-    def test_link_setup_iran_persists_configured_link(self) -> None:
+    def test_controller_link_creation_persists_pairing_state(self) -> None:
         self.run_cli("init", "--role", "controller")
         code, output = self.run_cli(
             "link",
-            "setup-iran",
-            "--iran-address",
-            "iran.example.invalid",
-            "--main-port",
-            str(self.main_port),
-            "--tunnel-port",
-            str(self.target_port),
-            "--config-port",
-            str(self.control_port),
-            "--kharej-address",
+            "create-controller",
+            "--worker-address",
             "worker.example.invalid",
+            "--service-port",
+            str(self.main_port),
+            "--transport-port",
+            str(self.target_port),
+            "--user-facing-port",
+            str(self.control_port),
+            "--controller-address-override",
+            "controller.example.invalid",
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["side"], "Iran side / controller")
-        self.assertEqual(payload["link"]["iran_address"], "iran.example.invalid")
-        self.assertEqual(payload["link"]["kharej_address"], "worker.example.invalid")
+        self.assertEqual(payload["link"]["controller_address"], "controller.example.invalid")
+        self.assertEqual(payload["link"]["worker_address"], "worker.example.invalid")
         self.assertEqual(payload["link"]["candidates"], [])
+        self.assertEqual(payload["link"]["pairing_state"], "awaiting_worker_import")
+        self.assertTrue(payload["link"]["pairing_secret_present"])
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(config_data["node"]["active_link_label"], "link-001")
         self.assertEqual(config_data["links"][0]["label"], "link-001")
-        self.assertEqual(config_data["links"][0]["status"], "configured")
+        self.assertEqual(config_data["links"][0]["status"], "awaiting_worker_import")
 
-    def test_link_setup_kharej_persists_active_link(self) -> None:
+    def test_worker_manual_setup_persists_active_link(self) -> None:
         self.run_cli("init", "--role", "worker")
         code, output = self.run_cli(
             "link",
-            "setup-kharej",
-            "--iran-address",
+            "setup-worker-manual",
+            "--controller-address",
             "iran.example.invalid",
-            "--tunnel-port",
+            "--transport-port",
             str(self.target_port),
-            "--config-port",
+            "--service-port",
             str(self.control_port),
-            "--label",
-            "edge_link",
+            "--worker-address-override",
+            "worker.example.invalid",
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["side"], "Kharej side / worker")
-        self.assertEqual(payload["link"]["label"], "edge_link")
+        self.assertEqual(payload["link"]["pairing_state"], "manual_worker")
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertEqual(config_data["node"]["active_link_label"], "edge_link")
+        self.assertEqual(config_data["node"]["active_link_label"], "link-001")
         self.assertEqual(config_data["links"][0]["iran_address"], "iran.example.invalid")
         self.assertEqual(config_data["links"][0]["config_port"], self.control_port)
 
-    def test_link_list_and_show_return_persisted_link(self) -> None:
+    def test_link_list_and_show_return_redacted_persisted_link(self) -> None:
         self.run_cli("init", "--role", "controller")
         self.run_cli(
             "link",
-            "setup-iran",
-            "--iran-address",
-            "iran.example.invalid",
-            "--main-port",
-            str(self.main_port),
-            "--tunnel-port",
-            str(self.target_port),
-            "--config-port",
-            str(self.control_port),
-            "--kharej-address",
+            "create-controller",
+            "--worker-address",
             "worker.example.invalid",
-            "--label",
-            "demo_link",
+            "--service-port",
+            str(self.target_port),
+            "--transport-port",
+            str(self.control_port),
+            "--controller-address-override",
+            "controller.example.invalid",
         )
         list_code, list_output = self.run_cli("link", "list")
         self.assertEqual(list_code, 0)
         list_payload = json.loads(list_output)
-        self.assertEqual(list_payload[0]["label"], "demo_link")
+        self.assertEqual(list_payload[0]["label"], "link-001")
         self.assertTrue(list_payload[0]["active"])
-        show_code, show_output = self.run_cli("link", "show", "demo_link")
+        self.assertNotIn("pairing_secret", list_payload[0])
+        show_code, show_output = self.run_cli("link", "show", "link-001")
         self.assertEqual(show_code, 0)
         show_payload = json.loads(show_output)
-        self.assertEqual(show_payload["iran_main_port"], self.main_port)
-        self.assertEqual(show_payload["kharej_address"], "worker.example.invalid")
+        self.assertEqual(show_payload["controller_user_facing_port"], self.target_port)
+        self.assertEqual(show_payload["worker_address"], "worker.example.invalid")
+        self.assertTrue(show_payload["pairing_secret_present"])
 
     def test_controller_link_structure_supports_multiple_kharej_links(self) -> None:
         self.run_cli("init", "--role", "controller")
         self.run_cli(
             "link",
-            "setup-iran",
-            "--iran-address",
-            "iran.example.invalid",
-            "--main-port",
-            str(self.main_port),
-            "--tunnel-port",
-            str(self.target_port),
-            "--config-port",
-            str(self.control_port),
-            "--kharej-address",
+            "create-controller",
+            "--worker-address",
             "worker-a.example.invalid",
-            "--label",
-            "link_a",
+            "--service-port",
+            str(self.main_port),
+            "--transport-port",
+            str(self.target_port),
+            "--user-facing-port",
+            str(self.control_port),
+            "--controller-address-override",
+            "controller.example.invalid",
         )
         code, output = self.run_cli(
             "link",
-            "setup-iran",
-            "--iran-address",
-            "iran.example.invalid",
-            "--main-port",
-            str(self.service_port),
-            "--tunnel-port",
-            str(self.check_port),
-            "--config-port",
-            str(self.alt_port),
-            "--kharej-address",
+            "create-controller",
+            "--worker-address",
             "worker-b.example.invalid",
-            "--label",
-            "link_b",
+            "--service-port",
+            str(self.service_port),
+            "--transport-port",
+            str(self.check_port),
+            "--user-facing-port",
+            str(self.alt_port),
+            "--controller-address-override",
+            "controller.example.invalid",
         )
         self.assertEqual(code, 0)
         payload = json.loads(output)
@@ -324,25 +320,22 @@ class CliWorkflowTests(unittest.TestCase):
         self.run_cli("init", "--role", "controller")
         self.run_cli(
             "link",
-            "setup-iran",
-            "--iran-address",
-            "iran.example.invalid",
-            "--main-port",
-            str(self.main_port),
-            "--tunnel-port",
-            str(self.target_port),
-            "--config-port",
-            str(self.control_port),
-            "--kharej-address",
+            "create-controller",
+            "--worker-address",
             "worker.example.invalid",
-            "--label",
-            "demo_link",
+            "--service-port",
+            str(self.main_port),
+            "--transport-port",
+            str(self.target_port),
+            "--controller-address-override",
+            "controller.example.invalid",
         )
         code, output = self.run_cli("node", "status")
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["link_count"], 1)
-        self.assertEqual(payload["active_link_label"], "demo_link")
+        self.assertEqual(payload["active_link_label"], "link-001")
+        self.assertEqual(payload["active_link"]["remote_address"], "worker.example.invalid")
 
         worker_temp = tempfile.TemporaryDirectory()
         self.addCleanup(worker_temp.cleanup)
@@ -396,15 +389,15 @@ class CliWorkflowTests(unittest.TestCase):
                     "--staging-root",
                     str(worker_staging),
                     "link",
-                    "setup-kharej",
-                    "--iran-address",
+                    "setup-worker-manual",
+                    "--controller-address",
                     "iran.example.invalid",
-                    "--tunnel-port",
+                    "--transport-port",
                     str(self.target_port),
-                    "--config-port",
+                    "--service-port",
                     str(self.control_port),
-                    "--label",
-                    "worker_link",
+                    "--worker-address-override",
+                    "worker.example.invalid",
                 ]
             )
         worker_status = io.StringIO()
@@ -431,41 +424,42 @@ class CliWorkflowTests(unittest.TestCase):
             )
         worker_payload = json.loads(worker_status.getvalue())
         self.assertEqual(worker_payload["side_label"], "Kharej side")
-        self.assertEqual(worker_payload["active_link_label"], "worker_link")
+        self.assertEqual(worker_payload["active_link_label"], "link-001")
+        self.assertEqual(worker_payload["active_link"]["detected_local_address"], "worker.example.invalid")
 
     def test_link_setup_rejects_invalid_port(self) -> None:
         self.run_cli("init", "--role", "controller")
         code, output = self.run_cli(
             "link",
-            "setup-iran",
-            "--iran-address",
-            "iran.example.invalid",
-            "--main-port",
-            "70000",
-            "--tunnel-port",
-            str(self.target_port),
-            "--config-port",
-            str(self.control_port),
-            "--kharej-address",
+            "create-controller",
+            "--worker-address",
             "worker.example.invalid",
+            "--service-port",
+            str(self.control_port),
+            "--transport-port",
+            str(self.target_port),
+            "--user-facing-port",
+            "70000",
+            "--controller-address-override",
+            "controller.example.invalid",
         )
         self.assertEqual(code, 1)
-        self.assertIn("Main public/user-facing port must be between 1 and 65535", output)
+        self.assertIn("Iran user-facing port must be between 1 and 65535", output)
 
     def test_link_setup_rejects_empty_address(self) -> None:
         self.run_cli("init", "--role", "worker")
         code, output = self.run_cli(
             "link",
-            "setup-kharej",
-            "--iran-address",
+            "setup-worker-manual",
+            "--controller-address",
             " ",
-            "--tunnel-port",
+            "--transport-port",
             str(self.target_port),
-            "--config-port",
+            "--service-port",
             str(self.control_port),
         )
         self.assertEqual(code, 1)
-        self.assertIn("Iran IP / domain must not be empty", output)
+        self.assertIn("Iran/controller IP / domain must not be empty", output)
 
     def test_link_setup_rejects_unsafe_label(self) -> None:
         self.run_cli("init", "--role", "controller")
@@ -487,6 +481,94 @@ class CliWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("Link label may contain only letters, numbers, dashes, and underscores", output)
+
+    def test_pairing_code_export_inspect_and_import_flow(self) -> None:
+        self.run_cli("init", "--role", "controller")
+        self.run_cli(
+            "link",
+            "create-controller",
+            "--worker-address",
+            "worker.example.invalid",
+            "--service-port",
+            str(self.main_port),
+            "--transport-port",
+            str(self.target_port),
+            "--controller-address-override",
+            "controller.example.invalid",
+        )
+        export_code, export_output = self.run_cli("link", "export-pairing-code", "--label", "link-001")
+        self.assertEqual(export_code, 0)
+        pairing_code = json.loads(export_output)["pairing_code"]
+        self.assertTrue(pairing_code.startswith("ptlink://v1/"))
+
+        inspect_code, inspect_output = self.run_cli("link", "inspect-pairing-code", "--code", pairing_code)
+        self.assertEqual(inspect_code, 0)
+        inspect_payload = json.loads(inspect_output)
+        self.assertEqual(inspect_payload["pairing_secret"], "***REDACTED***")
+        self.assertEqual(inspect_payload["expected_worker_address"], "worker.example.invalid")
+
+        worker_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(worker_temp.cleanup)
+        worker_base = Path(worker_temp.name)
+        worker_config = worker_base / "config.json"
+        worker_state = worker_base / "state.json"
+        worker_registry = worker_base / "registry.json"
+        worker_audit = worker_base / "audit.log"
+        worker_lock = worker_base / "locks"
+        worker_work = worker_base / "work"
+        worker_staging = worker_base / "staging"
+        worker_output = io.StringIO()
+        with redirect_stdout(worker_output):
+            cli.main(
+                [
+                    "--config",
+                    str(worker_config),
+                    "--state",
+                    str(worker_state),
+                    "--registry",
+                    str(worker_registry),
+                    "--audit-log",
+                    str(worker_audit),
+                    "--lock-dir",
+                    str(worker_lock),
+                    "--work-dir",
+                    str(worker_work),
+                    "--staging-root",
+                    str(worker_staging),
+                    "init",
+                    "--role",
+                    "worker",
+                ]
+            )
+        worker_import = io.StringIO()
+        with redirect_stdout(worker_import):
+            cli.main(
+                [
+                    "--config",
+                    str(worker_config),
+                    "--state",
+                    str(worker_state),
+                    "--registry",
+                    str(worker_registry),
+                    "--audit-log",
+                    str(worker_audit),
+                    "--lock-dir",
+                    str(worker_lock),
+                    "--work-dir",
+                    str(worker_work),
+                    "--staging-root",
+                    str(worker_staging),
+                    "link",
+                    "import-pairing-code",
+                    "--code",
+                    pairing_code,
+                    "--worker-address-override",
+                    "worker.example.invalid",
+                ]
+            )
+        worker_payload = json.loads(worker_import.getvalue())
+        self.assertEqual(worker_payload["link"]["pairing_state"], "paired")
+        self.assertEqual(worker_payload["link"]["controller_address"], "controller.example.invalid")
 
     def test_duplicate_profile_create_is_blocked(self) -> None:
         self.run_cli("init", "--role", "controller")

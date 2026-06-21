@@ -9,7 +9,16 @@ from typing import Any
 
 from .config import DEFAULT_AUDIT_PATH
 
-SECRET_KEYS = {"secret", "password", "token", "private_key", "apikey", "api_key"}
+SECRET_KEYS = {
+    "secret",
+    "password",
+    "token",
+    "private_key",
+    "apikey",
+    "api_key",
+    "pairing_secret",
+    "pairing_code",
+}
 
 
 def redact_secrets(value: Any) -> Any:

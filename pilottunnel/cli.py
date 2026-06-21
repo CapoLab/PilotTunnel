@@ -47,7 +47,20 @@ from .config import (
 )
 from .deploy import apply_deploy, build_deploy_plan, build_deploy_status
 from .install_plan import apply_install, apply_uninstall, build_install_plan, build_uninstall_plan, rollback_install
-from .links import current_setup_summary, link_list_payload, setup_iran_link, setup_kharej_link
+from .links import (
+    create_controller_link,
+    current_setup_summary,
+    export_pairing_code,
+    get_active_link,
+    get_link,
+    import_pairing_code,
+    inspect_pairing_code,
+    link_list_payload,
+    link_payload,
+    setup_iran_link,
+    setup_kharej_link,
+    setup_worker_manual,
+)
 from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
@@ -103,6 +116,28 @@ def build_parser() -> argparse.ArgumentParser:
     link_subparsers.add_parser("list")
     link_show = link_subparsers.add_parser("show")
     link_show.add_argument("label")
+    link_create_controller = link_subparsers.add_parser("create-controller")
+    link_create_controller.add_argument("--worker-address", required=True)
+    link_create_controller.add_argument("--service-port", type=int, required=True)
+    link_create_controller.add_argument("--transport-port", type=int, required=True)
+    link_create_controller.add_argument("--user-facing-port", type=int)
+    link_create_controller.add_argument("--controller-address-override")
+    link_create_controller.add_argument("--replace-label")
+    link_export_pairing_code = link_subparsers.add_parser("export-pairing-code")
+    link_export_pairing_code.add_argument("--label")
+    link_inspect_pairing_code = link_subparsers.add_parser("inspect-pairing-code")
+    link_inspect_pairing_code.add_argument("--code", required=True)
+    link_import_pairing_code = link_subparsers.add_parser("import-pairing-code")
+    link_import_pairing_code.add_argument("--code", required=True)
+    link_import_pairing_code.add_argument("--confirm-address-mismatch", action="store_true")
+    link_import_pairing_code.add_argument("--worker-address-override")
+    link_import_pairing_code.add_argument("--replace-label")
+    link_setup_worker_manual = link_subparsers.add_parser("setup-worker-manual")
+    link_setup_worker_manual.add_argument("--controller-address", required=True)
+    link_setup_worker_manual.add_argument("--transport-port", type=int, required=True)
+    link_setup_worker_manual.add_argument("--service-port", type=int, required=True)
+    link_setup_worker_manual.add_argument("--worker-address-override")
+    link_setup_worker_manual.add_argument("--replace-label")
     link_setup_iran = link_subparsers.add_parser("setup-iran")
     link_setup_iran.add_argument("--iran-address", required=True)
     link_setup_iran.add_argument("--main-port", type=int, required=True)
@@ -1101,12 +1136,175 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "link" and args.link_command == "show":
         try:
-            payload = link_list_payload(config)
-            link = next(item for item in payload if item["label"] == args.label)
-        except StopIteration:
+            link = get_link(config, args.label)
+        except KeyError:
             print(json.dumps({"ok": False, "message": f"Link '{args.label}' not found"}, indent=2))
             return 1
-        print(json.dumps(link, indent=2))
+        print(json.dumps(link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role), indent=2))
+        return 0
+
+    if args.command == "link" and args.link_command == "create-controller":
+        try:
+            status, link, discovery = create_controller_link(
+                config,
+                worker_address=args.worker_address,
+                worker_service_port=args.service_port,
+                transport_port=args.transport_port,
+                controller_user_facing_port=args.user_facing_port,
+                controller_address_override=args.controller_address_override or "",
+                replace_label=args.replace_label,
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        write_audit_log(
+            "link_create_controller",
+            link.label,
+            {
+                "status": status,
+                "link_id": link.id,
+                "label": link.label,
+                "worker_address": link.worker_address,
+                "pairing_state": link.effective_pairing_state,
+                "detection_method": discovery.detection_method,
+            },
+            switch_paths.audit_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": status,
+                    "side": current_setup_summary(config)["side"],
+                    "link": link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role),
+                    "detected_controller_address": discovery.preferred_address,
+                    "warnings": discovery.warnings,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "link" and args.link_command == "export-pairing-code":
+        try:
+            link = get_link(config, args.label) if args.label else get_active_link(config)
+            if link is None:
+                raise KeyError("No active link is configured")
+            pairing_code = export_pairing_code(link)
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        write_audit_log(
+            "link_export_pairing_code",
+            link.label,
+            {"link_id": link.id, "label": link.label},
+            switch_paths.audit_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "link_id": link.id,
+                    "label": link.label,
+                    "pairing_code": pairing_code,
+                    "instructions": "Copy this code to the Kharej server and choose Import pairing code.",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "link" and args.link_command == "inspect-pairing-code":
+        try:
+            payload = inspect_pairing_code(args.code)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        print(json.dumps({"ok": True, **payload}, indent=2))
+        return 0
+
+    if args.command == "link" and args.link_command == "import-pairing-code":
+        try:
+            status, link, discovery, mismatch = import_pairing_code(
+                config,
+                pairing_code=args.code,
+                confirm_address_mismatch=args.confirm_address_mismatch,
+                worker_address_override=args.worker_address_override or "",
+                replace_label=args.replace_label,
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        write_audit_log(
+            "link_import_pairing_code",
+            link.label,
+            {
+                "status": status,
+                "link_id": link.id,
+                "label": link.label,
+                "pairing_state": link.effective_pairing_state,
+                "address_mismatch": mismatch,
+                "detection_method": discovery.detection_method,
+            },
+            switch_paths.audit_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": status,
+                    "side": current_setup_summary(config)["side"],
+                    "link": link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role),
+                    "detected_worker_address": discovery.preferred_address,
+                    "address_mismatch": mismatch,
+                    "warnings": discovery.warnings,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "link" and args.link_command == "setup-worker-manual":
+        try:
+            status, link, discovery = setup_worker_manual(
+                config,
+                controller_address=args.controller_address,
+                transport_port=args.transport_port,
+                worker_service_port=args.service_port,
+                worker_address_override=args.worker_address_override or "",
+                replace_label=args.replace_label,
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        write_audit_log(
+            "link_setup_worker_manual",
+            link.label,
+            {
+                "status": status,
+                "link_id": link.id,
+                "label": link.label,
+                "pairing_state": link.effective_pairing_state,
+                "detection_method": discovery.detection_method,
+            },
+            switch_paths.audit_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": status,
+                    "side": current_setup_summary(config)["side"],
+                    "link": link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role),
+                    "detected_worker_address": discovery.preferred_address,
+                    "warnings": discovery.warnings,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "link" and args.link_command == "setup-iran":
@@ -1136,7 +1334,17 @@ def main(argv: list[str] | None = None) -> int:
             },
             switch_paths.audit_path,
         )
-        print(json.dumps({"ok": True, "status": status, "side": current_setup_summary(config)["side"], "link": asdict(link)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": status,
+                    "side": current_setup_summary(config)["side"],
+                    "link": link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "link" and args.link_command == "setup-kharej":
@@ -1164,7 +1372,17 @@ def main(argv: list[str] | None = None) -> int:
             },
             switch_paths.audit_path,
         )
-        print(json.dumps({"ok": True, "status": status, "side": current_setup_summary(config)["side"], "link": asdict(link)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": status,
+                    "side": current_setup_summary(config)["side"],
+                    "link": link_payload(link, active_label=config.node.active_link_label, role=config.node.normalized_role),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "runtime" and args.runtime_command == "plan":
