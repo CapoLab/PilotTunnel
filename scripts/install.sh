@@ -13,6 +13,9 @@ DEFAULT_MANIFEST_NAME="provider-manifest.json"
 DEFAULT_RELEASES_SEGMENT="releases"
 DEFAULT_DOWNLOAD_SEGMENT="download"
 DEFAULT_PROVIDER_HOSTS="github.com,github-releases.githubusercontent.com,objects.githubusercontent.com,release-assets.githubusercontent.com"
+DEFAULT_GIT_TIMEOUT_SECONDS="${PILOTTUNNEL_GIT_TIMEOUT_SECONDS:-25}"
+DEFAULT_CURL_CONNECT_TIMEOUT_SECONDS="${PILOTTUNNEL_CURL_CONNECT_TIMEOUT_SECONDS:-10}"
+DEFAULT_CURL_MAX_TIME_SECONDS="${PILOTTUNNEL_CURL_MAX_TIME_SECONDS:-90}"
 ROLE=""
 LAYER="$DEFAULT_LAYER"
 REPO_URL="$DEFAULT_REPO_URL"
@@ -25,6 +28,10 @@ MANIFEST_URL=""
 MANIFEST_FILE=""
 ALLOW_PROVIDER_HOST="$DEFAULT_PROVIDER_HOSTS"
 WITH_BINARIES=1
+GIT_TIMEOUT_SECONDS="$DEFAULT_GIT_TIMEOUT_SECONDS"
+CURL_CONNECT_TIMEOUT_SECONDS="$DEFAULT_CURL_CONNECT_TIMEOUT_SECONDS"
+CURL_MAX_TIME_SECONDS="$DEFAULT_CURL_MAX_TIME_SECONDS"
+SOURCE_ARCHIVE_URL="${PILOTTUNNEL_SOURCE_ARCHIVE_URL:-}"
 
 OS_ID="unknown"
 OS_NAME="Unknown Linux"
@@ -32,6 +39,11 @@ OS_LIKE=""
 PKG_MANAGER=""
 LAYER_SUPPORTED=0
 PYTHON_BIN=""
+GIT_LAST_LOG=""
+GIT_LAST_STATUS=0
+ARCHIVE_LAST_LOG=""
+ARCHIVE_LAST_STATUS=0
+SOURCE_BACKUP_DIR=""
 
 usage() {
   cat <<EOF
@@ -110,6 +122,32 @@ default_manifest_url() {
   printf 'https://github.com/%s/%s/%s/%s/%s\n' "$DEFAULT_PROVIDER_REPO" "$DEFAULT_RELEASES_SEGMENT" "$DEFAULT_DOWNLOAD_SEGMENT" "$DEFAULT_PROVIDER_TAG" "$DEFAULT_MANIFEST_NAME"
 }
 
+default_source_archive_url() {
+  if [ -n "$SOURCE_ARCHIVE_URL" ]; then
+    printf '%s\n' "$SOURCE_ARCHIVE_URL"
+    return
+  fi
+
+  repo_base=""
+  case "$REPO_URL" in
+    https://github.com/*)
+      repo_base="${REPO_URL%.git}"
+      ;;
+    git@github.com:*)
+      repo_base="https://github.com/${REPO_URL#git@github.com:}"
+      repo_base="${repo_base%.git}"
+      ;;
+  esac
+
+  [ -n "$repo_base" ] || return 0
+
+  case "$REF" in
+    refs/heads/*|refs/tags/*) archive_ref="$REF" ;;
+    *) archive_ref="refs/heads/$REF" ;;
+  esac
+  printf '%s/archive/%s.tar.gz\n' "$repo_base" "$archive_ref"
+}
+
 detect_os_release() {
   if [ -f /etc/os-release ]; then
     # shellcheck disable=SC1091
@@ -175,6 +213,9 @@ apply_defaults_and_validate() {
   if [ "$WITH_BINARIES" -eq 1 ] && [ -z "$MANIFEST_URL" ] && [ -z "$MANIFEST_FILE" ]; then
     fail "Binary-first bootstrap requires a provider manifest."
   fi
+  if [ -z "$SOURCE_ARCHIVE_URL" ]; then
+    SOURCE_ARCHIVE_URL="$(default_source_archive_url)"
+  fi
 }
 
 collect_missing_dependencies() {
@@ -225,6 +266,7 @@ prepare_layout() {
   SERVICE_DIR="${BASE_DIR}/service-staging"
   TARGET_DIR="${BASE_DIR}/systemd-target"
   INSTALL_ROOT="${BASE_DIR}/install-root"
+  SOURCE_BACKUP_DIR="${BASE_DIR}/backups/source"
   CONFIG_FILE="${STATE_DIR}/config.json"
   STATE_FILE="${STATE_DIR}/state.json"
   REGISTRY_FILE="${STATE_DIR}/registry.json"
@@ -247,6 +289,10 @@ PilotTunnel installer plan
   manifest_url: ${MANIFEST_URL:-}
   manifest_file: ${MANIFEST_FILE:-}
   allow_provider_host: ${ALLOW_PROVIDER_HOST:-}
+  source_archive_url: ${SOURCE_ARCHIVE_URL:-auto-unavailable}
+  git_timeout_seconds: ${GIT_TIMEOUT_SECONDS}
+  curl_connect_timeout_seconds: ${CURL_CONNECT_TIMEOUT_SECONDS}
+  curl_max_time_seconds: ${CURL_MAX_TIME_SECONDS}
   detected_os: $OS_NAME
   package_manager: ${PKG_MANAGER:-unavailable}
 
@@ -355,27 +401,300 @@ if missing:
 PY
 }
 
-run_quiet_git() {
-  log_file="$(mktemp)"
-  if ! "$@" >"$log_file" 2>&1; then
-    rm -f "$log_file"
-    fail "Git operation failed. Check repository access, repo URL, and ref."
+compact_log_file() {
+  log_file="$1"
+  [ -f "$log_file" ] || return 0
+  tr '\n' ' ' <"$log_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+run_command_with_timeout() {
+  timeout_seconds="$1"
+  log_file="$2"
+  shift 2
+  "$PYTHON_BIN" - "$timeout_seconds" "$log_file" "$@" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+timeout_seconds = float(sys.argv[1])
+log_path = Path(sys.argv[2])
+command = sys.argv[3:]
+try:
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+except subprocess.TimeoutExpired as exc:
+    output = (exc.stdout or "") + (exc.stderr or "")
+    log_path.write_text(output, encoding="utf-8", errors="replace")
+    raise SystemExit(124)
+except FileNotFoundError as exc:
+    log_path.write_text(str(exc), encoding="utf-8", errors="replace")
+    raise SystemExit(127)
+
+log_path.write_text(result.stdout or "", encoding="utf-8", errors="replace")
+raise SystemExit(result.returncode)
+PY
+}
+
+resolve_command_path() {
+  command_name="$1"
+  if [ "$command_name" = "git" ] && [ -n "${PILOTTUNNEL_GIT_BIN:-}" ]; then
+    printf '%s\n' "$PILOTTUNNEL_GIT_BIN"
+    return 0
   fi
-  rm -f "$log_file"
+  "$PYTHON_BIN" - "$command_name" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+command_name = sys.argv[1]
+path_entries = os.environ.get("PATH", "").split(os.pathsep)
+candidate_suffixes = [".cmd", ".bat", ".exe", ""]
+
+for entry in path_entries:
+    if not entry:
+        continue
+    entry_path = Path(entry)
+    for suffix in candidate_suffixes:
+        candidate = entry_path / f"{command_name}{suffix}"
+        if candidate.exists():
+            print(str(candidate))
+            raise SystemExit(0)
+
+print(command_name)
+PY
+}
+
+run_git_with_timeout() {
+  [ -n "${GIT_LAST_LOG:-}" ] && rm -f "$GIT_LAST_LOG"
+  GIT_LAST_LOG="$(mktemp)"
+  resolved_git="$(resolve_command_path git)"
+  if run_command_with_timeout "$GIT_TIMEOUT_SECONDS" "$GIT_LAST_LOG" "$resolved_git" "$@"; then
+    GIT_LAST_STATUS=0
+    return 0
+  else
+    GIT_LAST_STATUS=$?
+    return "$GIT_LAST_STATUS"
+  fi
+}
+
+git_failure_summary() {
+  if [ "${GIT_LAST_STATUS:-0}" -eq 124 ]; then
+    printf '%s\n' "timed out after ${GIT_TIMEOUT_SECONDS}s"
+    return
+  fi
+  details="$(compact_log_file "$GIT_LAST_LOG")"
+  if [ -n "$details" ]; then
+    printf '%s\n' "$details"
+  else
+    printf '%s\n' "failed"
+  fi
+}
+
+archive_failure_summary() {
+  if [ "${ARCHIVE_LAST_STATUS:-0}" -eq 124 ]; then
+    printf '%s\n' "timed out after ${CURL_MAX_TIME_SECONDS}s"
+    return
+  fi
+  details="$(compact_log_file "$ARCHIVE_LAST_LOG")"
+  if [ -n "$details" ]; then
+    printf '%s\n' "$details"
+  else
+    printf '%s\n' "failed"
+  fi
+}
+
+timestamp_utc() {
+  date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || "$PYTHON_BIN" - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+PY
+}
+
+backup_repo_dir() {
+  [ -e "$REPO_DIR" ] || return 0
+  mkdir -p "$SOURCE_BACKUP_DIR"
+  backup_path="${SOURCE_BACKUP_DIR}/repo-$(timestamp_utc)"
+  mv "$REPO_DIR" "$backup_path"
+  info "Existing source backed up to $backup_path"
+}
+
+validate_repo_source_dir() {
+  candidate_dir="$1"
+  [ -d "$candidate_dir" ] || return 1
+  [ -f "${candidate_dir}/scripts/install.sh" ] || return 1
+  [ -f "${candidate_dir}/scripts/pilottunnel-menu" ] || return 1
+  [ -d "${candidate_dir}/pilottunnel" ] || return 1
+}
+
+find_staged_repo_root() {
+  extract_dir="$1"
+  valid_roots=()
+  if validate_repo_source_dir "$extract_dir"; then
+    valid_roots+=("$extract_dir")
+  fi
+
+  while IFS= read -r candidate_dir; do
+    if validate_repo_source_dir "$candidate_dir"; then
+      valid_roots+=("$candidate_dir")
+    fi
+  done < <(find "$extract_dir" -mindepth 1 -maxdepth 3 -type d | sort)
+
+  if [ "${#valid_roots[@]}" -eq 0 ]; then
+    return 1
+  fi
+  if [ "${#valid_roots[@]}" -gt 1 ]; then
+    printf '%s\n' "Multiple staged repository roots matched the required PilotTunnel layout." >>"$ARCHIVE_LAST_LOG"
+    return 1
+  fi
+  printf '%s\n' "${valid_roots[0]}"
+}
+
+download_source_archive() {
+  archive_url="$1"
+  archive_output="$2"
+  [ -n "${ARCHIVE_LAST_LOG:-}" ] && rm -f "$ARCHIVE_LAST_LOG"
+  ARCHIVE_LAST_LOG="$(mktemp)"
+  if curl \
+    --fail \
+    --location \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_MAX_TIME_SECONDS" \
+    --retry 2 \
+    --retry-delay 1 \
+    --output "$archive_output" \
+    "$archive_url" >"$ARCHIVE_LAST_LOG" 2>&1; then
+    ARCHIVE_LAST_STATUS=0
+    return 0
+  fi
+  ARCHIVE_LAST_STATUS=$?
+  return "$ARCHIVE_LAST_STATUS"
+}
+
+checkout_repo_ref() {
+  if run_git_with_timeout -C "$REPO_DIR" rev-parse --verify --quiet "refs/remotes/origin/${REF}"; then
+    run_git_with_timeout -C "$REPO_DIR" checkout --detach "refs/remotes/origin/${REF}"
+    return $?
+  fi
+  run_git_with_timeout -C "$REPO_DIR" checkout --detach "$REF"
+}
+
+install_repo_from_archive() {
+  archive_url="$1"
+  [ -n "$archive_url" ] || {
+    ARCHIVE_LAST_STATUS=1
+    ARCHIVE_LAST_LOG="$(mktemp)"
+    printf '%s\n' "No source archive URL is available for repo '$REPO_URL' and ref '$REF'." >"$ARCHIVE_LAST_LOG"
+    return 1
+  }
+
+  temp_dir="$(mktemp -d)"
+  archive_file="${temp_dir}/source.tar.gz"
+  staging_dir="${temp_dir}/staging"
+  extract_dir="${staging_dir}/extract"
+  mkdir -p "$extract_dir"
+
+  if ! download_source_archive "$archive_url" "$archive_file"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if ! tar -xzf "$archive_file" -C "$extract_dir" >>"$ARCHIVE_LAST_LOG" 2>&1; then
+    ARCHIVE_LAST_STATUS=1
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  extracted_root="$(find_staged_repo_root "$extract_dir" || true)"
+  if [ -z "$extracted_root" ]; then
+    ARCHIVE_LAST_STATUS=1
+    printf '%s\n' "Archive fallback did not contain a valid staged PilotTunnel repository." >>"$ARCHIVE_LAST_LOG"
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if ! validate_repo_source_dir "$extracted_root"; then
+    ARCHIVE_LAST_STATUS=1
+    printf '%s\n' "Archive fallback staged repository is missing required files." >>"$ARCHIVE_LAST_LOG"
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if [ -e "$REPO_DIR" ]; then
+    backup_repo_dir
+  fi
+  mkdir -p "$BASE_DIR"
+  mv "$extracted_root" "$REPO_DIR"
+  rm -rf "$temp_dir"
+  return 0
+}
+
+fail_source_fetch() {
+  git_summary="$1"
+  archive_summary="$2"
+  {
+    printf '%s\n' "Error: Could not fetch PilotTunnel source."
+    printf '%s\n' "Git: ${git_summary}"
+    printf '%s\n' "Archive fallback: ${archive_summary}"
+    printf '%s\n' "Check: raw.githubusercontent.com, github.com archive access, DNS/TLS, or use a local source package."
+  } >&2
+  exit 1
 }
 
 sync_repo() {
   mkdir -p "$BASE_DIR" "$BIN_DIR" "$STATE_DIR" "$WORK_DIR" "$STAGING_ROOT" "$RUNTIME_DIR" "$SERVICE_DIR" "$TARGET_DIR" "$INSTALL_ROOT"
-  if [ ! -d "$REPO_DIR/.git" ]; then
-    run_quiet_git git clone "$REPO_URL" "$REPO_DIR"
-  else
-    run_quiet_git git -C "$REPO_DIR" fetch --tags --prune origin
+  archive_url="$(default_source_archive_url)"
+  git_summary=""
+  archive_summary=""
+
+  if [ -d "$REPO_DIR/.git" ]; then
+    if run_git_with_timeout ls-remote --heads --tags "$REPO_URL" "$REF" \
+      && run_git_with_timeout -C "$REPO_DIR" fetch --tags --prune origin \
+      && checkout_repo_ref \
+      && validate_repo_source_dir "$REPO_DIR"; then
+      return 0
+    fi
+    git_summary="$(git_failure_summary)"
+    info "Git source sync failed, trying source archive fallback..."
+    if install_repo_from_archive "$archive_url"; then
+      info "Source installed from archive fallback."
+      return 0
+    fi
+    archive_summary="$(archive_failure_summary)"
+    fail_source_fetch "$git_summary" "$archive_summary"
   fi
-  if git -C "$REPO_DIR" rev-parse --verify --quiet "refs/remotes/origin/${REF}" >/dev/null; then
-    run_quiet_git git -C "$REPO_DIR" checkout --detach "refs/remotes/origin/${REF}"
-  else
-    run_quiet_git git -C "$REPO_DIR" checkout --detach "$REF"
+
+  if [ -e "$REPO_DIR" ]; then
+    git_summary="existing repo path is not a valid git checkout"
+    info "Existing source is not a valid git checkout, trying source archive fallback..."
+    if install_repo_from_archive "$archive_url"; then
+      info "Source installed from archive fallback."
+      return 0
+    fi
+    archive_summary="$(archive_failure_summary)"
+    fail_source_fetch "$git_summary" "$archive_summary"
   fi
+
+  if run_git_with_timeout ls-remote --heads --tags "$REPO_URL" "$REF" \
+    && run_git_with_timeout clone "$REPO_URL" "$REPO_DIR" \
+    && checkout_repo_ref \
+    && validate_repo_source_dir "$REPO_DIR"; then
+    return 0
+  fi
+
+  git_summary="$(git_failure_summary)"
+  info "Git source sync failed, trying source archive fallback..."
+  if install_repo_from_archive "$archive_url"; then
+    info "Source installed from archive fallback."
+    return 0
+  fi
+  archive_summary="$(archive_failure_summary)"
+  fail_source_fetch "$git_summary" "$archive_summary"
 }
 
 pt_cli() {
@@ -484,6 +803,7 @@ install_menu_launcher() {
 }
 
 launch_menu_if_requested() {
+  info "[5/5] Opening PilotTunnel menu"
   if [ "$NO_MENU" -eq 1 ]; then
     info "PilotTunnel prepared. Run ${BIN_DIR}/pilottunnel-menu when you are ready to configure this server."
     return
@@ -511,7 +831,7 @@ main() {
     exit 0
   fi
   print_installer_header
-  info "Checking system..."
+  info "[1/5] Checking system packages"
   install_dependencies
   PYTHON_BIN="$(find_python)"
   [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
@@ -519,10 +839,11 @@ main() {
     print_plan
   fi
 
-  info "Installing/updating PilotTunnel..."
+  info "[2/5] Installing/updating PilotTunnel source"
   sync_repo
-  info "Preparing required binaries..."
+  info "[3/5] Preparing required binaries"
   prepare_binaries
+  info "[4/5] Running safe checks"
   install_menu_launcher
   initialize_role_if_requested
   info "Safety: no services started, no firewall/routes changed"

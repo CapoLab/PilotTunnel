@@ -1,7 +1,9 @@
 from contextlib import contextmanager
 import os
+import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,6 +121,37 @@ class InstallerScriptTests(unittest.TestCase):
             cwd=Path.cwd(),
             env=env,
         )
+
+    def create_source_archive(self, output_dir: Path) -> Path:
+        archive_path = output_dir / "PilotTunnel-source.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as tar_handle:
+            for path in Path.cwd().rglob("*"):
+                if any(part in {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".var"} for part in path.parts):
+                    continue
+                arcname = Path("PilotTunnel-main") / path.relative_to(Path.cwd())
+                tar_handle.add(path, arcname=str(arcname), recursive=False)
+        return archive_path
+
+    def write_fake_git(self, target_dir: Path, body: str) -> Path:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        git_path = target_dir / "git"
+        git_path.write_text(f"#!/usr/bin/env bash\nset -eu\n{body}\n", encoding="utf-8")
+        git_path.chmod(0o755)
+        sleep_match = re.search(r"sleep\s+(\d+)", body)
+        exit_match = re.search(r"exit\s+(\d+)", body)
+        sleep_seconds = int(sleep_match.group(1)) if sleep_match else 0
+        exit_code = int(exit_match.group(1)) if exit_match else 0
+        git_cmd = target_dir / "git.cmd"
+        git_cmd.write_text(
+            "@echo off\r\n"
+            "setlocal\r\n"
+            "python -c \"import sys,time; time.sleep(%d); sys.exit(%d)\"\r\n"
+            "exit /b %d\r\n" % (sleep_seconds, exit_code, exit_code),
+            encoding="utf-8",
+        )
+        return git_path
 
     def write_manifest_fixture(self, base_dir: Path) -> Path:
         manifest_path = base_dir / "state" / "provider-manifest.json"
@@ -249,9 +282,11 @@ class InstallerScriptTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("PilotTunnel Installer", result.stdout)
-        self.assertIn("Checking system...", result.stdout)
-        self.assertIn("Installing/updating PilotTunnel...", result.stdout)
-        self.assertIn("Preparing required binaries...", result.stdout)
+        self.assertIn("[1/5] Checking system packages", result.stdout)
+        self.assertIn("[2/5] Installing/updating PilotTunnel source", result.stdout)
+        self.assertIn("[3/5] Preparing required binaries", result.stdout)
+        self.assertIn("[4/5] Running safe checks", result.stdout)
+        self.assertIn("[5/5] Opening PilotTunnel menu", result.stdout)
         self.assertIn("Required binaries: skipped (--without-binaries)", result.stdout)
         self.assertIn("Safety: no services started, no firewall/routes changed", result.stdout)
         self.assertIn("Opening PilotTunnel menu...", result.stdout)
@@ -346,6 +381,157 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("PilotTunnel installer plan", result.stdout)
         self.assertIn("with_binaries: false", result.stdout)
+
+    def test_install_script_uses_bounded_git_timeout_configuration(self) -> None:
+        self.assertIn("PILOTTUNNEL_GIT_TIMEOUT_SECONDS", self.script_text)
+        self.assertIn("run_command_with_timeout \"$GIT_TIMEOUT_SECONDS\"", self.script_text)
+        self.assertIn("ls-remote", self.script_text)
+        self.assertIn("fetch --tags --prune origin", self.script_text)
+        self.assertIn("checkout --detach", self.script_text)
+
+    def test_default_source_archive_url_uses_github_archive_endpoint(self) -> None:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        result = subprocess.run(
+            [
+                bash_bin,
+                "-c",
+                (
+                    f"source '{self.script_path.as_posix()}'; "
+                    "REPO_URL='https://github.com/CapoLab/PilotTunnel.git'; "
+                    "REF='main'; "
+                    "SOURCE_ARCHIVE_URL=''; "
+                    "default_source_archive_url"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "https://github.com/CapoLab/PilotTunnel/archive/refs/heads/main.tar.gz",
+        )
+
+    def test_installer_falls_back_to_source_archive_when_git_times_out(self) -> None:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            archive_path = self.create_source_archive(Path(temp_dir))
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                    "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                    "PILOTTUNNEL_SOURCE_ARCHIVE_URL": archive_path.resolve().as_uri(),
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Git source sync failed, trying source archive fallback...", result.stdout)
+            self.assertIn("Source installed from archive fallback.", result.stdout)
+            self.assertTrue((install_dir / "repo" / "scripts" / "pilottunnel-menu").exists())
+
+    def test_source_archive_fallback_preserves_state_and_work_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            archive_path = self.create_source_archive(Path(temp_dir))
+            state_dir = install_dir / "state"
+            work_dir = install_dir / "work"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "config.json").write_text("{\"keep\": true}\n", encoding="utf-8")
+            (work_dir / "marker.txt").write_text("keep-work\n", encoding="utf-8")
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                    "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                    "PILOTTUNNEL_SOURCE_ARCHIVE_URL": archive_path.resolve().as_uri(),
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual((state_dir / "config.json").read_text(encoding="utf-8"), "{\"keep\": true}\n")
+            self.assertEqual((work_dir / "marker.txt").read_text(encoding="utf-8"), "keep-work\n")
+
+    def test_existing_repo_is_backed_up_before_archive_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            archive_path = self.create_source_archive(Path(temp_dir))
+            legacy_repo = install_dir / "repo"
+            legacy_repo.mkdir(parents=True, exist_ok=True)
+            (legacy_repo / "legacy.txt").write_text("legacy-source\n", encoding="utf-8")
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                    "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                    "PILOTTUNNEL_SOURCE_ARCHIVE_URL": archive_path.resolve().as_uri(),
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            backup_root = install_dir / "backups" / "source"
+            backups = list(backup_root.glob("repo-*"))
+            self.assertTrue(backups)
+            self.assertEqual((backups[0] / "legacy.txt").read_text(encoding="utf-8"), "legacy-source\n")
+            self.assertTrue((install_dir / "repo" / "scripts" / "install.sh").exists())
+
+    def test_installer_reports_clean_error_when_git_and_archive_fallback_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                    "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                    "PILOTTUNNEL_SOURCE_ARCHIVE_URL": "file:///definitely-missing/PilotTunnel.tar.gz",
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Error: Could not fetch PilotTunnel source.", result.stderr)
+            self.assertIn("Git: timed out", result.stderr)
+            self.assertIn("Archive fallback:", result.stderr)
+            self.assertIn("Check: raw.githubusercontent.com, github.com archive access, DNS/TLS, or use a local source package.", result.stderr)
 
     def test_menu_exposes_required_choices_and_defers_role_selection(self) -> None:
         self.assertTrue(self.menu_path.exists())
