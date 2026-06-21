@@ -475,6 +475,10 @@ install_menu_launcher() {
   menu_source="${REPO_DIR}/scripts/pilottunnel-menu"
   [ -f "$menu_source" ] || fail "Installed repository does not contain scripts/pilottunnel-menu."
   menu_target="${BIN_DIR}/pilottunnel-menu"
+  if [ -e "$menu_target" ] && [ "$menu_source" -ef "$menu_target" ]; then
+    chmod 0755 "$menu_source"
+    return
+  fi
   cp "$menu_source" "$menu_target"
   chmod 0755 "$menu_target"
 }
@@ -525,4 +529,6 @@ main() {
   launch_menu_if_requested
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

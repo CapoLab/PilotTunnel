@@ -4,14 +4,25 @@ set -uo pipefail
 DEFAULT_BASE_DIR="/opt/pilottunnel"
 BASE_DIR="$DEFAULT_BASE_DIR"
 PYTHON_BIN=""
+TERM_WIDTH=88
+PANEL_WIDTH=80
+
+RESET=""
+BOLD=""
+DIM=""
+FRAME=""
+TITLE=""
+ACCENT=""
+INFO_COLOR=""
+SUCCESS_COLOR=""
+WARN_COLOR=""
+ERROR_COLOR=""
+VALUE_COLOR=""
+PROMPT_COLOR=""
 
 fail() {
   printf '%s\n' "Error: $*" >&2
   exit 1
-}
-
-info() {
-  printf '%s\n' "$*"
 }
 
 usage() {
@@ -103,18 +114,158 @@ if node.get("initialized"):
 PY
 }
 
+init_theme() {
+  if [ "${NO_COLOR:-}" = "" ] && { [ -t 1 ] || [ "${PILOTTUNNEL_MENU_ALLOW_NON_TTY:-0}" = "1" ]; }; then
+    ESC="$(printf '\033')"
+    RESET="${ESC}[0m"
+    BOLD="${ESC}[1m"
+    DIM="${ESC}[2m"
+    FRAME="${ESC}[38;5;81m"
+    TITLE="${ESC}[38;5;51m"
+    ACCENT="${ESC}[38;5;226m"
+    INFO_COLOR="${ESC}[38;5;117m"
+    SUCCESS_COLOR="${ESC}[38;5;84m"
+    WARN_COLOR="${ESC}[38;5;214m"
+    ERROR_COLOR="${ESC}[38;5;203m"
+    VALUE_COLOR="${ESC}[38;5;195m"
+    PROMPT_COLOR="${ESC}[38;5;159m"
+  fi
+
+  if command -v tput >/dev/null 2>&1; then
+    detected_width="$(tput cols 2>/dev/null || printf '%s\n' 88)"
+  else
+    detected_width=88
+  fi
+  case "$detected_width" in
+    ''|*[!0-9]*) detected_width=88 ;;
+  esac
+  TERM_WIDTH="$detected_width"
+  PANEL_WIDTH=$((TERM_WIDTH - 8))
+  if [ "$PANEL_WIDTH" -lt 68 ]; then
+    PANEL_WIDTH=68
+  fi
+  if [ "$PANEL_WIDTH" -gt 104 ]; then
+    PANEL_WIDTH=104
+  fi
+}
+
+repeat_char() {
+  char="$1"
+  count="$2"
+  output=""
+  while [ "$count" -gt 0 ]; do
+    output="${output}${char}"
+    count=$((count - 1))
+  done
+  printf '%s' "$output"
+}
+
+center_text() {
+  text="$1"
+  width="$2"
+  text_length=${#text}
+  if [ "$text_length" -ge "$width" ]; then
+    printf '%s' "$text"
+    return
+  fi
+  left_padding=$(((width - text_length) / 2))
+  right_padding=$((width - text_length - left_padding))
+  printf '%*s%s%*s' "$left_padding" "" "$text" "$right_padding" ""
+}
+
+box_border() {
+  printf '%b+%s+%b\n' "$FRAME" "$(repeat_char "=" "$PANEL_WIDTH")" "$RESET"
+}
+
+box_rule() {
+  printf '%b|%s|%b\n' "$FRAME" "$(repeat_char "-" "$PANEL_WIDTH")" "$RESET"
+}
+
+box_line_center() {
+  text="$1"
+  color="${2:-$VALUE_COLOR}"
+  padded="$(center_text "$text" "$PANEL_WIDTH")"
+  printf '%b|%b%s%b|%b\n' "$FRAME" "$color" "$padded" "$RESET" "$RESET"
+}
+
+box_line_left() {
+  text="$1"
+  color="${2:-$VALUE_COLOR}"
+  printf '%b|%b %-*s %b|%b\n' "$FRAME" "$color" $((PANEL_WIDTH - 2)) "$text" "$RESET" "$RESET"
+}
+
+box_blank() {
+  printf '%b|%*s|%b\n' "$FRAME" "$PANEL_WIDTH" "" "$RESET"
+}
+
+clear_screen() {
+  printf '\033[2J\033[H'
+}
+
+info() {
+  printf '%b[%s]%b %s\n' "$INFO_COLOR$BOLD" "INFO" "$RESET" "$*"
+}
+
+success() {
+  printf '%b[%s]%b %s\n' "$SUCCESS_COLOR$BOLD" "OK" "$RESET" "$*"
+}
+
+warning() {
+  printf '%b[%s]%b %s\n' "$WARN_COLOR$BOLD" "WARN" "$RESET" "$*"
+}
+
+error_line() {
+  printf '%b[%s]%b %s\n' "$ERROR_COLOR$BOLD" "ERROR" "$RESET" "$*"
+}
+
+menu_hint() {
+  printf '%b%s%b\n' "$DIM" "$*" "$RESET"
+}
+
+prompt_input() {
+  printf '%b> %b' "$PROMPT_COLOR$BOLD" "$RESET"
+}
+
+render_banner() {
+  box_border
+  box_blank
+  box_line_center " ____  _ _       _   _____                    _ " "$TITLE$BOLD"
+  box_line_center "|  _ \\(_) | ___ | |_|_   _|   _ _ __  _ __   | |" "$TITLE$BOLD"
+  box_line_center "| |_) | | |/ _ \\| __| | || | | | '_ \\| '_ \\  | |" "$TITLE$BOLD"
+  box_line_center "|  __/| | | (_) | |_  | || |_| | | | | | | | |_|" "$TITLE$BOLD"
+  box_line_center "|_|   |_|_|\\___/ \\__| |_| \\__,_|_| |_|_| |_| (_)" "$TITLE$BOLD"
+  box_blank
+  box_line_center "Safety-first multi-layer tunnel management" "$ACCENT$BOLD"
+  box_line_center "One installer, one CLI, guarded operations only" "$DIM"
+  box_rule
+}
+
+render_status_panel() {
+  current_role="$1"
+  version_text="$2"
+  role_text="${current_role:-not configured}"
+  box_line_left "PilotTunnel Menu" "$ACCENT$BOLD"
+  box_line_left "Version: ${version_text}" "$VALUE_COLOR"
+  box_line_left "Node role: ${role_text}" "$VALUE_COLOR"
+  box_line_left "Install root: ${BASE_DIR}" "$VALUE_COLOR"
+  box_border
+}
+
 show_header() {
   current_role="$(configured_role)"
-  printf '\n'
-  printf '%s\n' "PilotTunnel Menu"
-  printf '%s\n' "================"
-  printf 'Version: %s\n' "$(installed_version)"
-  printf 'Node role: %s\n' "${current_role:-not configured}"
-  printf 'Install root: %s\n\n' "$BASE_DIR"
+  version_text="$(installed_version)"
+  clear_screen
+  render_banner
+  render_status_panel "$current_role" "$version_text"
+}
+
+section_heading() {
+  printf '\n%b%s%b\n' "$ACCENT$BOLD" "$1" "$RESET"
+  printf '%b%s%b\n' "$FRAME" "$(repeat_char "-" 60)" "$RESET"
 }
 
 pause_menu() {
-  printf '\nPress Enter to return to the menu...'
+  printf '\n%bPress Enter to return to the menu...%b' "$DIM" "$RESET"
   IFS= read -r _ || true
 }
 
@@ -128,15 +279,21 @@ map_role_selection() {
 
 prompt_role() {
   while true; do
-    printf '%s\n' "Setup / Configure this server"
-    printf '%s\n' "  1. Main entry server / controller"
-    printf '%s\n' "  2. Remote endpoint server / worker"
-    printf '%s' "> "
+    show_header
+    section_heading "Setup / Configure this server"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Main entry server / controller" "$RESET"
+    menu_hint "   Choose this for the decision-making server."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Remote endpoint server / worker" "$RESET"
+    menu_hint "   Choose this for the passive peer server."
+    printf '\n'
+    menu_hint "Role selection happens here, not during the base installer."
+    prompt_input
     IFS= read -r selection || return 1
     if SELECTED_ROLE="$(map_role_selection "$selection")"; then
       return 0
     fi
-    info "Enter 1 for the main entry server or 2 for the remote endpoint server."
+    warning "Enter 1 for the main entry server or 2 for the remote endpoint server."
+    pause_menu
   done
 }
 
@@ -147,16 +304,17 @@ setup_server() {
   force_args=()
 
   if [ -n "$existing_role" ] && [ "$existing_role" != "$role" ]; then
+    section_heading "Current node role"
     pt_cli node status || true
-    printf 'Type CHANGE_NODE_ROLE to replace role %s with %s: ' "$existing_role" "$role"
+    printf '\n%bType CHANGE_NODE_ROLE to replace role %s with %s:%b ' "$WARN_COLOR$BOLD" "$existing_role" "$role" "$RESET"
     IFS= read -r confirmation || return
     if [ "$confirmation" != "CHANGE_NODE_ROLE" ]; then
-      info "Role change cancelled."
+      warning "Role change cancelled."
       return
     fi
     force_args=(--force)
   elif [ "$existing_role" = "$role" ]; then
-    info "This node is already configured as '$role'."
+    success "This node is already configured as '${role}'."
     pt_cli layer select --layer layer4
     pt_cli node status
     return
@@ -164,37 +322,43 @@ setup_server() {
 
   pt_cli init --role "$role" "${force_args[@]}" || return
   pt_cli layer select --layer layer4 || return
+  success "Node role saved as '${role}'."
   pt_cli node status
 }
 
 show_status() {
+  section_heading "Node status"
   pt_cli node status || true
+  printf '\n'
+  section_heading "Layer status"
   pt_cli layer status || true
 }
 
 show_readiness() {
+  section_heading "Readiness report"
   pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT"
 }
 
 show_binary_status() {
+  section_heading "Binary status"
   pt_cli binary status --require-all
 }
 
 prompt_service_identity() {
-  printf 'Profile: '
+  printf '%bProfile:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_PROFILE || return 1
-  printf 'Adapter: '
+  printf '%bAdapter:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_ADAPTER || return 1
-  printf 'Transport: '
+  printf '%bTransport:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_TRANSPORT || return 1
   [ -n "$SERVICE_PROFILE" ] && [ -n "$SERVICE_ADAPTER" ] && [ -n "$SERVICE_TRANSPORT" ] || {
-    info "Profile, adapter, and transport are required."
+    warning "Profile, adapter, and transport are required."
     return 1
   }
 }
 
 prompt_service_action() {
-  printf 'Action (start/stop/restart/enable/disable): '
+  printf '%bAction (start/stop/restart/enable/disable):%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_ACTION || return 1
   case "$SERVICE_ACTION" in
     start) SERVICE_CONFIRM_TOKEN="START_SERVICE" ;;
@@ -202,13 +366,14 @@ prompt_service_action() {
     restart) SERVICE_CONFIRM_TOKEN="RESTART_SERVICE" ;;
     enable) SERVICE_CONFIRM_TOKEN="ENABLE_SERVICE" ;;
     disable) SERVICE_CONFIRM_TOKEN="DISABLE_SERVICE" ;;
-    *) info "Unsupported service action."; return 1 ;;
+    *) warning "Unsupported service action."; return 1 ;;
   esac
 }
 
 service_plan() {
   prompt_service_identity || return
   prompt_service_action || return
+  section_heading "Service plan"
   pt_cli service plan \
     --profile "$SERVICE_PROFILE" \
     --adapter "$SERVICE_ADAPTER" \
@@ -218,6 +383,7 @@ service_plan() {
 
 service_status() {
   prompt_service_identity || return
+  section_heading "Read-only service status"
   pt_cli service status \
     --profile "$SERVICE_PROFILE" \
     --adapter "$SERVICE_ADAPTER" \
@@ -228,15 +394,16 @@ service_status() {
 service_apply() {
   prompt_service_identity || return
   prompt_service_action || return
+  section_heading "Service plan"
   pt_cli service plan \
     --profile "$SERVICE_PROFILE" \
     --adapter "$SERVICE_ADAPTER" \
     --transport "$SERVICE_TRANSPORT" \
     --action "$SERVICE_ACTION" || return
-  printf 'Type %s to apply this action: ' "$SERVICE_CONFIRM_TOKEN"
+  printf '\n%bType %s to apply this action:%b ' "$WARN_COLOR$BOLD" "$SERVICE_CONFIRM_TOKEN" "$RESET"
   IFS= read -r confirmation || return
   if [ "$confirmation" != "$SERVICE_CONFIRM_TOKEN" ]; then
-    info "Service action cancelled."
+    warning "Service action cancelled."
     return
   fi
   pt_cli service "$SERVICE_ACTION" \
@@ -249,59 +416,71 @@ service_apply() {
 
 service_menu() {
   while true; do
-    printf '%s\n' "" "Service management"
-    printf '%s\n' "  1. Read-only service status"
-    printf '%s\n' "  2. Plan an action"
-    printf '%s\n' "  3. Apply a guarded action"
-    printf '%s\n' "  4. Back"
-    printf '%s' "> "
+    show_header
+    section_heading "Service management"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Read-only service status" "$RESET"
+    menu_hint "   Inspect managed service state without changing it."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Plan an action" "$RESET"
+    menu_hint "   Preview a guarded service operation."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Apply a guarded action" "$RESET"
+    menu_hint "   Confirmation is always required for live service operations."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Back" "$RESET"
+    printf '\n'
+    menu_hint "Safety: no service action runs without confirmation."
+    prompt_input
     IFS= read -r selection || return
     case "$selection" in
       1) service_status; pause_menu ;;
       2) service_plan; pause_menu ;;
       3) service_apply; pause_menu ;;
       4) return ;;
-      *) info "Enter a number from 1 to 4." ;;
+      *) warning "Enter a number from 1 to 4."; pause_menu ;;
     esac
   done
 }
 
 backup_restore_menu() {
   while true; do
-    printf '%s\n' "" "Backup / Restore"
-    printf '%s\n' "  1. List backups"
-    printf '%s\n' "  2. Create a guarded backup"
-    printf '%s\n' "  3. Plan a restore"
-    printf '%s\n' "  4. Apply a guarded restore"
-    printf '%s\n' "  5. Back"
-    printf '%s' "> "
+    show_header
+    section_heading "Backup / Restore"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. List backups" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Create a guarded backup" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Plan a restore" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Apply a guarded restore" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "5. Back" "$RESET"
+    printf '\n'
+    menu_hint "Safety: restore remains confirmation-gated."
+    prompt_input
     IFS= read -r selection || return
     case "$selection" in
-      1) pt_cli backup list; pause_menu ;;
+      1) section_heading "Backup list"; pt_cli backup list; pause_menu ;;
       2)
+        section_heading "Backup plan"
         pt_cli backup plan || { pause_menu; continue; }
-        printf 'Type BACKUP_CREATE to create the backup: '
+        printf '\n%bType BACKUP_CREATE to create the backup:%b ' "$WARN_COLOR$BOLD" "$RESET"
         IFS= read -r confirmation || return
-        [ "$confirmation" = "BACKUP_CREATE" ] && pt_cli backup create --confirm BACKUP_CREATE || info "Backup cancelled."
+        [ "$confirmation" = "BACKUP_CREATE" ] && pt_cli backup create --confirm BACKUP_CREATE || warning "Backup cancelled."
         pause_menu
         ;;
       3)
-        printf 'Backup ID: '
+        printf '%bBackup ID:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
         IFS= read -r backup_id || return
+        section_heading "Restore plan"
         pt_cli restore plan --backup-id "$backup_id"
         pause_menu
         ;;
       4)
-        printf 'Backup ID: '
+        printf '%bBackup ID:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
         IFS= read -r backup_id || return
+        section_heading "Restore plan"
         pt_cli restore plan --backup-id "$backup_id" || { pause_menu; continue; }
-        printf 'Type RESTORE_APPLY to restore this backup: '
+        printf '\n%bType RESTORE_APPLY to restore this backup:%b ' "$WARN_COLOR$BOLD" "$RESET"
         IFS= read -r confirmation || return
-        [ "$confirmation" = "RESTORE_APPLY" ] && pt_cli restore apply --backup-id "$backup_id" --confirm RESTORE_APPLY || info "Restore cancelled."
+        [ "$confirmation" = "RESTORE_APPLY" ] && pt_cli restore apply --backup-id "$backup_id" --confirm RESTORE_APPLY || warning "Restore cancelled."
         pause_menu
         ;;
       5) return ;;
-      *) info "Enter a number from 1 to 5." ;;
+      *) warning "Enter a number from 1 to 5."; pause_menu ;;
     esac
   done
 }
@@ -309,14 +488,18 @@ backup_restore_menu() {
 main_menu() {
   while true; do
     show_header
-    printf '%s\n' "  1. Setup / Configure this server"
-    printf '%s\n' "  2. Status"
-    printf '%s\n' "  3. Readiness report"
-    printf '%s\n' "  4. Binary status"
-    printf '%s\n' "  5. Service management"
-    printf '%s\n' "  6. Backup / Restore"
-    printf '%s\n' "  7. Exit"
-    printf '%s' "> "
+    printf '\n%b%s%b\n' "$ACCENT$BOLD" "Choose an action" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Setup / Configure this server" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Status" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Readiness report" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Binary status" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "5. Service management" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "6. Backup / Restore" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "7. Exit" "$RESET"
+    printf '\n'
+    menu_hint "Select an option and press Enter."
+    menu_hint "Safety: no service action runs without confirmation."
+    prompt_input
     IFS= read -r selection || return
     case "$selection" in
       1) setup_server; pause_menu ;;
@@ -325,14 +508,15 @@ main_menu() {
       4) show_binary_status; pause_menu ;;
       5) service_menu ;;
       6) backup_restore_menu ;;
-      7) info "Goodbye."; return ;;
-      *) info "Enter a number from 1 to 7."; pause_menu ;;
+      7) success "Goodbye."; return ;;
+      *) warning "Enter a number from 1 to 7."; pause_menu ;;
     esac
   done
 }
 
 main() {
   parse_args "$@"
+  init_theme
   PYTHON_BIN="$(find_python)"
   [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
   prepare_paths

@@ -144,6 +144,51 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertNotIn('"results": [', result.stdout)
         self.assertNotIn('"ok":', result.stdout)
 
+    def test_install_menu_launcher_handles_same_resolved_file(self) -> None:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo_scripts = root / "repo" / "scripts"
+            bin_dir = root / "bin"
+            repo_scripts.mkdir(parents=True)
+            bin_dir.mkdir(parents=True)
+            menu_source = repo_scripts / "pilottunnel-menu"
+            menu_source.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            menu_source.chmod(0o755)
+            menu_target = bin_dir / "pilottunnel-menu"
+            try:
+                os.link(menu_source, menu_target)
+            except OSError as exc:
+                self.skipTest(f"hard link creation is not available on this host: {exc}")
+            result = subprocess.run(
+                [
+                    bash_bin,
+                    "-c",
+                    (
+                        f"source '{self.script_path.as_posix()}'; "
+                        f"REPO_DIR='{(root / 'repo').as_posix()}'; "
+                        f"BIN_DIR='{bin_dir.as_posix()}'; "
+                        "install_menu_launcher"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=Path.cwd(),
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertTrue(os.path.samefile(menu_source, menu_target))
+            execute_check = subprocess.run(
+                [bash_bin, "-c", f"test -x '{menu_target.as_posix()}'"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=Path.cwd(),
+            )
+            self.assertEqual(execute_check.returncode, 0, msg=execute_check.stderr)
+
     def test_public_install_does_not_require_role_or_basic_confirmation(self) -> None:
         bash_bin = self.find_bash()
         if bash_bin and Path(bash_bin).exists():
@@ -195,6 +240,7 @@ class InstallerScriptTests(unittest.TestCase):
             "Backup / Restore",
             "Main entry server / controller",
             "Remote endpoint server / worker",
+            "Safety-first multi-layer tunnel management",
         ):
             self.assertIn(label, self.menu_text)
         self.assertNotIn("prompt_role", self.script_text)
@@ -218,6 +264,13 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("Opening PilotTunnel menu...", self.script_text)
         self.assertIn("/dev/tty", self.script_text)
         self.assertIn("Menu could not be opened automatically", self.script_text)
+
+    def test_menu_uses_banner_and_color_helpers(self) -> None:
+        self.assertIn(" ____  _ _", self.menu_text)
+        self.assertIn("init_theme()", self.menu_text)
+        self.assertIn("tput cols", self.menu_text)
+        self.assertIn("FRAME=", self.menu_text)
+        self.assertIn("\\033", self.menu_text)
 
     def test_installer_binary_status_uses_supported_arguments(self) -> None:
         status_lines = [line for line in self.script_text.splitlines() if "binary status" in line]
