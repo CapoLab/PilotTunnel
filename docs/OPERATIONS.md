@@ -16,13 +16,15 @@ The top-level bootstrap helper is:
 
 ```bash
 bash scripts/install.sh
-bash scripts/install.sh --role <ROLE> --layer layer4 --dry-run
+bash scripts/install.sh --dry-run
 bash scripts/install.sh --no-menu --role <ROLE>
+bash scripts/install.sh --debug
 ```
 
 - running the script with no arguments prepares PilotTunnel and opens the terminal menu
 - role selection happens later under `Setup / Configure this server`
 - use `--no-menu --role <ROLE>` for explicit non-interactive initialization
+- use `--debug` only when you want detailed installer output
 - the script defaults to the public source repository and public provider manifest
 - it does not start services or modify firewall, routes, or interfaces
 - it records unsupported known layers as planned-only preferences

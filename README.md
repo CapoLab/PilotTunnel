@@ -1,8 +1,8 @@
 # PilotTunnel
 
-Safety-first multi-layer tunnel orchestration CLI with guarded service workflows.
+Safety-first CLI for planning and managing Layer 4 tunnel workflows between a controller and worker.
 
-PilotTunnel gives you one installer and one menu for controller/worker tunnel operations, with plans and confirmation gates before host-affecting steps.
+PilotTunnel keeps setup conservative: prepare the repo, verify managed binaries, open the terminal menu, and keep host-affecting actions behind explicit guarded commands.
 
 ## One-line install
 
@@ -10,18 +10,7 @@ PilotTunnel gives you one installer and one menu for controller/worker tunnel op
 bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh)
 ```
 
-Run the same installer on every server. It prepares PilotTunnel, verifies the managed binaries, and opens the terminal menu. Choose its role later from the menu under **Setup / Configure this server**.
-
-<details>
-<summary>Non-interactive examples</summary>
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --no-menu --role controller
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --no-menu --role worker
-bash <(curl -fsSL https://raw.githubusercontent.com/CapoLab/PilotTunnel/main/scripts/install.sh) --no-menu --no-binaries --dry-run
-```
-
-</details>
+The installer prepares PilotTunnel, checks the required binaries, prints a short safety summary, and then opens the menu. Choose the server role later from `Setup / Configure this server`.
 
 ## Common commands
 
@@ -33,12 +22,13 @@ python -m pilottunnel.cli readiness report --json
 
 ## Safety by default
 
-- No service start or stop during bootstrap
-- No firewall, route, or interface mutation
-- No adapter execution during bootstrap
+- No service start or stop during base install
+- No daemon reload during base install
+- No firewall, route, or interface mutation during base install
+- No adapter execution during base install
 - Explicit confirmation tokens for apply operations
 
-No auto-switch. No background monitoring.
+No auto-switch. No background monitoring. No UI.
 
 ## Docs
 
@@ -47,7 +37,7 @@ No auto-switch. No background monitoring.
 - [Security policy](SECURITY.md)
 - [Contributing guide](CONTRIBUTING.md)
 - [Release notes](RELEASE_NOTES.md)
-- [Persian documentation](README_FA.md)
+- [Persian placeholder](README_FA.md)
 
 ## License
 

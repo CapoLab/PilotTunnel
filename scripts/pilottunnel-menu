@@ -105,7 +105,7 @@ PY
 
 show_header() {
   current_role="$(configured_role)"
-  printf '\033[2J\033[H'
+  printf '\n'
   printf '%s\n' "PilotTunnel Menu"
   printf '%s\n' "================"
   printf 'Version: %s\n' "$(installed_version)"
@@ -336,7 +336,9 @@ main() {
   PYTHON_BIN="$(find_python)"
   [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
   prepare_paths
-  [ -t 0 ] && [ -t 1 ] || fail "PilotTunnel Menu requires an interactive terminal."
+  if [ "${PILOTTUNNEL_MENU_ALLOW_NON_TTY:-0}" != "1" ]; then
+    [ -t 0 ] && [ -t 1 ] || fail "PilotTunnel Menu requires an interactive terminal."
+  fi
   main_menu
 }
 
