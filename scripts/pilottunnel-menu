@@ -34,6 +34,14 @@ NODE_ID=""
 NODE_CONFIG_PATH=""
 NODE_PREFERRED_LAYER=""
 NODE_MANAGED_ENDPOINT_COUNT="0"
+CURRENT_LINK_COUNT="0"
+CURRENT_LINK_LABEL=""
+CURRENT_IRAN_ADDRESS=""
+CURRENT_IRAN_MAIN_PORT=""
+CURRENT_TUNNEL_PORT=""
+CURRENT_CONFIG_PORT=""
+CURRENT_KHAREJ_ADDRESS=""
+CURRENT_LINK_STATUS=""
 
 fail() {
   printf '%s\n' "Error: $*" >&2
@@ -237,6 +245,14 @@ role_label() {
   esac
 }
 
+side_name() {
+  case "$1" in
+    controller) printf '%s\n' "Iran side" ;;
+    worker) printf '%s\n' "Kharej side" ;;
+    *) printf '%s\n' "not configured" ;;
+  esac
+}
+
 current_node_snapshot() {
   (
     cd "$REPO_DIR" || exit 1
@@ -291,6 +307,46 @@ load_node_snapshot() {
   NODE_CONFIG_PATH="$(normalize_input "${snapshot[10]:-$CONFIG_FILE}")"
   NODE_PREFERRED_LAYER="$(normalize_input "${snapshot[11]:-}")"
   NODE_MANAGED_ENDPOINT_COUNT="$(normalize_input "${snapshot[12]:-0}")"
+}
+
+current_link_snapshot() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+from pilottunnel.config import load_config
+from pilottunnel.links import get_active_link
+
+config = load_config(Path(sys.argv[1]))
+link = get_active_link(config)
+values = [
+    str(len(config.links)),
+    getattr(link, "label", "") or "",
+    getattr(link, "iran_address", "") or "",
+    "" if getattr(link, "iran_main_port", None) is None else str(link.iran_main_port),
+    "" if link is None else str(link.tunnel_port),
+    "" if link is None else str(link.config_port),
+    getattr(link, "kharej_address", "") or "",
+    getattr(link, "status", "") or "",
+]
+for value in values:
+    print(str(value).replace("\n", " ").strip())
+PY
+  )
+}
+
+load_link_snapshot() {
+  mapfile -t snapshot < <(current_link_snapshot)
+  CURRENT_LINK_COUNT="$(normalize_input "${snapshot[0]:-0}")"
+  CURRENT_LINK_LABEL="$(normalize_input "${snapshot[1]:-}")"
+  CURRENT_IRAN_ADDRESS="$(normalize_input "${snapshot[2]:-}")"
+  CURRENT_IRAN_MAIN_PORT="$(normalize_input "${snapshot[3]:-}")"
+  CURRENT_TUNNEL_PORT="$(normalize_input "${snapshot[4]:-}")"
+  CURRENT_CONFIG_PORT="$(normalize_input "${snapshot[5]:-}")"
+  CURRENT_KHAREJ_ADDRESS="$(normalize_input "${snapshot[6]:-}")"
+  CURRENT_LINK_STATUS="$(normalize_input "${snapshot[7]:-}")"
 }
 
 run_cli_capture() {
@@ -432,9 +488,13 @@ role_label = {
     "controller": "Iran side / controller",
     "worker": "Kharej side / worker",
 }.get(role, "not configured")
-print(f"Role: {role_label}")
+print(f"Side: {role_label}")
 print(f"Initialized: {'yes' if payload.get('initialized') else 'no'}")
 print(f"Node ID: {payload.get('node_id') or 'not assigned'}")
+if role == "controller":
+    print(f"Link count: {payload.get('link_count', 0)}")
+elif role == "worker":
+    print(f"Active link: {payload.get('active_link_label') or 'not configured'}")
 print(f"Config path: {payload.get('config_path')}")
 print(f"Preferred layer: {payload.get('preferred_layer') or 'not selected'}")
 print(f"Allowed actions: {len(payload.get('allowed_actions') or [])}")
@@ -635,17 +695,110 @@ prompt_with_default() {
   fi
 }
 
+show_setup_summary() {
+  role_value="$1"
+  load_link_snapshot
+  show_header
+  section_heading "Setup complete"
+  printf '%bSide: %s%b\n' "$VALUE_COLOR$BOLD" "$(role_label "$role_value")" "$RESET"
+  printf '%bLink label: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_LINK_LABEL:-not configured}" "$RESET"
+  printf '%bIran address: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_IRAN_ADDRESS:-not configured}" "$RESET"
+  printf '%bTunnel port: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_TUNNEL_PORT:-not configured}" "$RESET"
+  printf '%bConfig port: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_CONFIG_PORT:-not configured}" "$RESET"
+  if [ "$role_value" = "controller" ]; then
+    printf '%bMain public port: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_IRAN_MAIN_PORT:-not configured}" "$RESET"
+    printf '%bKharej address: %s%b\n' "$VALUE_COLOR$BOLD" "${CURRENT_KHAREJ_ADDRESS:-not configured}" "$RESET"
+  fi
+
+  binary_summary="$(show_binary_status_summary)"
+  if printf '%s\n' "$binary_summary" | grep -qi "Missing binaries: none"; then
+    printf '%bBinary readiness:%b OK\n' "$VALUE_COLOR$BOLD" "$RESET"
+  else
+    printf '%bBinary readiness:%b warning\n' "$VALUE_COLOR$BOLD" "$RESET"
+  fi
+  printf '\n%s\n' "$binary_summary"
+  printf '\n%bNext step:%b ' "$ACCENT$BOLD" "$RESET"
+  if [ "$role_value" = "controller" ]; then
+    printf '%s\n' "generate tunnel candidates for this link."
+  else
+    printf '%s\n' "prepare this endpoint for candidate testing."
+  fi
+}
+
+show_current_setup_panel() {
+  printf '%bCurrent setup:%b\n' "$VALUE_COLOR$BOLD" "$RESET"
+  printf 'Side: %s\n' "$NODE_ROLE_LABEL"
+  if [ -n "$CURRENT_LINK_LABEL" ]; then
+    printf 'Link label: %s\n' "$CURRENT_LINK_LABEL"
+    printf 'Iran address: %s\n' "$CURRENT_IRAN_ADDRESS"
+    printf 'Tunnel port: %s\n' "$CURRENT_TUNNEL_PORT"
+    printf 'Config port: %s\n' "$CURRENT_CONFIG_PORT"
+    if [ "$NODE_ROLE" = "controller" ]; then
+      printf 'Main public port: %s\n' "$CURRENT_IRAN_MAIN_PORT"
+      printf 'Kharej address: %s\n' "$CURRENT_KHAREJ_ADDRESS"
+    fi
+  else
+    printf 'Link label: not configured\n'
+  fi
+}
+
+prompt_required_text() {
+  prompt_label="$1"
+  default_value="$2"
+  while true; do
+    prompt_with_default "$prompt_label" "$default_value" || return 1
+    candidate="$(printf '%s' "$PROMPT_RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -n "$candidate" ]; then
+      PROMPT_RESULT="$candidate"
+      return 0
+    fi
+    warning "$prompt_label is required."
+  done
+}
+
+prompt_port_value() {
+  prompt_label="$1"
+  default_value="$2"
+  while true; do
+    prompt_with_default "$prompt_label" "$default_value" || return 1
+    candidate="$(printf '%s' "$PROMPT_RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if printf '%s' "$candidate" | grep -Eq '^[0-9]+$' && [ "$candidate" -ge 1 ] && [ "$candidate" -le 65535 ]; then
+      PROMPT_RESULT="$candidate"
+      return 0
+    fi
+    warning "$prompt_label must be an integer between 1 and 65535."
+  done
+}
+
+prompt_optional_label_value() {
+  prompt_label="$1"
+  default_value="$2"
+  while true; do
+    prompt_with_default "$prompt_label" "$default_value" || return 1
+    candidate="$(printf '%s' "$PROMPT_RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -z "$candidate" ]; then
+      PROMPT_RESULT=""
+      return 0
+    fi
+    if printf '%s' "$candidate" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+      PROMPT_RESULT="$candidate"
+      return 0
+    fi
+    warning "Link label may contain only letters, numbers, dashes, and underscores."
+  done
+}
+
 select_role_for_setup() {
   while true; do
     show_header
     section_heading "Setup / Configure this server"
+    load_link_snapshot
     if [ "$NODE_INITIALIZED" = "true" ]; then
-      printf '%bCurrent role:%b %s\n' "$VALUE_COLOR$BOLD" "$RESET" "$NODE_ROLE_LABEL"
-      printf '\n%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Keep current role" "$RESET"
-      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Reconfigure role" "$RESET"
+      show_current_setup_panel
+      printf '\n%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Keep current setup" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Reconfigure setup" "$RESET"
       printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
       printf '\n'
-      menu_hint "Keep current role continues into the base setup wizard."
       prompt_input
       IFS= read -r current_selection || return 1
       current_selection="$(normalize_input "$current_selection")"
@@ -656,13 +809,6 @@ select_role_for_setup() {
           return 0
           ;;
         2)
-          printf '\n%bType CHANGE_NODE_ROLE to continue:%b ' "$WARN_COLOR$BOLD" "$RESET"
-          IFS= read -r confirmation || return 1
-          confirmation="$(normalize_input "$confirmation")"
-          if [ "$confirmation" != "CHANGE_NODE_ROLE" ]; then
-            warning "Role reconfiguration cancelled."
-            return 1
-          fi
           ROLE_CHANGE_MODE="reconfigure"
           ;;
         3) return 1 ;;
@@ -674,11 +820,11 @@ select_role_for_setup() {
     fi
 
     show_header
-    section_heading "Choose the role for this server"
+    section_heading "Choose the side for this server"
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Iran side" "$RESET"
-    menu_hint "   Main entry node. Users connect here. This side makes tunnel decisions."
+    menu_hint "   Public/user-facing entry side. This side will manage future tunnel candidates."
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Kharej side" "$RESET"
-    menu_hint "   Endpoint node. This side receives tunnel traffic and can be tested as one of many candidates."
+    menu_hint "   Remote endpoint side. This side will be prepared for future candidate testing."
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
     prompt_input
     IFS= read -r selection || return 1
@@ -697,84 +843,88 @@ select_role_for_setup() {
 
 run_setup_wizard() {
   load_node_snapshot
+  load_link_snapshot
   if ! select_role_for_setup; then
     return
   fi
 
-  selected_role_label="$(role_label "$SELECTED_ROLE")"
-  show_header
-  section_heading "Base setup"
-  menu_hint "This step saves local node metadata for future multi-endpoint workflows."
-  if [ "$SELECTED_ROLE" = "controller" ]; then
-    menu_hint "This Iran side node can later manage multiple Kharej endpoints."
-  else
-    menu_hint "This Kharej side node can later be added to an Iran-side endpoint candidate list."
-  fi
-  printf '\n'
-
-  default_display_name="${NODE_DISPLAY_NAME:-$(hostname 2>/dev/null || printf '%s' 'pilottunnel-node')}"
-  default_install_root="${NODE_INSTALL_ROOT:-$BASE_DIR}"
-  default_state_directory="${NODE_STATE_DIRECTORY:-$STATE_DIR}"
-  default_work_directory="${NODE_WORK_DIRECTORY:-$WORK_DIR}"
-  default_endpoint_address="${NODE_ENDPOINT_ADDRESS:-}"
-  default_notes="${NODE_NOTES:-}"
-
-  prompt_with_default "Node display name" "$default_display_name" || return
-  setup_display_name="$PROMPT_RESULT"
-  printf '\n'
-  prompt_with_default "Install root" "$default_install_root" || return
-  setup_install_root="$PROMPT_RESULT"
-  printf '\n'
-  prompt_with_default "State directory" "$default_state_directory" || return
-  setup_state_directory="$PROMPT_RESULT"
-  printf '\n'
-  prompt_with_default "Work/cache directory" "$default_work_directory" || return
-  setup_work_directory="$PROMPT_RESULT"
-  printf '\n'
-  prompt_with_default "Public IP / endpoint address (optional)" "$default_endpoint_address" || return
-  setup_endpoint_address="$PROMPT_RESULT"
-  printf '\n'
-  prompt_with_default "Notes / label (optional)" "$default_notes" || return
-  setup_notes="$PROMPT_RESULT"
-  printf '\n'
-
-  if [ "$ROLE_CHANGE_MODE" = "new" ]; then
-    apply_role_change "$SELECTED_ROLE" "false" || return
-  elif [ "$ROLE_CHANGE_MODE" = "reconfigure" ]; then
-    apply_role_change "$SELECTED_ROLE" "true" || return
-  fi
-
-  if ! save_node_setup_metadata \
-    "$SELECTED_ROLE" \
-    "$setup_display_name" \
-    "$setup_install_root" \
-    "$setup_state_directory" \
-    "$setup_work_directory" \
-    "$setup_endpoint_address" \
-    "$setup_notes"; then
-    error_line "Unable to save setup metadata."
+  if [ "$ROLE_CHANGE_MODE" = "keep" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+    show_setup_summary "$SELECTED_ROLE"
     return
   fi
 
-  load_node_snapshot
-  show_header
-  section_heading "Setup complete"
-  printf '%bRole: %s%b\n' "$VALUE_COLOR$BOLD" "$selected_role_label" "$RESET"
-  printf '%bNode label: %s%b\n' "$VALUE_COLOR$BOLD" "${NODE_DISPLAY_NAME:-not set}" "$RESET"
+  while true; do
+    show_header
+    section_heading "Link setup"
+    if [ "$SELECTED_ROLE" = "controller" ]; then
+      menu_hint "Iran side stores one or more Kharej links for future candidate generation."
+      prompt_required_text "Iran IP / domain" "$CURRENT_IRAN_ADDRESS" || return
+      iran_address="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Main public/user-facing port on Iran side" "$CURRENT_IRAN_MAIN_PORT" || return
+      main_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Tunnel port between Iran and Kharej" "$CURRENT_TUNNEL_PORT" || return
+      tunnel_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Config/service port" "$CURRENT_CONFIG_PORT" || return
+      config_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_required_text "Kharej IP / domain" "$CURRENT_KHAREJ_ADDRESS" || return
+      kharej_address="$PROMPT_RESULT"
+      printf '\n'
+      prompt_optional_label_value "Optional link label" "$CURRENT_LINK_LABEL" || return
+      link_label="$PROMPT_RESULT"
+      printf '\n'
+    else
+      menu_hint "Kharej side stores the active endpoint link for future candidate testing."
+      prompt_required_text "Iran IP / domain" "$CURRENT_IRAN_ADDRESS" || return
+      iran_address="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Tunnel port between Iran and Kharej" "$CURRENT_TUNNEL_PORT" || return
+      tunnel_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_port_value "Config/service port" "$CURRENT_CONFIG_PORT" || return
+      config_port="$PROMPT_RESULT"
+      printf '\n'
+      prompt_optional_label_value "Optional link label" "$CURRENT_LINK_LABEL" || return
+      link_label="$PROMPT_RESULT"
+      printf '\n'
+    fi
 
-  binary_summary="$(show_binary_status_summary)"
-  if printf '%s\n' "$binary_summary" | grep -qi "Missing binaries: none"; then
-    printf '%bBinary readiness:%b OK\n' "$VALUE_COLOR$BOLD" "$RESET"
-  else
-    printf '%bBinary readiness:%b warning\n' "$VALUE_COLOR$BOLD" "$RESET"
-  fi
-  printf '\n%s\n' "$binary_summary"
-  printf '\n%bNext step:%b ' "$ACCENT$BOLD" "$RESET"
-  if [ "$SELECTED_ROLE" = "controller" ]; then
-    printf '%s\n' "add Kharej endpoints and create tunnel candidates"
-  else
-    printf '%s\n' "import or prepare a bundle from the Iran side"
-  fi
+    if [ "$ROLE_CHANGE_MODE" = "new" ]; then
+      apply_role_change "$SELECTED_ROLE" "false" || return
+    elif [ "$ROLE_CHANGE_MODE" = "reconfigure" ]; then
+      apply_role_change "$SELECTED_ROLE" "true" || return
+    fi
+
+    if [ "$SELECTED_ROLE" = "controller" ]; then
+      cli_args=(link setup-iran --iran-address "$iran_address" --main-port "$main_port" --tunnel-port "$tunnel_port" --config-port "$config_port" --kharej-address "$kharej_address")
+    else
+      cli_args=(link setup-kharej --iran-address "$iran_address" --tunnel-port "$tunnel_port" --config-port "$config_port")
+    fi
+    if [ -n "$link_label" ]; then
+      cli_args+=(--label "$link_label")
+    fi
+    if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+      cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
+    fi
+
+    if ! run_cli_capture "${cli_args[@]}"; then
+      message="$(capture_json_message)"
+      debug_capture_if_enabled
+      cleanup_capture
+      warning "${message:-Unable to save link setup. Please try again.}"
+      pause_menu
+      continue
+    fi
+    debug_capture_if_enabled
+    cleanup_capture
+    load_node_snapshot
+    load_link_snapshot
+    show_setup_summary "$SELECTED_ROLE"
+    return
+  done
 }
 
 show_status() {

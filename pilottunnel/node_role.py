@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .config import AppConfig
+from .config import AppConfig, side_label_for_role
 
 SAFE_INSPECT_ACTIONS = {
     "adapter_list",
@@ -30,6 +30,8 @@ SAFE_INSPECT_ACTIONS = {
     "logs",
     "layer_list",
     "layer_status",
+    "link_list",
+    "link_show",
     "node_status",
     "readiness_report",
     "preflight",
@@ -47,6 +49,7 @@ SAFE_INSPECT_ACTIONS = {
 }
 
 CONTROLLER_ONLY_ACTIONS = {
+    "link_setup_iran",
     "profile_create",
     "profile_list",
     "profile_show",
@@ -124,6 +127,7 @@ ROLE_ALLOWED_ACTIONS = {
         "install_plan",
         "install_apply",
         "install_rollback",
+        "link_setup_kharej",
         "restore_apply",
         "restore_plan",
         "service_start",
@@ -170,9 +174,11 @@ def require_worker(action: str, role: str | None) -> None:
 
 def node_status_payload(config: AppConfig, config_path: str) -> dict:
     role = config.node.normalized_role
+    side_label = config.node.side_label or (side_label_for_role(role) if role else "")
     return {
         "node_role": config.node.node_role,
         "normalized_role": config.node.normalized_role,
+        "side_label": side_label,
         "config_path": config_path,
         "initialized": config.node.initialized,
         "allowed_actions": sorted(ROLE_ALLOWED_ACTIONS.get(role, SAFE_INSPECT_ACTIONS)),
@@ -182,4 +188,6 @@ def node_status_payload(config: AppConfig, config_path: str) -> dict:
         "role_alias_used": config.node.role_alias_used,
         "preferred_layer": config.node.preferred_layer,
         "preferred_layer_selected_at": config.node.preferred_layer_selected_at,
+        "link_count": len(config.links),
+        "active_link_label": config.node.active_link_label,
     }

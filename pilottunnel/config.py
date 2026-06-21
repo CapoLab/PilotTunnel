@@ -33,6 +33,7 @@ class NodeSettings:
     initialized_at: str = ""
     role_alias_used: str = ""
     normalized_role: str = ""
+    side_label: str = ""
     preferred_layer: str = ""
     preferred_layer_selected_at: str = ""
     display_name: str = ""
@@ -41,6 +42,7 @@ class NodeSettings:
     work_directory: str = ""
     endpoint_address: str = ""
     notes: str = ""
+    active_link_label: str = ""
     managed_remote_endpoints: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -72,6 +74,19 @@ class ProfileSafety:
     cooldown_seconds: int = 30
     rollback_on_failure: bool = True
     dry_run_default: bool = True
+
+
+@dataclass
+class LinkProfile:
+    id: str
+    label: str
+    iran_address: str
+    tunnel_port: int
+    config_port: int
+    iran_main_port: int | None = None
+    kharej_address: str = ""
+    status: str = "configured"
+    candidates: list[Candidate] = field(default_factory=list)
 
 
 @dataclass
@@ -118,6 +133,7 @@ class AppConfig:
     partition_mode: bool = False
     binary_resolution: BinaryResolutionSettings = field(default_factory=BinaryResolutionSettings)
     node: NodeSettings = field(default_factory=NodeSettings)
+    links: list[LinkProfile] = field(default_factory=list)
     profiles: list[Profile] = field(default_factory=list)
 
 
@@ -151,6 +167,11 @@ def canonical_runtime_role(value: str) -> str:
     return normalized
 
 
+def side_label_for_role(role: str) -> str:
+    normalized = canonical_role(role)
+    return "Iran side" if normalized == "controller" else "Kharej side"
+
+
 def build_node_settings(role_value: str, existing_node_id: str = "", *, existing_node: NodeSettings | None = None) -> NodeSettings:
     normalized = canonical_role(role_value)
     template = existing_node or NodeSettings()
@@ -160,6 +181,7 @@ def build_node_settings(role_value: str, existing_node_id: str = "", *, existing
         initialized_at=datetime.now(timezone.utc).isoformat(),
         role_alias_used=normalized,
         normalized_role=normalized,
+        side_label=side_label_for_role(normalized),
         preferred_layer=template.preferred_layer,
         preferred_layer_selected_at=template.preferred_layer_selected_at,
         display_name=template.display_name,
@@ -168,6 +190,7 @@ def build_node_settings(role_value: str, existing_node_id: str = "", *, existing
         work_directory=template.work_directory,
         endpoint_address=template.endpoint_address,
         notes=template.notes,
+        active_link_label=template.active_link_label,
         managed_remote_endpoints=list(template.managed_remote_endpoints),
     )
 
@@ -214,11 +237,26 @@ def _profile_from_dict(data: dict[str, Any]) -> Profile:
     )
 
 
+def _link_from_dict(data: dict[str, Any]) -> LinkProfile:
+    return LinkProfile(
+        id=data.get("id") or data["label"],
+        label=data["label"],
+        iran_address=data["iran_address"],
+        iran_main_port=data.get("iran_main_port"),
+        tunnel_port=data["tunnel_port"],
+        config_port=data["config_port"],
+        kharej_address=data.get("kharej_address", ""),
+        status=data.get("status", "configured"),
+        candidates=[Candidate(**item) for item in data.get("candidates", [])],
+    )
+
+
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     if not path.exists():
         return AppConfig()
     data = json.loads(path.read_text(encoding="utf-8"))
     profiles = [_profile_from_dict(item) for item in data.get("profiles", [])]
+    links = [_link_from_dict(item) for item in data.get("links", [])]
     return AppConfig(
         controller_role=data.get("controller_role", "controller"),
         worker_role=data.get("worker_role", "worker"),
@@ -226,6 +264,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         partition_mode=data.get("partition_mode", False),
         binary_resolution=BinaryResolutionSettings(**(data.get("binary_resolution") or {})),
         node=NodeSettings(**(data.get("node") or {})),
+        links=links,
         profiles=profiles,
     )
 

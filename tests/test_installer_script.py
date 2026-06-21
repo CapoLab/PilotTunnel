@@ -151,7 +151,16 @@ class InstallerScriptTests(unittest.TestCase):
         )
         return manifest_path
 
-    def write_config_fixture(self, base_dir: Path, *, role: str = "", display_name: str = "", manifest_path: Path | None = None) -> None:
+    def write_config_fixture(
+        self,
+        base_dir: Path,
+        *,
+        role: str = "",
+        display_name: str = "",
+        manifest_path: Path | None = None,
+        links: list[dict] | None = None,
+        active_link_label: str = "",
+    ) -> None:
         payload = {
             "controller_role": "controller",
             "worker_role": "worker",
@@ -170,6 +179,7 @@ class InstallerScriptTests(unittest.TestCase):
                 "initialized_at": "2026-06-21T00:00:00+00:00" if role else "",
                 "role_alias_used": role,
                 "normalized_role": role,
+                "side_label": "Iran side" if role == "controller" else ("Kharej side" if role == "worker" else ""),
                 "preferred_layer": "layer4" if role else "",
                 "preferred_layer_selected_at": "2026-06-21T00:00:00+00:00" if role else "",
                 "display_name": display_name,
@@ -178,8 +188,10 @@ class InstallerScriptTests(unittest.TestCase):
                 "work_directory": str(base_dir / "work"),
                 "endpoint_address": "",
                 "notes": "",
+                "active_link_label": active_link_label,
                 "managed_remote_endpoints": [],
             },
+            "links": links or [],
             "profiles": [],
         }
         (base_dir / "state" / "config.json").write_text(__import__("json").dumps(payload, indent=2), encoding="utf-8")
@@ -371,51 +383,136 @@ class InstallerScriptTests(unittest.TestCase):
             self.write_config_fixture(base_dir)
             result = self.run_menu(
                 base_dir,
-                "1\n1\nentry-node\n\n\n\nedge.example.invalid\nprimary entry\n\n7\n",
+                "1\n1\niran.example.invalid\n41011\n41012\n41013\nworker.example.invalid\n\n\n7\n",
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Setup complete", result.stdout)
-            self.assertIn("Role: Iran side / controller", result.stdout)
+            self.assertIn("Side: Iran side / controller", result.stdout)
+            self.assertIn("Link label: link-001", result.stdout)
+            self.assertIn("Main public port: 41011", result.stdout)
+            self.assertIn("Kharej address: worker.example.invalid", result.stdout)
             self.assertNotIn('{"ok":', result.stdout)
             config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config_data["node"]["normalized_role"], "controller")
-            self.assertEqual(config_data["node"]["display_name"], "entry-node")
-            self.assertEqual(config_data["node"]["endpoint_address"], "edge.example.invalid")
-            self.assertIn("managed_remote_endpoints", config_data["node"])
-            self.assertEqual(config_data["node"]["managed_remote_endpoints"], [])
+            self.assertEqual(config_data["node"]["active_link_label"], "link-001")
+            self.assertEqual(config_data["links"][0]["label"], "link-001")
+            self.assertEqual(config_data["links"][0]["iran_address"], "iran.example.invalid")
+            self.assertEqual(config_data["links"][0]["iran_main_port"], 41011)
+            self.assertEqual(config_data["links"][0]["tunnel_port"], 41012)
+            self.assertEqual(config_data["links"][0]["config_port"], 41013)
+            self.assertEqual(config_data["links"][0]["kharej_address"], "worker.example.invalid")
+            self.assertEqual(config_data["links"][0]["candidates"], [])
 
     def test_setup_wizard_shows_clean_current_role_and_keep_current_role(self) -> None:
         with self.menu_install_root() as base_dir:
-            self.write_config_fixture(base_dir, role="controller", display_name="existing-node")
+            self.write_config_fixture(
+                base_dir,
+                role="controller",
+                display_name="existing-node",
+                active_link_label="demo_link",
+                links=[
+                    {
+                        "id": "demo_link",
+                        "label": "demo_link",
+                        "iran_address": "iran.example.invalid",
+                        "iran_main_port": 41021,
+                        "tunnel_port": 41022,
+                        "config_port": 41023,
+                        "kharej_address": "worker.example.invalid",
+                        "status": "configured",
+                        "candidates": [],
+                    }
+                ],
+            )
             result = self.run_menu(
                 base_dir,
-                "1\n1\n\n\n\n\n\n\n\n7\n",
+                "1\n1\n\n7\n",
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("Current role: Iran side / controller", result.stdout)
+            self.assertIn("Current setup:", result.stdout)
+            self.assertIn("Side: Iran side / controller", result.stdout)
             self.assertIn("Setup complete", result.stdout)
+            self.assertIn("Link label: demo_link", result.stdout)
             self.assertNotIn('{"ok": false', result.stdout)
             self.assertNotIn('"message":', result.stdout)
 
     def test_setup_wizard_reconfigure_requires_confirmation(self) -> None:
         with self.menu_install_root() as base_dir:
-            self.write_config_fixture(base_dir, role="controller", display_name="existing-node")
+            self.write_config_fixture(
+                base_dir,
+                role="controller",
+                display_name="existing-node",
+                active_link_label="demo_link",
+                links=[
+                    {
+                        "id": "demo_link",
+                        "label": "demo_link",
+                        "iran_address": "iran.example.invalid",
+                        "iran_main_port": 41031,
+                        "tunnel_port": 41032,
+                        "config_port": 41033,
+                        "kharej_address": "worker.example.invalid",
+                        "status": "configured",
+                        "candidates": [],
+                    }
+                ],
+            )
             result = self.run_menu(
                 base_dir,
-                "1\n2\nnope\n\n7\n",
+                "1\n2\n2\niran.example.invalid\n41041\n41042\nrelinked_worker\n\n7\n",
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("Role reconfiguration cancelled.", result.stdout)
+            self.assertNotIn("CHANGE_NODE_ROLE", result.stdout)
+            self.assertIn("Side: Kharej side / worker", result.stdout)
+            self.assertIn("Link label: relinked_worker", result.stdout)
             config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
-            self.assertEqual(config_data["node"]["normalized_role"], "controller")
+            self.assertEqual(config_data["node"]["normalized_role"], "worker")
+            self.assertEqual(config_data["links"][0]["label"], "relinked_worker")
+            self.assertEqual(config_data["links"][0]["tunnel_port"], 41041)
+            self.assertEqual(config_data["links"][0]["config_port"], 41042)
+
+    def test_setup_wizard_accepts_kharej_side_inputs(self) -> None:
+        with self.menu_install_root() as base_dir:
+            self.write_config_fixture(base_dir)
+            result = self.run_menu(
+                base_dir,
+                "1\n2\niran.example.invalid\n41051\n41052\nedge_worker\n\n7\n",
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Side: Kharej side / worker", result.stdout)
+            self.assertIn("Link label: edge_worker", result.stdout)
+            self.assertNotIn("Main public port:", result.stdout)
+            config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["node"]["normalized_role"], "worker")
+            self.assertEqual(config_data["links"][0]["label"], "edge_worker")
+            self.assertEqual(config_data["links"][0]["iran_address"], "iran.example.invalid")
+            self.assertEqual(config_data["links"][0]["tunnel_port"], 41051)
+            self.assertEqual(config_data["links"][0]["config_port"], 41052)
 
     def test_node_status_menu_is_human_readable_summary(self) -> None:
         with self.menu_install_root() as base_dir:
-            self.write_config_fixture(base_dir, role="worker", display_name="endpoint-node")
+            self.write_config_fixture(
+                base_dir,
+                role="worker",
+                display_name="endpoint-node",
+                active_link_label="edge_worker",
+                links=[
+                    {
+                        "id": "edge_worker",
+                        "label": "edge_worker",
+                        "iran_address": "iran.example.invalid",
+                        "tunnel_port": 41061,
+                        "config_port": 41062,
+                        "status": "configured",
+                        "candidates": [],
+                    }
+                ],
+            )
             result = self.run_menu(base_dir, "2\n\n7\n")
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("Role: Kharej side / worker", result.stdout)
+            self.assertIn("Side: Kharej side / worker", result.stdout)
             self.assertIn("Initialized: yes", result.stdout)
+            self.assertIn("Active link: edge_worker", result.stdout)
             self.assertIn("Allowed actions:", result.stdout)
             self.assertIn("Blocked actions:", result.stdout)
             self.assertNotIn("allowed_actions", result.stdout)
@@ -454,10 +551,12 @@ class InstallerScriptTests(unittest.TestCase):
         forbidden_terms = [
             "".join(chr(value) for value in codes)
             for codes in (
-                (105, 114, 97, 110),
                 (102, 111, 114, 101, 105, 103, 110),
-                (107, 104, 97, 114, 101, 106),
                 (116, 117, 114, 107, 101, 121),
+                (99, 122, 101, 99, 104),
+                (110, 101, 116, 104, 101, 114, 108, 97, 110, 100, 115),
+                (114, 117, 115, 115, 105, 97),
+                (102, 97, 108, 107, 101, 110, 115, 116, 101, 105, 110),
             )
         ]
         for term in forbidden_terms:

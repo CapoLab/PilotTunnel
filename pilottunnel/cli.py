@@ -47,6 +47,7 @@ from .config import (
 )
 from .deploy import apply_deploy, build_deploy_plan, build_deploy_status
 from .install_plan import apply_install, apply_uninstall, build_install_plan, build_uninstall_plan, rollback_install
+from .links import current_setup_summary, link_list_payload, setup_iran_link, setup_kharej_link
 from .node_role import action_allowed_for_role, node_status_payload
 from .healthcheck import DEFAULT_TIMEOUT_SECONDS, build_profile_healthcheck_plan, run_profile_healthchecks, summarize_healthchecks, tcp_healthcheck
 from .preflight import run_preflight
@@ -96,6 +97,26 @@ def build_parser() -> argparse.ArgumentParser:
     node = subparsers.add_parser("node")
     node_subparsers = node.add_subparsers(dest="node_command", required=True)
     node_subparsers.add_parser("status")
+
+    link = subparsers.add_parser("link")
+    link_subparsers = link.add_subparsers(dest="link_command", required=True)
+    link_subparsers.add_parser("list")
+    link_show = link_subparsers.add_parser("show")
+    link_show.add_argument("label")
+    link_setup_iran = link_subparsers.add_parser("setup-iran")
+    link_setup_iran.add_argument("--iran-address", required=True)
+    link_setup_iran.add_argument("--main-port", type=int, required=True)
+    link_setup_iran.add_argument("--tunnel-port", type=int, required=True)
+    link_setup_iran.add_argument("--config-port", type=int, required=True)
+    link_setup_iran.add_argument("--kharej-address", required=True)
+    link_setup_iran.add_argument("--label")
+    link_setup_iran.add_argument("--replace-label")
+    link_setup_kharej = link_subparsers.add_parser("setup-kharej")
+    link_setup_kharej.add_argument("--iran-address", required=True)
+    link_setup_kharej.add_argument("--tunnel-port", type=int, required=True)
+    link_setup_kharej.add_argument("--config-port", type=int, required=True)
+    link_setup_kharej.add_argument("--label")
+    link_setup_kharej.add_argument("--replace-label")
 
     profile = subparsers.add_parser("profile")
     profile_subparsers = profile.add_subparsers(dest="profile_command", required=True)
@@ -715,6 +736,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         if args.service_command == "install":
             return f"service_install_{args.service_install_command.replace('-', '_')}"
         return f"service_{args.service_command.replace('-', '_')}"
+    if args.command == "link":
+        return f"link_{args.link_command.replace('-', '_')}"
     if args.command == "profile":
         return f"profile_{args.profile_command}"
     if args.command == "staged":
@@ -1070,6 +1093,78 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "node" and args.node_command == "status":
         print(json.dumps(node_status_payload(config, str(config_path)), indent=2))
+        return 0
+
+    if args.command == "link" and args.link_command == "list":
+        print(json.dumps(link_list_payload(config), indent=2))
+        return 0
+
+    if args.command == "link" and args.link_command == "show":
+        try:
+            payload = link_list_payload(config)
+            link = next(item for item in payload if item["label"] == args.label)
+        except StopIteration:
+            print(json.dumps({"ok": False, "message": f"Link '{args.label}' not found"}, indent=2))
+            return 1
+        print(json.dumps(link, indent=2))
+        return 0
+
+    if args.command == "link" and args.link_command == "setup-iran":
+        try:
+            status, link = setup_iran_link(
+                config,
+                iran_address=args.iran_address,
+                iran_main_port=args.main_port,
+                tunnel_port=args.tunnel_port,
+                config_port=args.config_port,
+                kharej_address=args.kharej_address,
+                label=args.label,
+                replace_label=args.replace_label,
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        write_audit_log(
+            "link_setup",
+            link.label,
+            {
+                "side": "controller",
+                "status": status,
+                "label": link.label,
+                "replace_label": args.replace_label or "",
+            },
+            switch_paths.audit_path,
+        )
+        print(json.dumps({"ok": True, "status": status, "side": current_setup_summary(config)["side"], "link": asdict(link)}, indent=2))
+        return 0
+
+    if args.command == "link" and args.link_command == "setup-kharej":
+        try:
+            status, link = setup_kharej_link(
+                config,
+                iran_address=args.iran_address,
+                tunnel_port=args.tunnel_port,
+                config_port=args.config_port,
+                label=args.label,
+                replace_label=args.replace_label,
+            )
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        write_audit_log(
+            "link_setup",
+            link.label,
+            {
+                "side": "worker",
+                "status": status,
+                "label": link.label,
+                "replace_label": args.replace_label or "",
+            },
+            switch_paths.audit_path,
+        )
+        print(json.dumps({"ok": True, "status": status, "side": current_setup_summary(config)["side"], "link": asdict(link)}, indent=2))
         return 0
 
     if args.command == "runtime" and args.runtime_command == "plan":
