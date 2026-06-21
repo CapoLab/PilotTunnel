@@ -1023,12 +1023,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
                     return 1
         try:
-            node = build_node_settings(role_value, existing_node_id=config.node.node_id)
+            node = build_node_settings(role_value, existing_node_id=config.node.node_id, existing_node=config.node)
         except ValueError as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
-        node.preferred_layer = config.node.preferred_layer
-        node.preferred_layer_selected_at = config.node.preferred_layer_selected_at
         old_role = config.node.normalized_role
         config.node = node
         _save_runtime(config, state, registry, config_path, state_path, registry_path)

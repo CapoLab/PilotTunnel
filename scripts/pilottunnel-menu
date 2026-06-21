@@ -6,6 +6,7 @@ BASE_DIR="$DEFAULT_BASE_DIR"
 PYTHON_BIN=""
 TERM_WIDTH=88
 PANEL_WIDTH=80
+MENU_DEBUG="${PILOTTUNNEL_MENU_DEBUG:-0}"
 
 RESET=""
 BOLD=""
@@ -19,6 +20,20 @@ WARN_COLOR=""
 ERROR_COLOR=""
 VALUE_COLOR=""
 PROMPT_COLOR=""
+
+NODE_INITIALIZED="false"
+NODE_ROLE=""
+NODE_ROLE_LABEL="not configured"
+NODE_DISPLAY_NAME=""
+NODE_INSTALL_ROOT=""
+NODE_STATE_DIRECTORY=""
+NODE_WORK_DIRECTORY=""
+NODE_ENDPOINT_ADDRESS=""
+NODE_NOTES=""
+NODE_ID=""
+NODE_CONFIG_PATH=""
+NODE_PREFERRED_LAYER=""
+NODE_MANAGED_ENDPOINT_COUNT="0"
 
 fail() {
   printf '%s\n' "Error: $*" >&2
@@ -89,29 +104,6 @@ pt_cli() {
       --staging-root "$STAGING_ROOT" \
       "$@"
   )
-}
-
-installed_version() {
-  (
-    cd "$REPO_DIR" || exit 1
-    "$PYTHON_BIN" -c 'from pilottunnel.__version__ import VERSION; print(VERSION)'
-  ) 2>/dev/null || printf '%s\n' "unknown"
-}
-
-configured_role() {
-  [ -f "$CONFIG_FILE" ] || return 0
-  "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
-import json
-import sys
-
-try:
-    payload = json.loads(open(sys.argv[1], encoding="utf-8").read())
-except (OSError, ValueError):
-    raise SystemExit(0)
-node = payload.get("node") or {}
-if node.get("initialized"):
-    print(node.get("normalized_role") or node.get("node_role") or "")
-PY
 }
 
 init_theme() {
@@ -226,6 +218,357 @@ prompt_input() {
   printf '%b> %b' "$PROMPT_COLOR$BOLD" "$RESET"
 }
 
+normalize_input() {
+  printf '%s' "${1%$'\r'}"
+}
+
+installed_version() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" -c 'from pilottunnel.__version__ import VERSION; print(VERSION)'
+  ) 2>/dev/null || printf '%s\n' "unknown"
+}
+
+role_label() {
+  case "$1" in
+    controller) printf '%s\n' "Iran side / controller" ;;
+    worker) printf '%s\n' "Kharej side / worker" ;;
+    *) printf '%s\n' "not configured" ;;
+  esac
+}
+
+current_node_snapshot() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" - "$CONFIG_FILE" "$BASE_DIR" "$STATE_DIR" "$WORK_DIR" <<'PY'
+from pathlib import Path
+import sys
+
+from pilottunnel.config import load_config
+
+config = load_config(Path(sys.argv[1]))
+default_install_root = sys.argv[2]
+default_state_directory = sys.argv[3]
+default_work_directory = sys.argv[4]
+role = config.node.normalized_role
+role_label = {
+    "controller": "Iran side / controller",
+    "worker": "Kharej side / worker",
+}.get(role, "not configured")
+values = [
+    "true" if config.node.initialized else "false",
+    role,
+    role_label,
+    config.node.display_name or "",
+    config.node.install_root or default_install_root,
+    config.node.state_directory or default_state_directory,
+    config.node.work_directory or default_work_directory,
+    config.node.endpoint_address or "",
+    config.node.notes or "",
+    config.node.node_id or "",
+    str(Path(sys.argv[1])),
+    config.node.preferred_layer or "",
+    str(len(config.node.managed_remote_endpoints or [])),
+]
+for value in values:
+    print(str(value).replace("\n", " ").strip())
+PY
+  )
+}
+
+load_node_snapshot() {
+  mapfile -t snapshot < <(current_node_snapshot)
+  NODE_INITIALIZED="$(normalize_input "${snapshot[0]:-false}")"
+  NODE_ROLE="$(normalize_input "${snapshot[1]:-}")"
+  NODE_ROLE_LABEL="$(normalize_input "${snapshot[2]:-not configured}")"
+  NODE_DISPLAY_NAME="$(normalize_input "${snapshot[3]:-}")"
+  NODE_INSTALL_ROOT="$(normalize_input "${snapshot[4]:-$BASE_DIR}")"
+  NODE_STATE_DIRECTORY="$(normalize_input "${snapshot[5]:-$STATE_DIR}")"
+  NODE_WORK_DIRECTORY="$(normalize_input "${snapshot[6]:-$WORK_DIR}")"
+  NODE_ENDPOINT_ADDRESS="$(normalize_input "${snapshot[7]:-}")"
+  NODE_NOTES="$(normalize_input "${snapshot[8]:-}")"
+  NODE_ID="$(normalize_input "${snapshot[9]:-}")"
+  NODE_CONFIG_PATH="$(normalize_input "${snapshot[10]:-$CONFIG_FILE}")"
+  NODE_PREFERRED_LAYER="$(normalize_input "${snapshot[11]:-}")"
+  NODE_MANAGED_ENDPOINT_COUNT="$(normalize_input "${snapshot[12]:-0}")"
+}
+
+run_cli_capture() {
+  LAST_CAPTURE_STDOUT="$(mktemp)"
+  LAST_CAPTURE_STDERR="$(mktemp)"
+  if ! pt_cli "$@" >"$LAST_CAPTURE_STDOUT" 2>"$LAST_CAPTURE_STDERR"; then
+    return 1
+  fi
+  return 0
+}
+
+cleanup_capture() {
+  [ -n "${LAST_CAPTURE_STDOUT:-}" ] && rm -f "$LAST_CAPTURE_STDOUT"
+  [ -n "${LAST_CAPTURE_STDERR:-}" ] && rm -f "$LAST_CAPTURE_STDERR"
+  LAST_CAPTURE_STDOUT=""
+  LAST_CAPTURE_STDERR=""
+}
+
+capture_json_message() {
+  "$PYTHON_BIN" - "$LAST_CAPTURE_STDOUT" "$LAST_CAPTURE_STDERR" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+stdout_path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+text = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+if text:
+    try:
+        payload = json.loads(text)
+    except Exception:
+        print(" ".join(text.split()))
+        raise SystemExit(0)
+    if isinstance(payload, dict):
+        message = payload.get("message")
+        if message:
+            print(str(message))
+            raise SystemExit(0)
+stderr = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+if stderr:
+    print(" ".join(stderr.split()))
+PY
+}
+
+debug_capture_if_enabled() {
+  [ "$MENU_DEBUG" = "1" ] || return 0
+  [ -n "${LAST_CAPTURE_STDOUT:-}" ] && [ -s "$LAST_CAPTURE_STDOUT" ] && cat "$LAST_CAPTURE_STDOUT"
+  [ -n "${LAST_CAPTURE_STDERR:-}" ] && [ -s "$LAST_CAPTURE_STDERR" ] && cat "$LAST_CAPTURE_STDERR" >&2
+}
+
+apply_role_change() {
+  role="$1"
+  force_flag="$2"
+  if [ "$force_flag" = "true" ]; then
+    if ! run_cli_capture init --force --role "$role"; then
+      message="$(capture_json_message)"
+      debug_capture_if_enabled
+      cleanup_capture
+      error_line "${message:-Role reconfiguration failed.}"
+      return 1
+    fi
+  else
+    if ! run_cli_capture init --role "$role"; then
+      message="$(capture_json_message)"
+      debug_capture_if_enabled
+      cleanup_capture
+      error_line "${message:-Role initialization failed.}"
+      return 1
+    fi
+  fi
+  debug_capture_if_enabled
+  cleanup_capture
+
+  load_node_snapshot
+  if [ -z "$NODE_PREFERRED_LAYER" ]; then
+    if ! run_cli_capture layer select --layer layer4; then
+      message="$(capture_json_message)"
+      debug_capture_if_enabled
+      cleanup_capture
+      warning "${message:-Unable to select the default preferred layer.}"
+      return 0
+    fi
+    debug_capture_if_enabled
+    cleanup_capture
+  fi
+  return 0
+}
+
+save_node_setup_metadata() {
+  export PT_NODE_ROLE="$1"
+  export PT_NODE_DISPLAY_NAME="$2"
+  export PT_NODE_INSTALL_ROOT="$3"
+  export PT_NODE_STATE_DIRECTORY="$4"
+  export PT_NODE_WORK_DIRECTORY="$5"
+  export PT_NODE_ENDPOINT_ADDRESS="$6"
+  export PT_NODE_NOTES="$7"
+
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+from pilottunnel.config import load_config, save_config
+
+config_path = Path(sys.argv[1])
+config = load_config(config_path)
+config.node.display_name = os.environ.get("PT_NODE_DISPLAY_NAME", "").strip()
+config.node.install_root = os.environ.get("PT_NODE_INSTALL_ROOT", "").strip()
+config.node.state_directory = os.environ.get("PT_NODE_STATE_DIRECTORY", "").strip()
+config.node.work_directory = os.environ.get("PT_NODE_WORK_DIRECTORY", "").strip()
+config.node.endpoint_address = os.environ.get("PT_NODE_ENDPOINT_ADDRESS", "").strip()
+config.node.notes = os.environ.get("PT_NODE_NOTES", "").strip()
+if config.node.normalized_role == "controller":
+    config.node.managed_remote_endpoints = list(config.node.managed_remote_endpoints or [])
+else:
+    config.node.managed_remote_endpoints = list(config.node.managed_remote_endpoints or [])
+save_config(config, config_path)
+PY
+  )
+}
+
+show_node_status_summary() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+from pilottunnel.config import load_config
+from pilottunnel.node_role import node_status_payload
+
+config_path = Path(sys.argv[1])
+config = load_config(config_path)
+payload = node_status_payload(config, str(config_path))
+role = payload.get("normalized_role") or ""
+role_label = {
+    "controller": "Iran side / controller",
+    "worker": "Kharej side / worker",
+}.get(role, "not configured")
+print(f"Role: {role_label}")
+print(f"Initialized: {'yes' if payload.get('initialized') else 'no'}")
+print(f"Node ID: {payload.get('node_id') or 'not assigned'}")
+print(f"Config path: {payload.get('config_path')}")
+print(f"Preferred layer: {payload.get('preferred_layer') or 'not selected'}")
+print(f"Allowed actions: {len(payload.get('allowed_actions') or [])}")
+print(f"Blocked actions: {len(payload.get('blocked_actions') or [])}")
+PY
+  )
+}
+
+show_binary_status_summary() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" - "$CONFIG_FILE" "$STATE_FILE" "$WORK_DIR" <<'PY'
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+from pilottunnel.binary_readiness import build_binary_readiness_report
+from pilottunnel.config import load_config
+from pilottunnel.state import load_state
+
+config = load_config(Path(sys.argv[1]))
+state = load_state(Path(sys.argv[2]))
+work_dir = Path(sys.argv[3])
+manifest_ref = config.binary_resolution.provider_manifest
+allow_host = config.binary_resolution.provider_allow_host or None
+manifest_url = None
+manifest_file = None
+
+if manifest_ref:
+    parsed = urlparse(manifest_ref)
+    if parsed.scheme in {"http", "https"}:
+        manifest_url = manifest_ref
+    else:
+        manifest_file = Path(manifest_ref)
+
+if not manifest_url and not manifest_file:
+    print("Binary readiness: warning")
+    print("Provider manifest: not configured")
+    print("Tip: run the installer with managed binaries or configure a provider manifest first.")
+    raise SystemExit(0)
+
+try:
+    payload = build_binary_readiness_report(
+        cache_root=work_dir,
+        state=state,
+        manifest_url=manifest_url,
+        manifest_file=manifest_file,
+        allow_provider_host=allow_host,
+        require_all=True,
+    )
+except Exception as exc:
+    print("Binary readiness: warning")
+    print(f"Provider manifest check: {exc}")
+    raise SystemExit(0)
+required = payload.get("required_adapters") or []
+verified = payload.get("verified_adapters") or []
+missing = payload.get("missing_adapters") or []
+print(f"Required binaries verified: {len(verified)}/{len(required)}")
+if missing:
+    print("Missing binaries: " + ", ".join(missing))
+else:
+    print("Missing binaries: none")
+for item in payload.get("results") or []:
+    if not item.get("required_for_v0_1"):
+        continue
+    status = "OK" if item.get("verified") else "missing"
+    print(f"- {item.get('adapter')}: {status}")
+PY
+  )
+}
+
+show_readiness_summary() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" - "$CONFIG_FILE" "$STATE_FILE" "$REGISTRY_FILE" "$STAGING_ROOT" "$INSTALL_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+from pilottunnel.config import load_config
+from pilottunnel.readiness import build_readiness_report
+from pilottunnel.registry import load_registry
+from pilottunnel.state import load_state
+from pilottunnel.switch_engine import SwitchPaths
+
+config_path = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+registry_path = Path(sys.argv[3])
+staging_root = Path(sys.argv[4])
+install_root = Path(sys.argv[5])
+
+config = load_config(config_path)
+state = load_state(state_path)
+registry = load_registry(registry_path)
+switch_paths = SwitchPaths(
+    config_path=config_path,
+    state_path=state_path,
+    registry_path=registry_path,
+    audit_path=Path(config_path.parent / "audit.log"),
+    lock_dir=Path(config_path.parent / "locks"),
+    work_dir=Path(config_path.parent.parent / "work"),
+    staging_root=staging_root,
+)
+payload = build_readiness_report(
+    config=config,
+    state=state,
+    registry=registry,
+    config_path=config_path,
+    switch_paths=switch_paths,
+    profile_name=None,
+    adapter_name=None,
+    transport=None,
+    staging_root=staging_root,
+    install_root=install_root,
+)
+print(f"Readiness: {payload.get('readiness_level')}")
+print(f"Role initialized: {'yes' if payload.get('role_initialized') else 'no'}")
+print(f"Node role: {payload.get('node_role') or 'not configured'}")
+print(f"Systemd available: {'yes' if payload.get('systemd_available') else 'no'}")
+print(f"Binary imported: {'yes' if payload.get('binary_imported') else 'no'}")
+print(f"Service plan available: {'yes' if payload.get('service_plan_available') else 'no'}")
+blockers = payload.get("blockers") or []
+warnings = payload.get("warnings") or []
+if blockers:
+    print("Blockers:")
+    for item in blockers[:5]:
+        print(f"- {item}")
+if warnings:
+    print("Warnings:")
+    for item in warnings[:5]:
+        print(f"- {item}")
+PY
+  )
+}
+
 render_banner() {
   box_border
   box_blank
@@ -236,27 +579,25 @@ render_banner() {
   box_line_center "|_|   |_|_|\\___/ \\__| |_| \\__,_|_| |_|_| |_| (_)" "$TITLE$BOLD"
   box_blank
   box_line_center "Safety-first multi-layer tunnel management" "$ACCENT$BOLD"
-  box_line_center "One installer, one CLI, guarded operations only" "$DIM"
+  box_line_center "Setup, readiness, binaries, and guarded operations" "$DIM"
   box_rule
 }
 
 render_status_panel() {
-  current_role="$1"
-  version_text="$2"
-  role_text="${current_role:-not configured}"
+  version_text="$1"
+  load_node_snapshot
   box_line_left "PilotTunnel Menu" "$ACCENT$BOLD"
   box_line_left "Version: ${version_text}" "$VALUE_COLOR"
-  box_line_left "Node role: ${role_text}" "$VALUE_COLOR"
+  box_line_left "Current role: ${NODE_ROLE_LABEL}" "$VALUE_COLOR"
+  box_line_left "Node label: ${NODE_DISPLAY_NAME:-not set}" "$VALUE_COLOR"
   box_line_left "Install root: ${BASE_DIR}" "$VALUE_COLOR"
   box_border
 }
 
 show_header() {
-  current_role="$(configured_role)"
-  version_text="$(installed_version)"
   clear_screen
   render_banner
-  render_status_panel "$current_role" "$version_text"
+  render_status_panel "$(installed_version)"
 }
 
 section_heading() {
@@ -277,80 +618,193 @@ map_role_selection() {
   esac
 }
 
-prompt_role() {
+prompt_with_default() {
+  prompt_label="$1"
+  default_value="$2"
+  if [ -n "$default_value" ]; then
+    printf '%b%s%b [%s]: ' "$PROMPT_COLOR$BOLD" "$prompt_label" "$RESET" "$default_value"
+  else
+    printf '%b%s%b: ' "$PROMPT_COLOR$BOLD" "$prompt_label" "$RESET"
+  fi
+  IFS= read -r input_value || return 1
+  input_value="$(normalize_input "$input_value")"
+  if [ -n "$input_value" ]; then
+    PROMPT_RESULT="$input_value"
+  else
+    PROMPT_RESULT="$default_value"
+  fi
+}
+
+select_role_for_setup() {
   while true; do
     show_header
     section_heading "Setup / Configure this server"
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Main entry server / controller" "$RESET"
-    menu_hint "   Choose this for the decision-making server."
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Remote endpoint server / worker" "$RESET"
-    menu_hint "   Choose this for the passive peer server."
-    printf '\n'
-    menu_hint "Role selection happens here, not during the base installer."
+    if [ "$NODE_INITIALIZED" = "true" ]; then
+      printf '%bCurrent role:%b %s\n' "$VALUE_COLOR$BOLD" "$RESET" "$NODE_ROLE_LABEL"
+      printf '\n%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Keep current role" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Reconfigure role" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
+      printf '\n'
+      menu_hint "Keep current role continues into the base setup wizard."
+      prompt_input
+      IFS= read -r current_selection || return 1
+      current_selection="$(normalize_input "$current_selection")"
+      case "$current_selection" in
+        1)
+          SELECTED_ROLE="$NODE_ROLE"
+          ROLE_CHANGE_MODE="keep"
+          return 0
+          ;;
+        2)
+          printf '\n%bType CHANGE_NODE_ROLE to continue:%b ' "$WARN_COLOR$BOLD" "$RESET"
+          IFS= read -r confirmation || return 1
+          confirmation="$(normalize_input "$confirmation")"
+          if [ "$confirmation" != "CHANGE_NODE_ROLE" ]; then
+            warning "Role reconfiguration cancelled."
+            return 1
+          fi
+          ROLE_CHANGE_MODE="reconfigure"
+          ;;
+        3) return 1 ;;
+        *) warning "Enter a number from 1 to 3."; pause_menu; continue ;;
+      esac
+    else
+      printf '%bCurrent state:%b not configured\n' "$VALUE_COLOR$BOLD" "$RESET"
+      ROLE_CHANGE_MODE="new"
+    fi
+
+    show_header
+    section_heading "Choose the role for this server"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Iran side" "$RESET"
+    menu_hint "   Main entry node. Users connect here. This side makes tunnel decisions."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Kharej side" "$RESET"
+    menu_hint "   Endpoint node. This side receives tunnel traffic and can be tested as one of many candidates."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
     prompt_input
     IFS= read -r selection || return 1
-    if SELECTED_ROLE="$(map_role_selection "$selection")"; then
-      return 0
-    fi
-    warning "Enter 1 for the main entry server or 2 for the remote endpoint server."
-    pause_menu
+    selection="$(normalize_input "$selection")"
+    case "$selection" in
+      1|2)
+        if SELECTED_ROLE="$(map_role_selection "$selection")"; then
+          return 0
+        fi
+        ;;
+      3) return 1 ;;
+      *) warning "Enter 1, 2, or 3."; pause_menu ;;
+    esac
   done
 }
 
-setup_server() {
-  prompt_role || return
-  role="$SELECTED_ROLE"
-  existing_role="$(configured_role)"
-  force_args=()
-
-  if [ -n "$existing_role" ] && [ "$existing_role" != "$role" ]; then
-    section_heading "Current node role"
-    pt_cli node status || true
-    printf '\n%bType CHANGE_NODE_ROLE to replace role %s with %s:%b ' "$WARN_COLOR$BOLD" "$existing_role" "$role" "$RESET"
-    IFS= read -r confirmation || return
-    if [ "$confirmation" != "CHANGE_NODE_ROLE" ]; then
-      warning "Role change cancelled."
-      return
-    fi
-    force_args=(--force)
-  elif [ "$existing_role" = "$role" ]; then
-    success "This node is already configured as '${role}'."
-    pt_cli layer select --layer layer4
-    pt_cli node status
+run_setup_wizard() {
+  load_node_snapshot
+  if ! select_role_for_setup; then
     return
   fi
 
-  pt_cli init --role "$role" "${force_args[@]}" || return
-  pt_cli layer select --layer layer4 || return
-  success "Node role saved as '${role}'."
-  pt_cli node status
+  selected_role_label="$(role_label "$SELECTED_ROLE")"
+  show_header
+  section_heading "Base setup"
+  menu_hint "This step saves local node metadata for future multi-endpoint workflows."
+  if [ "$SELECTED_ROLE" = "controller" ]; then
+    menu_hint "This Iran side node can later manage multiple Kharej endpoints."
+  else
+    menu_hint "This Kharej side node can later be added to an Iran-side endpoint candidate list."
+  fi
+  printf '\n'
+
+  default_display_name="${NODE_DISPLAY_NAME:-$(hostname 2>/dev/null || printf '%s' 'pilottunnel-node')}"
+  default_install_root="${NODE_INSTALL_ROOT:-$BASE_DIR}"
+  default_state_directory="${NODE_STATE_DIRECTORY:-$STATE_DIR}"
+  default_work_directory="${NODE_WORK_DIRECTORY:-$WORK_DIR}"
+  default_endpoint_address="${NODE_ENDPOINT_ADDRESS:-}"
+  default_notes="${NODE_NOTES:-}"
+
+  prompt_with_default "Node display name" "$default_display_name" || return
+  setup_display_name="$PROMPT_RESULT"
+  printf '\n'
+  prompt_with_default "Install root" "$default_install_root" || return
+  setup_install_root="$PROMPT_RESULT"
+  printf '\n'
+  prompt_with_default "State directory" "$default_state_directory" || return
+  setup_state_directory="$PROMPT_RESULT"
+  printf '\n'
+  prompt_with_default "Work/cache directory" "$default_work_directory" || return
+  setup_work_directory="$PROMPT_RESULT"
+  printf '\n'
+  prompt_with_default "Public IP / endpoint address (optional)" "$default_endpoint_address" || return
+  setup_endpoint_address="$PROMPT_RESULT"
+  printf '\n'
+  prompt_with_default "Notes / label (optional)" "$default_notes" || return
+  setup_notes="$PROMPT_RESULT"
+  printf '\n'
+
+  if [ "$ROLE_CHANGE_MODE" = "new" ]; then
+    apply_role_change "$SELECTED_ROLE" "false" || return
+  elif [ "$ROLE_CHANGE_MODE" = "reconfigure" ]; then
+    apply_role_change "$SELECTED_ROLE" "true" || return
+  fi
+
+  if ! save_node_setup_metadata \
+    "$SELECTED_ROLE" \
+    "$setup_display_name" \
+    "$setup_install_root" \
+    "$setup_state_directory" \
+    "$setup_work_directory" \
+    "$setup_endpoint_address" \
+    "$setup_notes"; then
+    error_line "Unable to save setup metadata."
+    return
+  fi
+
+  load_node_snapshot
+  show_header
+  section_heading "Setup complete"
+  printf '%bRole: %s%b\n' "$VALUE_COLOR$BOLD" "$selected_role_label" "$RESET"
+  printf '%bNode label: %s%b\n' "$VALUE_COLOR$BOLD" "${NODE_DISPLAY_NAME:-not set}" "$RESET"
+
+  binary_summary="$(show_binary_status_summary)"
+  if printf '%s\n' "$binary_summary" | grep -qi "Missing binaries: none"; then
+    printf '%bBinary readiness:%b OK\n' "$VALUE_COLOR$BOLD" "$RESET"
+  else
+    printf '%bBinary readiness:%b warning\n' "$VALUE_COLOR$BOLD" "$RESET"
+  fi
+  printf '\n%s\n' "$binary_summary"
+  printf '\n%bNext step:%b ' "$ACCENT$BOLD" "$RESET"
+  if [ "$SELECTED_ROLE" = "controller" ]; then
+    printf '%s\n' "add Kharej endpoints and create tunnel candidates"
+  else
+    printf '%s\n' "import or prepare a bundle from the Iran side"
+  fi
 }
 
 show_status() {
+  show_header
   section_heading "Node status"
-  pt_cli node status || true
-  printf '\n'
-  section_heading "Layer status"
-  pt_cli layer status || true
+  show_node_status_summary
 }
 
 show_readiness() {
+  show_header
   section_heading "Readiness report"
-  pt_cli readiness report --staging-root "$STAGING_ROOT" --install-root "$INSTALL_ROOT"
+  show_readiness_summary
 }
 
 show_binary_status() {
+  show_header
   section_heading "Binary status"
-  pt_cli binary status --require-all
+  show_binary_status_summary
 }
 
 prompt_service_identity() {
   printf '%bProfile:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_PROFILE || return 1
+  SERVICE_PROFILE="$(normalize_input "$SERVICE_PROFILE")"
   printf '%bAdapter:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_ADAPTER || return 1
+  SERVICE_ADAPTER="$(normalize_input "$SERVICE_ADAPTER")"
   printf '%bTransport:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_TRANSPORT || return 1
+  SERVICE_TRANSPORT="$(normalize_input "$SERVICE_TRANSPORT")"
   [ -n "$SERVICE_PROFILE" ] && [ -n "$SERVICE_ADAPTER" ] && [ -n "$SERVICE_TRANSPORT" ] || {
     warning "Profile, adapter, and transport are required."
     return 1
@@ -360,6 +814,7 @@ prompt_service_identity() {
 prompt_service_action() {
   printf '%bAction (start/stop/restart/enable/disable):%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_ACTION || return 1
+  SERVICE_ACTION="$(normalize_input "$SERVICE_ACTION")"
   case "$SERVICE_ACTION" in
     start) SERVICE_CONFIRM_TOKEN="START_SERVICE" ;;
     stop) SERVICE_CONFIRM_TOKEN="STOP_SERVICE" ;;
@@ -402,6 +857,7 @@ service_apply() {
     --action "$SERVICE_ACTION" || return
   printf '\n%bType %s to apply this action:%b ' "$WARN_COLOR$BOLD" "$SERVICE_CONFIRM_TOKEN" "$RESET"
   IFS= read -r confirmation || return
+  confirmation="$(normalize_input "$confirmation")"
   if [ "$confirmation" != "$SERVICE_CONFIRM_TOKEN" ]; then
     warning "Service action cancelled."
     return
@@ -429,6 +885,7 @@ service_menu() {
     menu_hint "Safety: no service action runs without confirmation."
     prompt_input
     IFS= read -r selection || return
+    selection="$(normalize_input "$selection")"
     case "$selection" in
       1) service_status; pause_menu ;;
       2) service_plan; pause_menu ;;
@@ -452,6 +909,7 @@ backup_restore_menu() {
     menu_hint "Safety: restore remains confirmation-gated."
     prompt_input
     IFS= read -r selection || return
+    selection="$(normalize_input "$selection")"
     case "$selection" in
       1) section_heading "Backup list"; pt_cli backup list; pause_menu ;;
       2)
@@ -459,12 +917,14 @@ backup_restore_menu() {
         pt_cli backup plan || { pause_menu; continue; }
         printf '\n%bType BACKUP_CREATE to create the backup:%b ' "$WARN_COLOR$BOLD" "$RESET"
         IFS= read -r confirmation || return
+        confirmation="$(normalize_input "$confirmation")"
         [ "$confirmation" = "BACKUP_CREATE" ] && pt_cli backup create --confirm BACKUP_CREATE || warning "Backup cancelled."
         pause_menu
         ;;
       3)
         printf '%bBackup ID:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
         IFS= read -r backup_id || return
+        backup_id="$(normalize_input "$backup_id")"
         section_heading "Restore plan"
         pt_cli restore plan --backup-id "$backup_id"
         pause_menu
@@ -472,10 +932,12 @@ backup_restore_menu() {
       4)
         printf '%bBackup ID:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
         IFS= read -r backup_id || return
+        backup_id="$(normalize_input "$backup_id")"
         section_heading "Restore plan"
         pt_cli restore plan --backup-id "$backup_id" || { pause_menu; continue; }
         printf '\n%bType RESTORE_APPLY to restore this backup:%b ' "$WARN_COLOR$BOLD" "$RESET"
         IFS= read -r confirmation || return
+        confirmation="$(normalize_input "$confirmation")"
         [ "$confirmation" = "RESTORE_APPLY" ] && pt_cli restore apply --backup-id "$backup_id" --confirm RESTORE_APPLY || warning "Restore cancelled."
         pause_menu
         ;;
@@ -501,8 +963,9 @@ main_menu() {
     menu_hint "Safety: no service action runs without confirmation."
     prompt_input
     IFS= read -r selection || return
+    selection="$(normalize_input "$selection")"
     case "$selection" in
-      1) setup_server; pause_menu ;;
+      1) run_setup_wizard; pause_menu ;;
       2) show_status; pause_menu ;;
       3) show_readiness; pause_menu ;;
       4) show_binary_status; pause_menu ;;

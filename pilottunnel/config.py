@@ -35,6 +35,13 @@ class NodeSettings:
     normalized_role: str = ""
     preferred_layer: str = ""
     preferred_layer_selected_at: str = ""
+    display_name: str = ""
+    install_root: str = ""
+    state_directory: str = ""
+    work_directory: str = ""
+    endpoint_address: str = ""
+    notes: str = ""
+    managed_remote_endpoints: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def initialized(self) -> bool:
@@ -144,14 +151,24 @@ def canonical_runtime_role(value: str) -> str:
     return normalized
 
 
-def build_node_settings(role_value: str, existing_node_id: str = "") -> NodeSettings:
+def build_node_settings(role_value: str, existing_node_id: str = "", *, existing_node: NodeSettings | None = None) -> NodeSettings:
     normalized = canonical_role(role_value)
+    template = existing_node or NodeSettings()
     return NodeSettings(
         node_id=existing_node_id or f"node-{uuid4().hex[:12]}",
         node_role=normalized,
         initialized_at=datetime.now(timezone.utc).isoformat(),
         role_alias_used=normalized,
         normalized_role=normalized,
+        preferred_layer=template.preferred_layer,
+        preferred_layer_selected_at=template.preferred_layer_selected_at,
+        display_name=template.display_name,
+        install_root=template.install_root,
+        state_directory=template.state_directory,
+        work_directory=template.work_directory,
+        endpoint_address=template.endpoint_address,
+        notes=template.notes,
+        managed_remote_endpoints=list(template.managed_remote_endpoints),
     )
 
 

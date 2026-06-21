@@ -496,7 +496,7 @@ def _initialize_or_validate_role(config: AppConfig, role_value: str | None, audi
         return config.node.normalized_role
     if not role_value:
         raise ValueError("Bootstrap requires an initialized role or --role")
-    node = build_node_settings(role_value, existing_node_id=config.node.node_id)
+    node = build_node_settings(role_value, existing_node_id=config.node.node_id, existing_node=config.node)
     config.node = node
     write_audit_log(
         "init_role",
