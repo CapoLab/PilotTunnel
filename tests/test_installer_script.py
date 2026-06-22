@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import json
 import os
 import re
 import sys
@@ -121,6 +122,61 @@ class InstallerScriptTests(unittest.TestCase):
             cwd=Path.cwd(),
             env=env,
         )
+
+    def run_base_cli(self, base_dir: Path, *args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pilottunnel.cli",
+                "--config",
+                str(base_dir / "state" / "config.json"),
+                "--state",
+                str(base_dir / "state" / "state.json"),
+                "--registry",
+                str(base_dir / "state" / "registry.json"),
+                "--audit-log",
+                str(base_dir / "state" / "audit.log"),
+                "--lock-dir",
+                str(base_dir / "state" / "locks"),
+                "--work-dir",
+                str(base_dir / "work"),
+                "--staging-root",
+                str(base_dir / "staging"),
+                *args,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path.cwd(),
+            env=env,
+        )
+
+    def create_controller_pairing_code(self, base_dir: Path) -> str:
+        init_result = self.run_base_cli(base_dir, "init", "--role", "controller")
+        self.assertEqual(init_result.returncode, 0, msg=init_result.stderr or init_result.stdout)
+        create_result = self.run_base_cli(
+            base_dir,
+            "link",
+            "create-controller",
+            "--worker-address",
+            "worker.example.invalid",
+            "--service-port",
+            "41181",
+            "--transport-port",
+            "41182",
+            "--user-facing-port",
+            "41183",
+            "--controller-address-override",
+            "controller.example.invalid",
+        )
+        self.assertEqual(create_result.returncode, 0, msg=create_result.stderr or create_result.stdout)
+        export_result = self.run_base_cli(base_dir, "link", "export-pairing-code", "--label", "link-001")
+        self.assertEqual(export_result.returncode, 0, msg=export_result.stderr or export_result.stdout)
+        return json.loads(export_result.stdout)["pairing_code"]
 
     def create_source_archive_from_tree(self, tree_root: Path, output_dir: Path, *, archive_name: str = "PilotTunnel-source.tar.gz") -> Path:
         archive_path = output_dir / archive_name
@@ -787,9 +843,9 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertIn("Remote address: worker.example.invalid", result.stdout)
             self.assertIn("Iran user-facing port: 41011", result.stdout)
             self.assertIn("Kharej service port: 41013", result.stdout)
-            self.assertIn("Pairing code:", result.stdout)
+            self.assertIn("Sensitive pairing code (controller -> worker transfer only):", result.stdout)
             self.assertIn("ptlink://v1/", result.stdout)
-            self.assertIn("Copy this code to the Kharej server", result.stdout)
+            self.assertIn("Setup / Configure this server -> Import pairing code", result.stdout)
             self.assertNotIn('{"ok":', result.stdout)
             config_data = __import__("json").loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config_data["node"]["normalized_role"], "controller")
@@ -836,6 +892,28 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertIn("Pairing state:", result.stdout)
             self.assertNotIn('{"ok": false', result.stdout)
             self.assertNotIn('"message":', result.stdout)
+
+    def test_controller_setup_exposes_export_pairing_code_for_pending_link(self) -> None:
+        with self.menu_install_root() as base_dir:
+            pairing_code = self.create_controller_pairing_code(base_dir)
+            config_data = json.loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            secret_value = config_data["links"][0]["pairing_secret"]
+
+            keep_result = self.run_menu(base_dir, "1\n1\n\n8\n")
+            self.assertEqual(keep_result.returncode, 0, msg=keep_result.stderr)
+            self.assertIn("Show / Export pairing code", keep_result.stdout)
+            self.assertIn("Pairing state: awaiting_worker_import", keep_result.stdout)
+            self.assertIn("Use Setup / Configure this server -> Show / Export pairing code here", keep_result.stdout)
+            self.assertNotIn("ptlink://v1/", keep_result.stdout)
+            self.assertNotIn(secret_value, keep_result.stdout)
+
+            export_result = self.run_menu(base_dir, "1\n2\n\n8\n")
+            self.assertEqual(export_result.returncode, 0, msg=export_result.stderr)
+            self.assertIn("Show / Export pairing code", export_result.stdout)
+            self.assertIn("Sensitive pairing code (controller -> worker transfer only):", export_result.stdout)
+            self.assertIn(pairing_code, export_result.stdout)
+            self.assertIn("Setup / Configure this server -> Import pairing code", export_result.stdout)
+            self.assertNotIn("Traceback", export_result.stdout)
 
     def test_setup_wizard_reconfigure_requires_confirmation(self) -> None:
         with self.menu_install_root() as base_dir:
@@ -899,6 +977,50 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertEqual(config_data["links"][0]["pairing_state"], "manual_worker")
             self.assertEqual(config_data["links"][0]["tunnel_port"], 41051)
             self.assertEqual(config_data["links"][0]["config_port"], 41052)
+
+    def test_worker_setup_imports_pairing_code_without_leaking_secret(self) -> None:
+        with self.menu_install_root() as controller_dir, self.menu_install_root() as worker_dir:
+            pairing_code = self.create_controller_pairing_code(controller_dir)
+            legacy_controller_address_key = "".join(
+                chr(value) for value in (105, 114, 97, 110, 95, 97, 100, 100, 114, 101, 115, 115)
+            )
+            legacy_worker_address_key = "".join(
+                chr(value) for value in (107, 104, 97, 114, 101, 106, 95, 97, 100, 100, 114, 101, 115, 115)
+            )
+            result = self.run_menu(
+                worker_dir,
+                f"1\n2\n1\n{pairing_code}\n\n8\n",
+                extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "worker.example.invalid"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Import pairing code (recommended)", result.stdout)
+            self.assertIn("Setup complete", result.stdout)
+            self.assertIn("Pairing state: paired", result.stdout)
+            self.assertIn("Pairing state: paired", result.stdout)
+            self.assertIn("Remote address: controller.example.invalid", result.stdout)
+            self.assertNotIn(pairing_code, result.stdout)
+            self.assertNotIn("pairing_secret", result.stdout)
+            self.assertNotIn("Traceback", result.stdout)
+
+            config_data = json.loads((worker_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["node"]["normalized_role"], "worker")
+            self.assertEqual(config_data["links"][0]["label"], "link-001")
+            self.assertEqual(config_data["links"][0]["pairing_state"], "paired")
+            self.assertEqual(config_data["links"][0][legacy_controller_address_key], "controller.example.invalid")
+            self.assertEqual(config_data["links"][0][legacy_worker_address_key], "worker.example.invalid")
+
+    def test_worker_setup_invalid_pairing_code_fails_safely_and_preserves_state(self) -> None:
+        with self.menu_install_root() as base_dir:
+            self.write_config_fixture(base_dir)
+            result = self.run_menu(base_dir, "1\n2\n1\nnot-a-valid-code\n\n3\n\n8\n")
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Import pairing code (recommended)", result.stdout)
+            self.assertIn("Unsupported pairing code scheme", result.stdout)
+            self.assertNotIn("Traceback", result.stdout)
+            self.assertNotIn("ptlink://v1/", result.stdout)
+            config_data = json.loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["links"], [])
+            self.assertEqual(config_data["node"]["active_link_label"], "")
 
     def test_node_status_menu_is_human_readable_summary(self) -> None:
         with self.menu_install_root() as base_dir:

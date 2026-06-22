@@ -534,12 +534,19 @@ print(f"Node ID: {payload.get('node_id') or 'not assigned'}")
 print(f"Detected local address: {payload.get('detected_local_address') or 'not detected'}")
 link = payload.get("active_link") or {}
 if link:
+    pairing_state = link.get("pairing_state") or "not configured"
+    next_action = link.get("next_action") or "not configured"
+    if pairing_state == "awaiting_worker_import":
+        next_action = (
+            "Open Setup / Configure this server and choose Show / Export pairing code here, "
+            "then choose Import pairing code on the worker server."
+        )
     print(f"Remote address: {link.get('remote_address') or 'not configured'}")
     print(f"Iran user-facing port: {link.get('controller_user_facing_port') or 'not configured'}")
     print(f"Tunnel transport port: {link.get('transport_port') or 'not configured'}")
     print(f"Kharej service port: {link.get('worker_service_port') or 'not configured'}")
-    print(f"Pairing state: {link.get('pairing_state') or 'not configured'}")
-    print(f"Next action: {link.get('next_action') or 'not configured'}")
+    print(f"Pairing state: {pairing_state}")
+    print(f"Next action: {next_action}")
 else:
     print(f"Link count: {payload.get('link_count', 0)}")
 print(f"Config path: {payload.get('config_path')}")
@@ -753,6 +760,43 @@ prompt_with_default() {
   fi
 }
 
+prompt_sensitive_text() {
+  prompt_label="$1"
+  default_value="$2"
+  if [ -t 0 ] && [ -t 1 ] && command -v stty >/dev/null 2>&1; then
+    if [ -n "$default_value" ]; then
+      printf '%b%s%b [%s]: ' "$PROMPT_COLOR$BOLD" "$prompt_label" "$RESET" "$default_value"
+    else
+      printf '%b%s%b: ' "$PROMPT_COLOR$BOLD" "$prompt_label" "$RESET"
+    fi
+    old_stty="$(stty -g 2>/dev/null || true)"
+    stty -echo 2>/dev/null || true
+    IFS= read -r input_value || {
+      if [ -n "$old_stty" ]; then
+        stty "$old_stty" 2>/dev/null || true
+      else
+        stty echo 2>/dev/null || true
+      fi
+      printf '\n'
+      return 1
+    }
+    if [ -n "$old_stty" ]; then
+      stty "$old_stty" 2>/dev/null || true
+    else
+      stty echo 2>/dev/null || true
+    fi
+    printf '\n'
+    input_value="$(normalize_input "$input_value")"
+    if [ -n "$input_value" ]; then
+      PROMPT_RESULT="$input_value"
+    else
+      PROMPT_RESULT="$default_value"
+    fi
+    return 0
+  fi
+  prompt_with_default "$prompt_label" "$default_value"
+}
+
 show_setup_summary() {
   role_value="$1"
   pairing_code="${2:-}"
@@ -767,10 +811,10 @@ show_setup_summary() {
   printf '%bKharej service port: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_CONFIG_PORT:-not configured}" "$RESET"
   printf '%bPairing state: %s%b\n' "$SUCCESS_COLOR$BOLD" "${CURRENT_PAIRING_STATE:-not configured}" "$RESET"
   if [ -n "$pairing_code" ]; then
-    printf '\n%bPairing code:%b\n%s\n' "$ACCENT$BOLD" "$RESET" "$pairing_code"
-    printf '%bNext:%b Copy this code to the Kharej server and choose Import pairing code.\n' "$ACCENT$BOLD" "$RESET"
+    printf '\n%bSensitive pairing code (controller -> worker transfer only):%b\n%s\n' "$WARN_COLOR$BOLD" "$RESET" "$pairing_code"
+    printf '%bWorker import path:%b Setup / Configure this server -> Import pairing code\n' "$ACCENT$BOLD" "$RESET"
   elif [ -n "$CURRENT_NEXT_ACTION" ]; then
-    printf '%bNext:%b %s\n' "$ACCENT$BOLD" "$RESET" "$CURRENT_NEXT_ACTION"
+    printf '%bNext:%b %s\n' "$ACCENT$BOLD" "$RESET" "$(menu_next_action_message "$role_value" "$CURRENT_PAIRING_STATE" "$CURRENT_NEXT_ACTION")"
   fi
 
   binary_summary="$(show_binary_status_summary)"
@@ -812,6 +856,53 @@ prompt_required_text() {
   done
 }
 
+prompt_sensitive_required_text() {
+  prompt_label="$1"
+  default_value="$2"
+  while true; do
+    prompt_sensitive_text "$prompt_label" "$default_value" || return 1
+    candidate="$(printf '%s' "$PROMPT_RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -n "$candidate" ]; then
+      PROMPT_RESULT="$candidate"
+      return 0
+    fi
+    warning "$prompt_label is required."
+  done
+}
+
+menu_next_action_message() {
+  role_value="$1"
+  pairing_state="$2"
+  fallback_message="$3"
+  case "$pairing_state" in
+    awaiting_worker_import)
+      if [ "$role_value" = "controller" ]; then
+        printf '%s\n' "Use Setup / Configure this server -> Show / Export pairing code here, then choose Import pairing code on the worker server."
+      else
+        printf '%s\n' "Choose Setup / Configure this server -> Import pairing code on the worker server."
+      fi
+      ;;
+    *)
+      printf '%s\n' "$fallback_message"
+      ;;
+  esac
+}
+
+export_pairing_code_screen() {
+  role_value="$1"
+  if ! run_cli_capture link export-pairing-code --label "$CURRENT_LINK_LABEL"; then
+    message="$(capture_json_message)"
+    cleanup_capture
+    warning "${message:-Unable to export the pairing code.}"
+    pause_menu
+    return 1
+  fi
+  pairing_code="$(capture_json_field pairing_code)"
+  cleanup_capture
+  show_setup_summary "$role_value" "$pairing_code"
+  return 0
+}
+
 prompt_port_value() {
   prompt_label="$1"
   default_value="$2"
@@ -851,25 +942,55 @@ select_role_for_setup() {
     load_link_snapshot
     if [ "$NODE_INITIALIZED" = "true" ]; then
       show_current_setup_panel
+      can_export_pairing="false"
+      if [ "$NODE_ROLE" = "controller" ] && [ -n "$CURRENT_LINK_LABEL" ] && [ "$CURRENT_PAIRING_STATE" = "awaiting_worker_import" ]; then
+        can_export_pairing="true"
+      fi
       printf '\n%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Keep current setup" "$RESET"
-      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Reconfigure setup" "$RESET"
-      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
+      if [ "$can_export_pairing" = "true" ]; then
+        printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Show / Export pairing code" "$RESET"
+        printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Reconfigure setup" "$RESET"
+        printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Back" "$RESET"
+      else
+        printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Reconfigure setup" "$RESET"
+        printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Back" "$RESET"
+      fi
       printf '\n'
       prompt_input
       IFS= read -r current_selection || return 1
       current_selection="$(normalize_input "$current_selection")"
-      case "$current_selection" in
-        1)
-          SELECTED_ROLE="$NODE_ROLE"
-          ROLE_CHANGE_MODE="keep"
-          return 0
-          ;;
-        2)
-          ROLE_CHANGE_MODE="reconfigure"
-          ;;
-        3) return 1 ;;
-        *) warning "Enter a number from 1 to 3."; pause_menu; continue ;;
-      esac
+      if [ "$can_export_pairing" = "true" ]; then
+        case "$current_selection" in
+          1)
+            SELECTED_ROLE="$NODE_ROLE"
+            ROLE_CHANGE_MODE="keep"
+            return 0
+            ;;
+          2)
+            SELECTED_ROLE="$NODE_ROLE"
+            ROLE_CHANGE_MODE="export_pairing"
+            return 0
+            ;;
+          3)
+            ROLE_CHANGE_MODE="reconfigure"
+            ;;
+          4) return 1 ;;
+          *) warning "Enter a number from 1 to 4."; pause_menu; continue ;;
+        esac
+      else
+        case "$current_selection" in
+          1)
+            SELECTED_ROLE="$NODE_ROLE"
+            ROLE_CHANGE_MODE="keep"
+            return 0
+            ;;
+          2)
+            ROLE_CHANGE_MODE="reconfigure"
+            ;;
+          3) return 1 ;;
+          *) warning "Enter a number from 1 to 3."; pause_menu; continue ;;
+        esac
+      fi
     else
       printf '%bCurrent state:%b not configured\n' "$VALUE_COLOR$BOLD" "$RESET"
       ROLE_CHANGE_MODE="new"
@@ -904,16 +1025,24 @@ run_setup_wizard() {
     return
   fi
 
+  if [ "$ROLE_CHANGE_MODE" = "export_pairing" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+    export_pairing_code_screen "$SELECTED_ROLE"
+    return
+  fi
+
   if [ "$ROLE_CHANGE_MODE" = "keep" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
     show_setup_summary "$SELECTED_ROLE"
     return
   fi
 
+  role_mode="$ROLE_CHANGE_MODE"
   while true; do
-    if [ "$ROLE_CHANGE_MODE" = "new" ]; then
+    if [ "$role_mode" = "new" ]; then
       apply_role_change "$SELECTED_ROLE" "false" || return
-    elif [ "$ROLE_CHANGE_MODE" = "reconfigure" ]; then
+      role_mode="configured"
+    elif [ "$role_mode" = "reconfigure" ]; then
       apply_role_change "$SELECTED_ROLE" "true" || return
+      role_mode="configured"
     fi
 
     if [ "$SELECTED_ROLE" = "controller" ]; then
@@ -934,7 +1063,7 @@ run_setup_wizard() {
       printf '\n'
 
       cli_args=(link create-controller --worker-address "$worker_address" --service-port "$service_port" --transport-port "$transport_port" --user-facing-port "$user_facing_port")
-      if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+      if [ "$role_mode" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
         cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
       fi
       if ! run_cli_capture "${cli_args[@]}"; then
@@ -950,18 +1079,7 @@ run_setup_wizard() {
       load_node_snapshot
       load_link_snapshot
 
-      if ! run_cli_capture link export-pairing-code --label "$CURRENT_LINK_LABEL"; then
-        message="$(capture_json_message)"
-        debug_capture_if_enabled
-        cleanup_capture
-        warning "${message:-Unable to export the pairing code.}"
-        pause_menu
-        return
-      fi
-      pairing_code="$(capture_json_field pairing_code)"
-      debug_capture_if_enabled
-      cleanup_capture
-      show_setup_summary "$SELECTED_ROLE" "$pairing_code"
+      export_pairing_code_screen "$SELECTED_ROLE" || return
       return
     fi
 
@@ -978,10 +1096,10 @@ run_setup_wizard() {
     worker_mode="$(normalize_input "$worker_mode")"
     case "$worker_mode" in
       1)
-        prompt_required_text "Paste pairing code" "" || return
+        prompt_sensitive_required_text "Paste pairing code" "" || return
         pairing_code_input="$PROMPT_RESULT"
         cli_args=(link import-pairing-code --code "$pairing_code_input")
-        if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+        if [ "$role_mode" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
           cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
         fi
         if ! run_cli_capture "${cli_args[@]}"; then
@@ -1036,7 +1154,7 @@ run_setup_wizard() {
         service_port="$PROMPT_RESULT"
         printf '\n'
         cli_args=(link setup-worker-manual --controller-address "$controller_address" --transport-port "$transport_port" --service-port "$service_port")
-        if [ "$ROLE_CHANGE_MODE" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+        if [ "$role_mode" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
           cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
         fi
         if ! run_cli_capture "${cli_args[@]}"; then
