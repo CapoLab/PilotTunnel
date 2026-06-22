@@ -371,11 +371,23 @@ run_cli_capture() {
   return 0
 }
 
+run_cli_capture_allow_failure() {
+  LAST_CAPTURE_STDOUT="$(mktemp)"
+  LAST_CAPTURE_STDERR="$(mktemp)"
+  if pt_cli "$@" >"$LAST_CAPTURE_STDOUT" 2>"$LAST_CAPTURE_STDERR"; then
+    LAST_CAPTURE_STATUS=0
+  else
+    LAST_CAPTURE_STATUS=$?
+  fi
+  return 0
+}
+
 cleanup_capture() {
   [ -n "${LAST_CAPTURE_STDOUT:-}" ] && rm -f "$LAST_CAPTURE_STDOUT"
   [ -n "${LAST_CAPTURE_STDERR:-}" ] && rm -f "$LAST_CAPTURE_STDERR"
   LAST_CAPTURE_STDOUT=""
   LAST_CAPTURE_STDERR=""
+  LAST_CAPTURE_STATUS=""
 }
 
 capture_json_message() {
@@ -602,66 +614,77 @@ PY
 }
 
 show_readiness_summary() {
-  (
-    cd "$REPO_DIR" || exit 1
-    "$PYTHON_BIN" - "$CONFIG_FILE" "$STATE_FILE" "$REGISTRY_FILE" "$STAGING_ROOT" "$INSTALL_ROOT" <<'PY'
+  run_cli_capture_allow_failure readiness report --json
+  rendered="$("$PYTHON_BIN" - "$LAST_CAPTURE_STDOUT" "$LAST_CAPTURE_STDERR" "${LAST_CAPTURE_STATUS:-1}" <<'PY' 2>/dev/null
 from pathlib import Path
+import json
 import sys
 
-from pilottunnel.config import load_config
-from pilottunnel.readiness import build_readiness_report
-from pilottunnel.registry import load_registry
-from pilottunnel.state import load_state
-from pilottunnel.switch_engine import SwitchPaths
+stdout_path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+command_status = int(sys.argv[3])
+stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
 
-config_path = Path(sys.argv[1])
-state_path = Path(sys.argv[2])
-registry_path = Path(sys.argv[3])
-staging_root = Path(sys.argv[4])
-install_root = Path(sys.argv[5])
+def cleaned(text: str) -> str:
+    return " ".join(text.split())
 
-config = load_config(config_path)
-state = load_state(state_path)
-registry = load_registry(registry_path)
-switch_paths = SwitchPaths(
-    config_path=config_path,
-    state_path=state_path,
-    registry_path=registry_path,
-    audit_path=Path(config_path.parent / "audit.log"),
-    lock_dir=Path(config_path.parent / "locks"),
-    work_dir=Path(config_path.parent.parent / "work"),
-    staging_root=staging_root,
-)
-payload = build_readiness_report(
-    config=config,
-    state=state,
-    registry=registry,
-    config_path=config_path,
-    switch_paths=switch_paths,
-    profile_name=None,
-    adapter_name=None,
-    transport=None,
-    staging_root=staging_root,
-    install_root=install_root,
-)
-print(f"Readiness: {payload.get('readiness_level')}")
-print(f"Role initialized: {'yes' if payload.get('role_initialized') else 'no'}")
-print(f"Node role: {payload.get('node_role') or 'not configured'}")
-print(f"Systemd available: {'yes' if payload.get('systemd_available') else 'no'}")
-print(f"Binary imported: {'yes' if payload.get('binary_imported') else 'no'}")
-print(f"Service plan available: {'yes' if payload.get('service_plan_available') else 'no'}")
-blockers = payload.get("blockers") or []
-warnings = payload.get("warnings") or []
-if blockers:
-    print("Blockers:")
-    for item in blockers[:5]:
-        print(f"- {item}")
-if warnings:
-    print("Warnings:")
-    for item in warnings[:5]:
-        print(f"- {item}")
+if not stdout_text:
+    if stderr_text:
+        print(cleaned(stderr_text))
+    else:
+        print("Unable to generate readiness report.")
+    raise SystemExit(1)
+
+try:
+    payload = json.loads(stdout_text)
+except Exception:
+    print("Malformed readiness report from CLI.")
+    raise SystemExit(1)
+
+if not isinstance(payload, dict) or "readiness_level" not in payload:
+    print("Malformed readiness report from CLI.")
+    raise SystemExit(1)
+
+def print_list(label: str, values: list[str]) -> None:
+    if values:
+        print(f"{label}:")
+        for item in values[:5]:
+            print(f"- {cleaned(str(item))}")
+    else:
+        print(f"{label}: none")
+
+readiness_level = payload.get("readiness_level") or "unknown"
+node_role = payload.get("node_role") or "not configured"
+role_initialized = bool(payload.get("role_initialized"))
+profile_exists = bool(payload.get("profile_exists"))
+profile_name = payload.get("profile")
+if profile_exists and profile_name:
+    profile_state = f"selected ({profile_name})"
+elif profile_exists:
+    profile_state = "configured"
+else:
+    profile_state = "none"
+
+print(f"Readiness level: {readiness_level}")
+print(f"Initialized role: {node_role if role_initialized else 'not initialized'}")
+print(f"Profile state: {profile_state}")
+print_list("Blockers", [str(item) for item in (payload.get("blockers") or [])])
+print_list("Warnings", [str(item) for item in (payload.get("warnings") or [])])
+print_list("Recommended next steps", [str(item) for item in (payload.get("recommended_next_steps") or [])])
+
+if command_status not in {0, 1}:
+    raise SystemExit(1)
 PY
-  )
+)"
+  render_status=$?
+  debug_capture_if_enabled
+  cleanup_capture
+  if [ "$render_status" -ne 0 ]; then
+    error_line "${rendered:-Unable to render readiness report.}"
+    return 0
+  fi
+  printf '%s\n' "$rendered"
 }
 
 render_banner() {

@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import os
 import re
+import sys
 import shutil
 import subprocess
 import tarfile
@@ -180,6 +181,27 @@ class InstallerScriptTests(unittest.TestCase):
             encoding="utf-8",
         )
         return git_path
+
+    def write_fake_python(self, target_dir: Path, *, readiness_stdout: str, readiness_exit_code: int = 0) -> None:
+        real_python = self.to_bash_path(sys.executable)
+        wrapper = (
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pilottunnel.cli\" ]; then\n"
+            "  args=\" $* \"\n"
+            "  case \"$args\" in\n"
+            "    *\" readiness report --json \"*)\n"
+            f"      printf '%s\\n' {readiness_stdout!r}\n"
+            f"      exit {readiness_exit_code}\n"
+            "      ;;\n"
+            "  esac\n"
+            "fi\n"
+            f"exec '{real_python}' \"$@\"\n"
+        )
+        for executable in ("python3", "python"):
+            path = target_dir / executable
+            path.write_text(wrapper, encoding="utf-8")
+            path.chmod(0o755)
 
     def write_manifest_fixture(self, base_dir: Path) -> Path:
         manifest_path = base_dir / "state" / "provider-manifest.json"
@@ -907,6 +929,67 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertIn("Blocked actions:", result.stdout)
             self.assertNotIn("allowed_actions", result.stdout)
             self.assertNotIn("blocked_actions", result.stdout)
+
+    def test_readiness_menu_reports_config_only_without_traceback(self) -> None:
+        with self.menu_install_root() as base_dir:
+            legacy_controller_address_key = "".join(
+                chr(value) for value in (105, 114, 97, 110, 95, 97, 100, 100, 114, 101, 115, 115)
+            )
+            legacy_user_port_key = "".join(
+                chr(value) for value in (105, 114, 97, 110, 95, 109, 97, 105, 110, 95, 112, 111, 114, 116)
+            )
+            legacy_worker_address_key = "".join(
+                chr(value) for value in (107, 104, 97, 114, 101, 106, 95, 97, 100, 100, 114, 101, 115, 115)
+            )
+            self.write_config_fixture(
+                base_dir,
+                role="controller",
+                display_name="entry-node",
+                active_link_label="link-001",
+                links=[
+                    {
+                        "id": "link-001",
+                        "label": "link-001",
+                        legacy_controller_address_key: "controller.example.invalid",
+                        legacy_user_port_key: 41071,
+                        "tunnel_port": 41072,
+                        "config_port": 41073,
+                        legacy_worker_address_key: "worker.example.invalid",
+                        "pairing_secret": "top-secret-pairing-value",
+                        "pairing_state": "awaiting_worker_import",
+                        "status": "configured",
+                        "candidates": [],
+                    }
+                ],
+            )
+            result = self.run_menu(base_dir, "3\n\n8\n")
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Readiness level: config_only", result.stdout)
+            self.assertIn("Initialized role: controller", result.stdout)
+            self.assertIn("Profile state: none", result.stdout)
+            self.assertIn("Blockers: none", result.stdout)
+            self.assertIn("Warnings:", result.stdout)
+            self.assertIn("Recommended next steps:", result.stdout)
+            self.assertIn("Create or select a profile", result.stdout)
+            self.assertNotIn("Traceback", result.stdout)
+            self.assertNotIn("SwitchPaths.__init__", result.stdout)
+            self.assertNotIn("top-secret-pairing-value", result.stdout)
+
+    def test_readiness_menu_handles_malformed_output_safely(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            self.write_config_fixture(base_dir, role="controller", display_name="entry-node")
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_python(fake_bin, readiness_stdout="not-json", readiness_exit_code=0)
+            result = self.run_menu(
+                base_dir,
+                "3\n\n8\n",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Malformed readiness report from CLI.", result.stdout)
+            self.assertNotIn("Traceback", result.stdout)
+            self.assertNotIn("SwitchPaths.__init__", result.stdout)
 
     def test_binary_status_menu_passes_manifest_and_summarizes(self) -> None:
         with self.menu_install_root() as base_dir:
