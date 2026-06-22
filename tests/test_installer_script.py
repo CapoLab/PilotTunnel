@@ -989,13 +989,13 @@ class InstallerScriptTests(unittest.TestCase):
             )
             result = self.run_menu(
                 worker_dir,
-                f"1\n2\n1\n{pairing_code}\n\n8\n",
+                f"1\n2\n1\n1\n{pairing_code}\n\n8\n",
                 extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "worker.example.invalid"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Import pairing code (recommended)", result.stdout)
+            self.assertIn("Visible paste (recommended for browser/web terminals)", result.stdout)
             self.assertIn("Setup complete", result.stdout)
-            self.assertIn("Pairing state: paired", result.stdout)
             self.assertIn("Pairing state: paired", result.stdout)
             self.assertIn("Remote address: controller.example.invalid", result.stdout)
             self.assertNotIn(pairing_code, result.stdout)
@@ -1008,12 +1008,45 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertEqual(config_data["links"][0]["pairing_state"], "paired")
             self.assertEqual(config_data["links"][0][legacy_controller_address_key], "controller.example.invalid")
             self.assertEqual(config_data["links"][0][legacy_worker_address_key], "worker.example.invalid")
+            audit_text = (worker_dir / "state" / "audit.log").read_text(encoding="utf-8")
+            self.assertNotIn(pairing_code, audit_text)
+
+            status_result = self.run_menu(worker_dir, "2\n\n8\n")
+            self.assertEqual(status_result.returncode, 0, msg=status_result.stderr)
+            self.assertNotIn(pairing_code, status_result.stdout)
+            self.assertNotIn(pairing_code, status_result.stderr)
+
+    def test_worker_setup_hidden_paste_import_still_succeeds(self) -> None:
+        with self.menu_install_root() as controller_dir, self.menu_install_root() as worker_dir:
+            pairing_code = self.create_controller_pairing_code(controller_dir)
+            result = self.run_menu(
+                worker_dir,
+                f"1\n2\n1\n2\n{pairing_code}\n\n8\n",
+                extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "worker.example.invalid"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Hidden paste", result.stdout)
+            self.assertIn("Setup complete", result.stdout)
+            self.assertIn("Pairing state: paired", result.stdout)
+            self.assertNotIn(pairing_code, result.stdout)
+
+    def test_worker_setup_pairing_paste_cancel_changes_nothing(self) -> None:
+        with self.menu_install_root() as base_dir:
+            self.write_config_fixture(base_dir)
+            result = self.run_menu(base_dir, "1\n2\n1\n3\n3\n\n8\n")
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Visible paste (recommended for browser/web terminals)", result.stdout)
+            self.assertNotIn("Setup complete", result.stdout)
+            config_data = json.loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["links"], [])
+            self.assertEqual(config_data["node"]["active_link_label"], "")
 
     def test_worker_setup_invalid_pairing_code_fails_safely_and_preserves_state(self) -> None:
         with self.menu_install_root() as base_dir:
             self.write_config_fixture(base_dir)
-            result = self.run_menu(base_dir, "1\n2\n1\nnot-a-valid-code\n\n3\n\n8\n")
+            result = self.run_menu(base_dir, "1\n2\n1\n1\nnot-a-valid-code\n\n3\n\n8\n")
             self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Visible paste (recommended for browser/web terminals)", result.stdout)
             self.assertIn("Import pairing code (recommended)", result.stdout)
             self.assertIn("Unsupported pairing code scheme", result.stdout)
             self.assertNotIn("Traceback", result.stdout)
@@ -1021,6 +1054,23 @@ class InstallerScriptTests(unittest.TestCase):
             config_data = json.loads((base_dir / "state" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config_data["links"], [])
             self.assertEqual(config_data["node"]["active_link_label"], "")
+
+    def test_pairing_code_is_absent_from_debug_output_and_errors(self) -> None:
+        with self.menu_install_root() as controller_dir, self.menu_install_root() as worker_dir:
+            pairing_code = self.create_controller_pairing_code(controller_dir)
+            result = self.run_menu(
+                worker_dir,
+                f"1\n2\n1\n1\n{pairing_code}\n\n8\n",
+                extra_env={
+                    "PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "worker.example.invalid",
+                    "PILOTTUNNEL_MENU_DEBUG": "1",
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertNotIn(pairing_code, result.stdout)
+            self.assertNotIn(pairing_code, result.stderr)
+            self.assertNotIn('"pairing_secret":', result.stdout)
+            self.assertNotIn('"pairing_secret":', result.stderr)
 
     def test_node_status_menu_is_human_readable_summary(self) -> None:
         with self.menu_install_root() as base_dir:

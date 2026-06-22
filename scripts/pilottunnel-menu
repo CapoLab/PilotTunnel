@@ -870,6 +870,53 @@ prompt_sensitive_required_text() {
   done
 }
 
+clear_pairing_code_input() {
+  pairing_code_input=""
+  PROMPT_RESULT=""
+  unset pairing_code_input
+  unset PROMPT_RESULT
+}
+
+prompt_pairing_code_input() {
+  while true; do
+    show_header
+    section_heading "Import pairing code"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Visible paste (recommended for browser/web terminals)" "$RESET"
+    menu_hint "   The code will be visible on screen temporarily while you paste it."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Hidden paste" "$RESET"
+    menu_hint "   Use this only when your terminal supports hidden input pasting correctly."
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Cancel" "$RESET"
+    printf '\n'
+    prompt_input
+    IFS= read -r pairing_input_mode || return 1
+    pairing_input_mode="$(normalize_input "$pairing_input_mode")"
+    case "$pairing_input_mode" in
+      1)
+        warning "Visible paste mode will temporarily show the pairing code on screen."
+        printf '\n'
+        prompt_required_text "Paste pairing code" "" || return 1
+        pairing_code_input="$PROMPT_RESULT"
+        PROMPT_RESULT=""
+        return 0
+        ;;
+      2)
+        prompt_sensitive_required_text "Paste pairing code" "" || return 1
+        pairing_code_input="$PROMPT_RESULT"
+        PROMPT_RESULT=""
+        return 0
+        ;;
+      3)
+        clear_pairing_code_input
+        return 2
+        ;;
+      *)
+        warning "Enter a number from 1 to 3."
+        pause_menu
+        ;;
+    esac
+  done
+}
+
 menu_next_action_message() {
   role_value="$1"
   pairing_state="$2"
@@ -1096,24 +1143,60 @@ run_setup_wizard() {
     worker_mode="$(normalize_input "$worker_mode")"
     case "$worker_mode" in
       1)
-        prompt_sensitive_required_text "Paste pairing code" "" || return
-        pairing_code_input="$PROMPT_RESULT"
-        cli_args=(link import-pairing-code --code "$pairing_code_input")
-        if [ "$role_mode" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
-          cli_args+=(--replace-label "$CURRENT_LINK_LABEL")
+        prompt_pairing_code_input
+        prompt_status=$?
+        if [ "$prompt_status" -eq 2 ]; then
+          continue
+        elif [ "$prompt_status" -ne 0 ]; then
+          clear_pairing_code_input
+          return
         fi
-        if ! run_cli_capture "${cli_args[@]}"; then
+        if [ "$role_mode" != "new" ] && [ -n "$CURRENT_LINK_LABEL" ]; then
+          replace_link_label="$CURRENT_LINK_LABEL"
+        else
+          replace_link_label=""
+        fi
+        if [ -n "$replace_link_label" ]; then
+          if ! run_cli_capture link import-pairing-code --code "$pairing_code_input" --replace-label "$replace_link_label"; then
+            import_failed="true"
+          else
+            import_failed="false"
+          fi
+        else
+          if ! run_cli_capture link import-pairing-code --code "$pairing_code_input"; then
+            import_failed="true"
+          else
+            import_failed="false"
+          fi
+        fi
+        if [ "$import_failed" = "true" ]; then
           message="$(capture_json_message)"
           if printf '%s' "$message" | grep -q -- "--confirm-address-mismatch"; then
             warning "$message"
             printf '%bContinue and accept this address mismatch? [y/N]:%b ' "$WARN_COLOR$BOLD" "$RESET"
-            IFS= read -r mismatch_answer || return
+            IFS= read -r mismatch_answer || {
+              clear_pairing_code_input
+              return
+            }
             mismatch_answer="$(normalize_input "$mismatch_answer")"
             case "$mismatch_answer" in
               y|Y|yes|YES)
-                confirm_args=("${cli_args[@]}" --confirm-address-mismatch)
-                if ! run_cli_capture "${confirm_args[@]}"; then
+                if [ -n "$replace_link_label" ]; then
+                  if ! run_cli_capture link import-pairing-code --code "$pairing_code_input" --replace-label "$replace_link_label" --confirm-address-mismatch; then
+                    confirm_failed="true"
+                  else
+                    confirm_failed="false"
+                  fi
+                else
+                  if ! run_cli_capture link import-pairing-code --code "$pairing_code_input" --confirm-address-mismatch; then
+                    confirm_failed="true"
+                  else
+                    confirm_failed="false"
+                  fi
+                fi
+                if [ "$confirm_failed" = "true" ]; then
                   message="$(capture_json_message)"
+                  clear_pairing_code_input
                   debug_capture_if_enabled
                   cleanup_capture
                   warning "${message:-Unable to import the pairing code.}"
@@ -1122,6 +1205,7 @@ run_setup_wizard() {
                 fi
                 ;;
               *)
+                clear_pairing_code_input
                 cleanup_capture
                 warning "Pairing import cancelled."
                 pause_menu
@@ -1129,6 +1213,7 @@ run_setup_wizard() {
                 ;;
             esac
           else
+            clear_pairing_code_input
             debug_capture_if_enabled
             cleanup_capture
             warning "${message:-Unable to import the pairing code.}"
@@ -1136,6 +1221,7 @@ run_setup_wizard() {
             continue
           fi
         fi
+        clear_pairing_code_input
         debug_capture_if_enabled
         cleanup_capture
         load_node_snapshot
