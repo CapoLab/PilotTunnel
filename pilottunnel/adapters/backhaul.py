@@ -12,19 +12,7 @@ class BackhaulAdapter(DryRunAdapter):
     )
 
     def render_config(self, context: AdapterContext) -> dict:
-        config_text = "\n".join(
-            [
-                "[backhaul]",
-                f"role = {context.role}",
-                f"transport = {context.transport}",
-                f"bind_port = {context.profile.ports.main_port}",
-                f"target = {context.profile.target_host}:{context.profile.target_port}",
-                f"control_port = {context.profile.ports.control_port or context.profile.ports.main_port}",
-                f"service_port = {context.profile.ports.service_port or context.profile.target_port}",
-                f"check_port = {context.profile.ports.check_port or context.profile.target_port}",
-                f"remote_stub_mode = {context.remote_stub.get('mode', 'local-only')}",
-            ]
-        )
+        config_text = self._config_text(context)
         config_path = self._write_config_file(context, config_text, self.config_filename(context.role))
         return {
             "action": "render_config",
@@ -33,3 +21,47 @@ class BackhaulAdapter(DryRunAdapter):
             "config_path": config_path,
             "content": config_text,
         }
+
+    def render_runtime_plan(self, context: AdapterContext, runtime_dir, executable_path: str) -> dict:
+        config_text = self._config_text(context)
+        config_path = self._write_runtime_file(context, runtime_dir, config_text, self.config_filename(context.role))
+        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        return {
+            "config_path": config_path,
+            "content": config_text,
+            "argv": [executable_path, "-c", config_path],
+            "environment": {},
+            "healthcheck_target_summary": {
+                "kind": "tcp",
+                "host": "127.0.0.1",
+                "port": probe_port,
+            },
+        }
+
+    def _config_text(self, context: AdapterContext) -> str:
+        token = context.secrets.get("shared_token", "PAIRING_SECRET_REQUIRED")
+        transport_port = context.profile.ports.control_port or context.profile.ports.main_port
+        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        if context.role == "controller":
+            return "\n".join(
+                [
+                    "[server]",
+                    f'bind_addr = "0.0.0.0:{transport_port}"',
+                    f'transport = "{context.transport}"',
+                    f'token = "{token}"',
+                    "log_level = \"info\"",
+                    "ports = [",
+                    f'  "{probe_port}=127.0.0.1:{probe_port}"',
+                    "]",
+                ]
+            )
+        controller_address = context.controller_address or context.profile.target_host
+        return "\n".join(
+            [
+                "[client]",
+                f'remote_addr = "{controller_address}:{transport_port}"',
+                f'transport = "{context.transport}"',
+                f'token = "{token}"',
+                "log_level = \"info\"",
+            ]
+        )

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from pilottunnel import cli
 from pilottunnel.binary_install import apply_binary_install, resolve_binary_reference
 from pilottunnel.binary_provider import generate_manifest
-from pilottunnel.binaries import binary_spec, current_platform_id, import_binary, provider_required_adapters
+from pilottunnel.binaries import binary_components, binary_spec, current_platform_id, import_binary, provider_required_adapters
 from pilottunnel.config import AppConfig, BinaryResolutionSettings
 from pilottunnel.state import AppState
 from testsupport import static_http_server
@@ -54,15 +54,16 @@ class BinaryInstallWorkflowTests(unittest.TestCase):
         payloads: dict[str, bytes] = {}
         platform_id = current_platform_id()
         for adapter in provider_required_adapters():
-            spec = binary_spec(adapter)
-            if platform_id not in spec.supported_platforms:
+            if platform_id not in binary_spec(adapter).supported_platforms:
                 continue
-            binary_dir = source_root / adapter / platform_id
-            binary_dir.mkdir(parents=True, exist_ok=True)
-            payload = f"{adapter}-{platform_id}-install".encode("utf-8")
-            binary_path = binary_dir / spec.binary_name
-            binary_path.write_bytes(payload)
-            payloads[adapter] = payload
+            for component in binary_components(adapter):
+                binary_dir = source_root / adapter / platform_id
+                binary_dir.mkdir(parents=True, exist_ok=True)
+                payload = f"{adapter}-{component}-{platform_id}-install".encode("utf-8")
+                binary_path = binary_dir / component
+                binary_path.write_bytes(payload)
+                payloads.setdefault(adapter, payload)
+                payloads[f"{adapter}:{component}"] = payload
         return source_root, payloads
 
     @contextmanager

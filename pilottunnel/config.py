@@ -58,6 +58,46 @@ class Candidate:
 
 
 @dataclass
+class LinkCandidate:
+    adapter: str
+    transport: str
+    state: str = "config_only"
+    selected: bool = False
+    first_start_side: str = ""
+    runnable: bool = False
+    local_role: str = ""
+    category: str = ""
+    controller_service_name: str = ""
+    worker_service_name: str = ""
+    controller_config_path: str = ""
+    worker_config_path: str = ""
+    controller_runtime_config_path: str = ""
+    worker_runtime_config_path: str = ""
+    controller_service_dir: str = ""
+    worker_service_dir: str = ""
+    controller_runtime_dir: str = ""
+    worker_runtime_dir: str = ""
+    controller_unit_path: str = ""
+    worker_unit_path: str = ""
+    controller_executable: str = ""
+    worker_executable: str = ""
+    controller_owned_ports: list[int] = field(default_factory=list)
+    worker_owned_ports: list[int] = field(default_factory=list)
+    controller_command_summary: list[str] = field(default_factory=list)
+    worker_command_summary: list[str] = field(default_factory=list)
+    controller_environment_summary: dict[str, Any] = field(default_factory=dict)
+    worker_environment_summary: dict[str, Any] = field(default_factory=dict)
+    healthchecks: list[dict[str, Any]] = field(default_factory=list)
+    topology: dict[str, Any] = field(default_factory=dict)
+    probe: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    last_result: dict[str, Any] = field(default_factory=dict)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass
 class ProfilePorts:
     main_port: int
     control_port: int | None = None
@@ -93,7 +133,7 @@ class LinkProfile:
     pairing_checksum: str = ""
     detected_controller_address: str = ""
     detected_worker_address: str = ""
-    candidates: list[Candidate] = field(default_factory=list)
+    candidates: list[LinkCandidate] = field(default_factory=list)
 
     @property
     def controller_address(self) -> str:
@@ -300,7 +340,7 @@ def _link_from_dict(data: dict[str, Any]) -> LinkProfile:
         pairing_checksum=data.get("pairing_checksum", data.get("checksum", "")),
         detected_controller_address=data.get("detected_controller_address", controller_address),
         detected_worker_address=data.get("detected_worker_address", ""),
-        candidates=[Candidate(**item) for item in data.get("candidates", [])],
+        candidates=[LinkCandidate(**item) for item in data.get("candidates", [])],
     )
 
 

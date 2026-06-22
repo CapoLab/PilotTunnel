@@ -47,10 +47,12 @@ class AdapterMetadataTests(unittest.TestCase):
         worker = AdapterContext(profile=profile, transport="ws", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
         controller_render = adapter.render_config(controller)
         worker_render = adapter.render_config(worker)
-        self.assertIn("role = controller", controller_render["content"])
-        self.assertIn("transport = tcpmux", controller_render["content"])
-        self.assertIn("role = worker", worker_render["content"])
-        self.assertIn("transport = ws", worker_render["content"])
+        self.assertIn("[server]", controller_render["content"])
+        self.assertIn('bind_addr = "0.0.0.0:', controller_render["content"])
+        self.assertIn('transport = "tcpmux"', controller_render["content"])
+        self.assertIn("[client]", worker_render["content"])
+        self.assertIn('remote_addr = "127.0.0.1:', worker_render["content"])
+        self.assertIn('transport = "ws"', worker_render["content"])
 
     def test_backhaul_systemd_unit_naming(self) -> None:
         adapter = ADAPTERS["backhaul"]()
@@ -78,8 +80,14 @@ class AdapterMetadataTests(unittest.TestCase):
         )
         controller = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="controller")
         worker = AdapterContext(profile=profile, transport="tcp", work_dir=Path("/tmp"), staging_root=Path("/tmp/staging"), role="worker")
-        self.assertIn("role = controller", adapter.render_config(controller)["content"])
-        self.assertIn("role = worker", adapter.render_config(worker)["content"])
+        controller_content = adapter.render_config(controller)["content"]
+        worker_content = adapter.render_config(worker)["content"]
+        self.assertIn("[server]", controller_content)
+        self.assertIn("[server.services.smoke_l4_001]", controller_content)
+        self.assertIn('bind_addr = "0.0.0.0:', controller_content)
+        self.assertIn("[client]", worker_content)
+        self.assertIn("[client.services.smoke_l4_001]", worker_content)
+        self.assertIn('local_addr = "127.0.0.1:', worker_content)
 
     def test_rathole_systemd_unit_naming(self) -> None:
         adapter = ADAPTERS["rathole"]()

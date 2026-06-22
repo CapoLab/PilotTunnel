@@ -32,6 +32,11 @@ class AdapterContext:
     apply_changes: bool = False
     role: str = ""
     remote_stub: dict[str, str] = field(default_factory=dict)
+    link_id: str = ""
+    link_label: str = ""
+    controller_address: str = ""
+    worker_address: str = ""
+    secrets: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.role:

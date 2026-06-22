@@ -16,7 +16,19 @@ from pathlib import Path
 from typing import Any
 
 from .audit import write_audit_log
-from .binaries import all_binary_adapters, binary_spec, cache_layout, current_platform_id, import_binary, provider_required_adapters, supported_platforms
+from .binaries import (
+    all_binary_adapters,
+    binary_components,
+    binary_record_key,
+    binary_spec,
+    cache_layout,
+    current_platform_id,
+    import_binary,
+    normalize_binary_component,
+    primary_binary_component,
+    provider_required_adapters,
+    supported_platforms,
+)
 from .state import AppState
 
 SCHEMA = "pilottunnel-binary-provider-v1"
@@ -33,6 +45,7 @@ GITHUB_PROVIDER_HOSTS = (
 class ProviderBinary:
     adapter: str
     binary_name: str
+    component: str
     version: str
     platform: str
     filename: str
@@ -411,8 +424,8 @@ def download_all_binaries(
         }
         _audit("binary-download-all", "all", payload, audit_path)
         raise
-    entries_by_adapter = {
-        entry.adapter: entry
+    entries_by_component = {
+        (entry.adapter, entry.component): entry
         for entry in manifest.binaries
         if entry.platform == platform_id
     }
@@ -437,45 +450,71 @@ def download_all_binaries(
         if spec.coverage in {"template_only", "listed_only"}:
             results.append({"adapter": adapter_name, "result": "skipped_template_only", "binary_name": spec.binary_name})
             continue
-        entry = entries_by_adapter.get(adapter_name)
-        if entry is None:
-            results.append(
-                {
-                    "adapter": adapter_name,
-                    "result": "missing_from_manifest",
-                    "message": f"Manifest missing adapter '{adapter_name}' for platform '{platform_id}'",
-                }
-            )
+        component_payloads: list[dict[str, Any]] = []
+        missing_components: list[str] = []
+        for component in binary_components(adapter_name):
+            entry = entries_by_component.get((adapter_name, component))
+            if entry is None:
+                message = (
+                    f"Manifest missing component '{component}' for adapter '{adapter_name}' for platform '{platform_id}'"
+                    if len(binary_components(adapter_name)) > 1
+                    else f"Manifest missing adapter '{adapter_name}' for platform '{platform_id}'"
+                )
+                component_payloads.append({"adapter": adapter_name, "component": component, "result": "missing_from_manifest", "message": message})
+                missing_components.append(component)
+                continue
+            existing = state.binaries.get(binary_record_key(adapter_name, component))
+            if existing and not force and existing.sha256 == entry.sha256 and existing.version == entry.version:
+                result_name = "already_present" if existing.source_type == "provider" else "imported"
+                component_payloads.append(
+                    {
+                        "adapter": adapter_name,
+                        "component": component,
+                        "result": result_name,
+                        "version": existing.version,
+                        "sha256": existing.sha256,
+                        "imported_path": existing.imported_path,
+                    }
+                )
+                continue
+            try:
+                payload = _download_and_import(
+                    entry=entry,
+                    provider=manifest.provider,
+                    cache_root=cache_root,
+                    state=state,
+                    force=force,
+                    run_version=run_version,
+                    allow_provider_host=normalized_allow_provider_host,
+                )
+                payload["result"] = "downloaded"
+                component_payloads.append(payload)
+            except Exception as exc:
+                component_payloads.append({"adapter": adapter_name, "component": component, "result": "failed", "message": str(exc)})
+                missing_components.append(component)
+        if missing_components:
             failed.append(adapter_name)
-            continue
-        existing = state.binaries.get(adapter_name)
-        if existing and not force and existing.sha256 == entry.sha256 and existing.version == entry.version:
-            result_name = "already_present" if existing.source_type == "provider" else "imported"
-            results.append(
-                {
-                    "adapter": adapter_name,
-                    "result": result_name,
-                    "version": existing.version,
-                    "sha256": existing.sha256,
-                    "imported_path": existing.imported_path,
-                }
-            )
-            continue
-        try:
-            payload = _download_and_import(
-                entry=entry,
-                provider=manifest.provider,
-                cache_root=cache_root,
-                state=state,
-                force=force,
-                run_version=run_version,
-                allow_provider_host=normalized_allow_provider_host,
-            )
-            payload["result"] = "downloaded"
-            results.append(payload)
-        except Exception as exc:
-            results.append({"adapter": adapter_name, "result": "failed", "message": str(exc)})
-            failed.append(adapter_name)
+        if any(item["result"] == "failed" for item in component_payloads):
+            result_name = "failed"
+            if adapter_name not in failed:
+                failed.append(adapter_name)
+        elif any(item["result"] == "missing_from_manifest" for item in component_payloads):
+            result_name = "missing_from_manifest"
+        elif any(item["result"] == "downloaded" for item in component_payloads):
+            result_name = "downloaded"
+        elif all(item["result"] == "already_present" for item in component_payloads):
+            result_name = "already_present"
+        else:
+            result_name = "imported"
+        results.append(
+            {
+                "adapter": adapter_name,
+                "result": result_name,
+                "required_components": list(binary_components(adapter_name)),
+                "components": component_payloads,
+                "missing_components": missing_components,
+            }
+        )
 
     payload = {
         "ok": not failed,
@@ -562,9 +601,11 @@ def parse_manifest(
             raise ValueError("Binary provider entry must be an object")
         adapter = _validated_text(item.get("adapter"), "adapter")
         spec = binary_spec(adapter)
+        component = _validated_component(adapter, item.get("component"), item.get("binary_name"))
         entry = ProviderBinary(
             adapter=adapter,
             binary_name=_validated_text(item.get("binary_name"), "binary_name"),
+            component=component,
             version=_validated_text(item.get("version"), "version"),
             platform=_validated_text(item.get("platform"), "platform"),
             filename=_validated_filename(item.get("filename") or _url_filename(item.get("url"))),
@@ -578,19 +619,21 @@ def parse_manifest(
         )
         if entry.platform not in spec.supported_platforms:
             raise ValueError(f"Unsupported platform '{entry.platform}' for adapter '{adapter}'")
-        if entry.binary_name != spec.binary_name:
-            raise ValueError(f"binary_name '{entry.binary_name}' does not match adapter '{adapter}'")
+        if entry.binary_name != normalize_binary_component(adapter, component):
+            raise ValueError(f"binary_name '{entry.binary_name}' does not match adapter '{adapter}' component '{component}'")
         if posixpath.basename(urllib.parse.urlparse(entry.url).path) != entry.filename:
             raise ValueError(f"filename '{entry.filename}' does not match URL path for adapter '{adapter}'")
         binaries.append(entry)
     return ProviderManifest(schema=SCHEMA, provider=provider, generated_at=generated_at, binaries=tuple(binaries), source=source)
 
 
-def select_manifest_binary(manifest: ProviderManifest, *, adapter: str, platform_id: str) -> ProviderBinary:
-    binary_spec(adapter)
+def select_manifest_binary(manifest: ProviderManifest, *, adapter: str, platform_id: str, component: str | None = None) -> ProviderBinary:
+    resolved_component = normalize_binary_component(adapter, component)
     for entry in manifest.binaries:
-        if entry.adapter == adapter and entry.platform == platform_id:
+        if entry.adapter == adapter and entry.platform == platform_id and entry.component == resolved_component:
             return entry
+    if len(binary_components(adapter)) > 1:
+        raise ValueError(f"Manifest does not include component '{resolved_component}' for adapter '{adapter}' on platform '{platform_id}'")
     raise ValueError(f"Manifest does not include adapter '{adapter}' for platform '{platform_id}'")
 
 
@@ -606,6 +649,7 @@ def entry_to_dict(entry: ProviderBinary) -> dict[str, Any]:
     return {
         "adapter": entry.adapter,
         "binary_name": entry.binary_name,
+        "component": entry.component,
         "version": entry.version,
         "platform": entry.platform,
         "filename": entry.filename,
@@ -632,7 +676,7 @@ def _download_and_import(
     layout = cache_layout(cache_root)
     downloads_dir = layout["downloads_dir"]
     downloads_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = (downloads_dir / f"{entry.adapter}-{entry.platform}-{entry.version}.tmp").resolve()
+    temp_path = (downloads_dir / f"{entry.adapter}-{entry.component}-{entry.platform}-{entry.version}.tmp").resolve()
     if layout["root"] not in temp_path.parents:
         raise ValueError(f"Refusing to write outside cache root: {temp_path}")
     try:
@@ -658,6 +702,7 @@ def _download_and_import(
             source_provider=provider,
             provider_host=provider_host,
             downloaded_at=_timestamp(),
+            component=entry.component,
         )
     finally:
         temp_path.unlink(missing_ok=True)
@@ -665,6 +710,7 @@ def _download_and_import(
         "ok": True,
         "adapter": entry.adapter,
         "binary_name": entry.binary_name,
+        "component": entry.component,
         "version": entry.version,
         "sha256": entry.sha256,
         "provider": provider,
@@ -870,6 +916,7 @@ def _manifest_entries_from_source(source_root: Path, base_url: str, *, versions:
             ProviderBinary(
                 adapter=item["adapter"],
                 binary_name=item["binary_name"],
+                component=item["component"],
                 version=item["version"],
                 platform=item["platform"],
                 filename=item["filename"],
@@ -910,14 +957,13 @@ def _source_binaries(source_root: Path, versions: dict[str, str] | None = None) 
             raise ValueError(f"Adapter '{adapter_name}' is not eligible for provider manifest generation")
         if platform_id not in spec.supported_platforms:
             raise ValueError(f"Unsupported platform '{platform_id}' for adapter '{adapter_name}'")
-        expected_filename = spec.binary_name
-        if filename != expected_filename:
-            raise ValueError(f"Unexpected binary name '{filename}' for adapter '{adapter_name}' on platform '{platform_id}'")
+        component = _source_component_for_filename(adapter_name, filename)
         data = resolved_path.read_bytes()
         binaries.append(
             {
                 "adapter": adapter_name,
-                "binary_name": spec.binary_name,
+                "binary_name": component,
+                "component": component,
                 "platform": platform_id,
                 "filename": filename,
                 "version": version_map.get(adapter_name, "provider-current"),
@@ -976,6 +1022,7 @@ def _release_entries_from_source(
         entry = ProviderBinary(
             adapter=item["adapter"],
             binary_name=item["binary_name"],
+            component=item["component"],
             version=item["version"],
             platform=item["platform"],
             filename=release_filename,
@@ -987,6 +1034,7 @@ def _release_entries_from_source(
         copies.append(
             {
                 "adapter": item["adapter"],
+                "component": item["component"],
                 "platform": item["platform"],
                 "version": item["version"],
                 "source_path": item["source_path"],
@@ -999,6 +1047,9 @@ def _release_entries_from_source(
 
 def _normalized_release_filename(*, adapter: str, platform_id: str, version: str, source_filename: str) -> str:
     safe_version = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in version)
+    component = _source_component_for_filename(adapter, source_filename)
+    if len(binary_components(adapter)) > 1:
+        return f"{adapter}-{component}-{platform_id}-{safe_version}-{source_filename}"
     return f"{adapter}-{platform_id}-{safe_version}-{source_filename}"
 
 
@@ -1019,11 +1070,18 @@ def _recommended_provider_hosts(base_url: str) -> tuple[str, ...]:
 
 def _duplicate_manifest_keys(entries: tuple[ProviderBinary, ...]) -> list[dict[str, str]]:
     duplicates: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for entry in entries:
-        key = (entry.adapter, entry.platform, entry.version)
+        key = (entry.adapter, entry.component, entry.platform, entry.version)
         if key in seen:
-            duplicates.append({"adapter": entry.adapter, "platform": entry.platform, "version": entry.version})
+            duplicates.append(
+                {
+                    "adapter": entry.adapter,
+                    "component": entry.component,
+                    "platform": entry.platform,
+                    "version": entry.version,
+                }
+            )
             continue
         seen.add(key)
     return duplicates
@@ -1035,16 +1093,20 @@ def _missing_required_entries(
     required_platforms: tuple[str, ...] | None = None,
     required_adapters: tuple[str, ...] | None = None,
 ) -> list[dict[str, str]]:
-    present = {(entry.adapter, entry.platform) for entry in entries}
+    present = {(entry.adapter, entry.component, entry.platform) for entry in entries}
     missing: list[dict[str, str]] = []
     adapters = required_adapters or provider_required_adapters()
     for adapter_name in adapters:
         spec = binary_spec(adapter_name)
-        for platform_id in spec.supported_platforms:
-            if required_platforms and platform_id not in required_platforms:
-                continue
-            if (adapter_name, platform_id) not in present:
-                missing.append({"adapter": adapter_name, "platform": platform_id})
+        for component in binary_components(adapter_name):
+            for platform_id in spec.supported_platforms:
+                if required_platforms and platform_id not in required_platforms:
+                    continue
+                if (adapter_name, component, platform_id) not in present:
+                    item = {"adapter": adapter_name, "platform": platform_id}
+                    if len(binary_components(adapter_name)) > 1:
+                        item["component"] = component
+                    missing.append(item)
     return missing
 
 
@@ -1104,3 +1166,22 @@ def _url_filename(value: Any) -> str:
     if not filename:
         raise ValueError("Manifest URL must end with a filename")
     return filename
+
+
+def _validated_component(adapter: str, component_value: Any, binary_name_value: Any) -> str:
+    if isinstance(component_value, str) and component_value.strip():
+        return normalize_binary_component(adapter, component_value.strip())
+    binary_name = _validated_text(binary_name_value, "binary_name")
+    for component in binary_components(adapter):
+        if binary_name == component:
+            return component
+    if len(binary_components(adapter)) == 1:
+        return primary_binary_component(adapter)
+    raise ValueError(f"Manifest field 'component' is required for adapter '{adapter}'")
+
+
+def _source_component_for_filename(adapter: str, filename: str) -> str:
+    for component in binary_components(adapter):
+        if filename == component:
+            return component
+    raise ValueError(f"Unexpected binary name '{filename}' for adapter '{adapter}'")

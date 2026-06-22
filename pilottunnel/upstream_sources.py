@@ -23,7 +23,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .audit import write_audit_log
-from .binaries import binary_spec, cache_layout, current_platform_id, provider_required_adapters, supported_platforms
+from .binaries import (
+    binary_components,
+    binary_filename_for_component,
+    binary_spec,
+    cache_layout,
+    current_platform_id,
+    provider_required_adapters,
+    supported_platforms,
+)
 from .binary_provider import generate_manifest, verify_manifest_file
 
 GITHUB_API_HOST = "api.github.com"
@@ -87,6 +95,7 @@ class UpstreamSource:
     upstream_type: str
     repo_slug: str
     binary_name: str
+    components: tuple[str, ...]
     supported_platforms: tuple[str, ...]
     asset_patterns: dict[str, tuple[str, ...]]
     archive_handling: dict[str, str]
@@ -101,6 +110,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="Musixal/Backhaul",
         binary_name="backhaul",
+        components=("backhaul",),
         supported_platforms=("linux-amd64", "linux-arm64"),
         asset_patterns={
             "linux-amd64": ("backhaul_linux_amd64.tar.gz",),
@@ -116,6 +126,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="rathole-org/rathole",
         binary_name="rathole",
+        components=("rathole",),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={
             "linux-amd64": ("rathole-x86_64-unknown-linux-gnu.zip",),
@@ -136,6 +147,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="fatedier/frp",
         binary_name="frpc",
+        components=("frpc", "frps"),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={
             "linux-amd64": ("frp_*_linux_amd64.tar.gz",),
@@ -144,11 +156,11 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         },
         archive_handling={"linux-amd64": "tar.gz", "linux-arm64": "tar.gz", "windows-amd64": "zip"},
         extracted_binary_path_patterns={
-            "linux-amd64": ("*/frpc",),
-            "linux-arm64": ("*/frpc",),
-            "windows-amd64": ("*/frpc.exe",),
+            "linux-amd64": ("*/frpc", "*/frps"),
+            "linux-arm64": ("*/frpc", "*/frps"),
+            "windows-amd64": ("*/frpc.exe", "*/frps.exe"),
         },
-        notes="Uses the client binary from the official frp release bundle.",
+        notes="Uses both client and server binaries from the official frp release bundle.",
     ),
     "gost": UpstreamSource(
         adapter="gost",
@@ -156,6 +168,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="go-gost/gost",
         binary_name="gost",
+        components=("gost",),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={
             "linux-amd64": ("gost_*_linux_amd64.tar.gz",),
@@ -176,6 +189,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="jpillora/chisel",
         binary_name="chisel",
+        components=("chisel",),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={
             "linux-amd64": ("chisel_*_linux_amd64.gz",),
@@ -196,6 +210,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="zhboner/realm",
         binary_name="realm",
+        components=("realm",),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={
             "linux-amd64": ("realm-x86_64-unknown-linux-gnu.tar.gz",),
@@ -216,6 +231,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="github_release",
         repo_slug="ekzhang/bore",
         binary_name="bore",
+        components=("bore",),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={
             "linux-amd64": ("bore-v*-x86_64-unknown-linux-musl.tar.gz",),
@@ -236,6 +252,7 @@ UPSTREAM_SOURCE_CATALOG: dict[str, UpstreamSource] = {
         upstream_type="system_dependency",
         repo_slug="",
         binary_name="ssh",
+        components=("ssh",),
         supported_platforms=("linux-amd64", "linux-arm64", "windows-amd64"),
         asset_patterns={},
         archive_handling={},
@@ -340,35 +357,43 @@ def fetch_upstream_sources(
         try:
             release = _load_release_metadata(source, requested_versions.get(adapter))
             asset = _select_asset(source, resolved_platform, release)
-            destination = _source_destination(resolved_source_dir, adapter, resolved_platform, source.binary_name)
+            component_names = source.components or (source.binary_name,)
+            destinations = [
+                _source_destination(resolved_source_dir, adapter, resolved_platform, component_name)
+                for component_name in component_names
+            ]
             if dry_run:
                 result = {
                     "adapter": adapter,
                     "result": "planned_download",
                     "platform": resolved_platform,
                     "binary_name": source.binary_name,
+                    "components": list(component_names),
                     "category": source.category,
                     "version": release["version"],
                     "asset_name": asset["name"],
                     "asset_url": asset["url"],
                     "archive_handling": source.archive_handling[resolved_platform],
-                    "destination": str(destination),
+                    "destination": str(destinations[0]),
+                    "destinations": [str(item) for item in destinations],
                     "downloads_performed": False,
                 }
-            elif destination.exists() and not force:
+            elif all(destination.exists() for destination in destinations) and not force:
                 result = {
                     "adapter": adapter,
                     "result": "already_present",
                     "platform": resolved_platform,
                     "binary_name": source.binary_name,
+                    "components": list(component_names),
                     "category": source.category,
                     "version": release["version"],
                     "asset_name": asset["name"],
                     "asset_url": asset["url"],
                     "archive_handling": source.archive_handling[resolved_platform],
-                    "destination": str(destination),
-                    "sha256": _sha256_file(destination),
-                    "size_bytes": destination.stat().st_size,
+                    "destination": str(destinations[0]),
+                    "destinations": [str(item) for item in destinations],
+                    "component_checksums": {component: _sha256_file(destination) for component, destination in zip(component_names, destinations)},
+                    "component_sizes": {component: destination.stat().st_size for component, destination in zip(component_names, destinations)},
                     "downloads_performed": False,
                 }
             else:
@@ -377,7 +402,7 @@ def fetch_upstream_sources(
                     platform_id=resolved_platform,
                     release=release,
                     asset=asset,
-                    destination=destination,
+                    destinations={component: destination for component, destination in zip(component_names, destinations)},
                     cache_root=cache_root,
                 )
                 downloads_performed = True
@@ -615,7 +640,7 @@ def _download_and_store_source(
     platform_id: str,
     release: dict[str, Any],
     asset: dict[str, str],
-    destination: Path,
+    destinations: dict[str, Path],
     cache_root: Path,
 ) -> dict[str, Any]:
     cache_path = _download_temp_path(cache_root, source.adapter, platform_id, asset["name"])
@@ -623,17 +648,21 @@ def _download_and_store_source(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(raw_bytes)
     try:
-        binary_bytes = _extract_binary_bytes(
-            source=source,
-            platform_id=platform_id,
-            asset_name=asset["name"],
-            archive_type=source.archive_handling[platform_id],
-            payload=raw_bytes,
-        )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(binary_bytes)
-        if not platform_id.startswith("windows"):
-            destination.chmod(destination.stat().st_mode | 0o755)
+        extracted_components: dict[str, bytes] = {}
+        for component, destination in destinations.items():
+            binary_bytes = _extract_binary_bytes(
+                source=source,
+                platform_id=platform_id,
+                asset_name=asset["name"],
+                archive_type=source.archive_handling[platform_id],
+                payload=raw_bytes,
+                component=component,
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(binary_bytes)
+            if not platform_id.startswith("windows"):
+                destination.chmod(destination.stat().st_mode | 0o755)
+            extracted_components[component] = binary_bytes
     finally:
         cache_path.unlink(missing_ok=True)
     return {
@@ -641,14 +670,16 @@ def _download_and_store_source(
         "result": "downloaded",
         "platform": platform_id,
         "binary_name": source.binary_name,
+        "components": list(destinations),
         "category": source.category,
         "version": release["version"],
         "asset_name": asset["name"],
         "asset_url": asset["url"],
         "archive_handling": source.archive_handling[platform_id],
-        "destination": str(destination),
-        "sha256": _sha256_bytes(binary_bytes),
-        "size_bytes": len(binary_bytes),
+        "destination": str(next(iter(destinations.values()))),
+        "destinations": {component: str(path) for component, path in destinations.items()},
+        "component_checksums": {component: _sha256_bytes(data) for component, data in extracted_components.items()},
+        "component_sizes": {component: len(data) for component, data in extracted_components.items()},
         "downloads_performed": True,
     }
 
@@ -660,12 +691,17 @@ def _extract_binary_bytes(
     asset_name: str,
     archive_type: str,
     payload: bytes,
+    component: str,
 ) -> bytes:
-    patterns = source.extracted_binary_path_patterns.get(platform_id, ())
-    expected_names = _expected_binary_names(source.binary_name, platform_id)
+    patterns = _component_patterns(source, platform_id, component)
+    expected_names = _expected_binary_names(component, platform_id)
     if archive_type == "raw":
+        if len(source.components or (source.binary_name,)) != 1:
+            raise ValueError(f"Raw archive handling does not support multiple components for adapter '{source.adapter}'")
         return payload
     if archive_type == "gz":
+        if len(source.components or (source.binary_name,)) != 1:
+            raise ValueError(f"Gzip archive handling does not support multiple components for adapter '{source.adapter}'")
         return gzip.decompress(payload)
     if archive_type == "tar.gz":
         return _extract_from_tar_gz(payload, patterns, source.adapter, asset_name, expected_names)
@@ -743,6 +779,17 @@ def _expected_binary_names(binary_name: str, platform_id: str) -> tuple[str, ...
     if platform_id.startswith("windows") and not binary_name.lower().endswith(".exe"):
         names.add(f"{binary_name.lower()}.exe")
     return tuple(sorted(names))
+
+
+def _component_patterns(source: UpstreamSource, platform_id: str, component: str) -> tuple[str, ...]:
+    configured = list(source.extracted_binary_path_patterns.get(platform_id, ()))
+    filename = binary_filename_for_component(source.adapter, component, platform_id=platform_id)
+    normalized = filename.replace("\\", "/")
+    component_name = component if not platform_id.startswith("windows") else filename
+    for pattern in (component_name, filename, f"*/{normalized}"):
+        if pattern not in configured:
+            configured.append(pattern)
+    return tuple(configured)
 
 
 def _should_ignore_archive_member(name: str) -> bool:

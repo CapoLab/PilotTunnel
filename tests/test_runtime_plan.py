@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pilottunnel import cli
-from pilottunnel.binaries import binary_spec, current_platform_id
+from pilottunnel.binaries import binary_components, binary_filename_for_component, current_platform_id
 from pilottunnel.config import AppConfig, BinaryResolutionSettings, Profile, ProfilePorts, save_config
 from pilottunnel.state import AppState, RuntimeRecord, save_state
 from testsupport import allocate_tcp_ports
@@ -78,12 +78,11 @@ class RuntimePlanTests(unittest.TestCase):
         install_dir = self.base / "managed-install"
         platform_id = current_platform_id()
         for adapter in adapters:
-            filename = binary_spec(adapter).binary_name
-            if platform_id.startswith("windows") and not filename.endswith(".exe"):
-                filename = f"{filename}.exe"
-            binary_path = install_dir / adapter / platform_id / filename
-            binary_path.parent.mkdir(parents=True, exist_ok=True)
-            binary_path.write_bytes(f"{adapter}-binary".encode("utf-8"))
+            for component in binary_components(adapter):
+                filename = binary_filename_for_component(adapter, component, platform_id=platform_id)
+                binary_path = install_dir / adapter / platform_id / filename
+                binary_path.parent.mkdir(parents=True, exist_ok=True)
+                binary_path.write_bytes(f"{adapter}-{component}-binary".encode("utf-8"))
         return install_dir
 
     def _write_runtime_config(self, profiles: list[Profile], *, managed_install_dir: Path | None = None, state: AppState | None = None) -> None:
@@ -154,7 +153,8 @@ class RuntimePlanTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         tunnel = json.loads(output)["tunnels"][0]
         self.assertEqual(tunnel["adapter"], "frp")
-        self.assertTrue(tunnel["config_file_path"].endswith("frp-controller.ini"))
+        self.assertTrue(tunnel["config_file_path"].endswith("frp-controller.toml"))
+        self.assertEqual(Path(tunnel["command_argv"][0]).name.lower(), "frps.exe" if current_platform_id().startswith("windows") else "frps")
         self.assertEqual(tunnel["command_argv"][1], "-c")
 
     def test_gost_tcp_runtime_config_and_argv_rendering(self) -> None:
@@ -164,7 +164,7 @@ class RuntimePlanTests(unittest.TestCase):
         self.assertEqual(code, 0, msg=output)
         tunnel = json.loads(output)["tunnels"][0]
         self.assertEqual(tunnel["adapter"], "gost")
-        self.assertTrue(tunnel["config_file_path"].endswith("gost-controller.toml"))
+        self.assertTrue(tunnel["config_file_path"].endswith("gost-controller.yaml"))
         self.assertEqual(tunnel["command_argv"][1], "-C")
 
     def test_only_one_active_tunnel_allowed(self) -> None:

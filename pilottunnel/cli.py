@@ -29,6 +29,7 @@ from .binary_install import apply_binary_install, build_binary_install_plan, lis
 from .bootstrap import apply_bootstrap, build_bootstrap_command, build_bootstrap_plan
 from .bundles import build_worker_bundle, import_bundle, inspect_bundle
 from .binaries import get_binary_plan, import_binary, list_binary_plans, verify_binary
+from .candidates import candidate_results, plan_candidate, prepare_all_candidates, smoke_test_candidate, start_candidate, stop_candidate
 from .config import (
     AppConfig,
     Candidate,
@@ -490,6 +491,35 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_plan.add_argument("--platform", default="auto")
     runtime_plan.add_argument("--json", action="store_true")
 
+    candidate = subparsers.add_parser("candidate")
+    candidate_subparsers = candidate.add_subparsers(dest="candidate_command", required=True)
+    candidate_prepare = candidate_subparsers.add_parser("prepare-all")
+    candidate_prepare.add_argument("--link")
+    candidate_prepare.add_argument("--platform", default="auto")
+    candidate_prepare.add_argument("--json", action="store_true")
+    candidate_plan = candidate_subparsers.add_parser("plan")
+    candidate_plan.add_argument("--adapter", required=True)
+    candidate_plan.add_argument("--link")
+    candidate_plan.add_argument("--json", action="store_true")
+    candidate_start = candidate_subparsers.add_parser("start")
+    candidate_start.add_argument("--adapter", required=True)
+    candidate_start.add_argument("--link")
+    candidate_start.add_argument("--platform", default="auto")
+    candidate_start.add_argument("--json", action="store_true")
+    candidate_stop = candidate_subparsers.add_parser("stop")
+    candidate_stop.add_argument("--adapter")
+    candidate_stop.add_argument("--link")
+    candidate_stop.add_argument("--json", action="store_true")
+    candidate_smoke = candidate_subparsers.add_parser("smoke-test")
+    candidate_smoke.add_argument("--adapter", required=True)
+    candidate_smoke.add_argument("--link")
+    candidate_smoke.add_argument("--attempts", type=int, default=3)
+    candidate_smoke.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    candidate_smoke.add_argument("--json", action="store_true")
+    candidate_result = candidate_subparsers.add_parser("result")
+    candidate_result.add_argument("--link")
+    candidate_result.add_argument("--json", action="store_true")
+
     systemd = subparsers.add_parser("systemd")
     systemd_subparsers = systemd.add_subparsers(dest="systemd_command", required=True)
     systemd_reload = systemd_subparsers.add_parser("reload")
@@ -787,6 +817,8 @@ def _action_name(args: argparse.Namespace) -> str | None:
         return f"rc_{args.rc_command}"
     if args.command == "runtime":
         return f"runtime_{args.runtime_command}"
+    if args.command == "candidate":
+        return f"candidate_{args.candidate_command.replace('-', '_')}"
     if args.command == "systemd":
         if args.systemd_command == "reload":
             return f"systemd_reload_{args.systemd_reload_command}"
@@ -849,6 +881,113 @@ def _save_runtime(
     save_config(config, config_path)
     save_state(state, state_path)
     save_registry(registry, registry_path)
+
+
+def _emit_payload(payload: dict, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+    action = payload.get("action", "")
+    if action.startswith("candidate-"):
+        print(_format_candidate_payload(payload))
+        return
+    print(json.dumps(payload, indent=2))
+
+
+def _format_candidate_payload(payload: dict) -> str:
+    lines: list[str] = []
+    title = payload.get("action", "").replace("-", " ").title()
+    lines.append(title)
+    if payload.get("message"):
+        lines.append(str(payload["message"]))
+    if payload.get("link_label"):
+        lines.append(f"Link: {payload['link_label']}")
+    if payload.get("role"):
+        lines.append(f"Current side: {payload['role']}")
+    candidate = payload.get("candidate")
+    if isinstance(candidate, dict):
+        lines.extend(_candidate_lines(candidate))
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        lines.append("Candidates:")
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            state = item.get("state", "")
+            runnable = "real-smoke-ready" if item.get("runnable") else "comparison-only"
+            category = item.get("category") or "uncategorized"
+            lines.append(f"- {item.get('adapter')}/{item.get('transport')}: {state} ({runnable}, {category})")
+            if item.get("notes"):
+                lines.append(f"  note: {item['notes']}")
+    if payload.get("occupied_ports"):
+        lines.append("Occupied ports:")
+        for entry in payload["occupied_ports"]:
+            lines.append(f"- {entry.get('port')}: {entry.get('owner') or 'owner unavailable'}")
+    result = payload.get("result")
+    if isinstance(result, dict):
+        lines.append(f"Real pass: {'yes' if result.get('real_pass') else 'no'}")
+        lines.append(
+            f"Attempts: successes={result.get('success_count', 0)} failures={result.get('failure_count', 0)} timeout={result.get('timeout')}"
+        )
+    if payload.get("warnings"):
+        lines.append("Warnings:")
+        for item in payload["warnings"]:
+            lines.append(f"- {item}")
+    if payload.get("blockers"):
+        lines.append("Blockers:")
+        for item in payload["blockers"]:
+            lines.append(f"- {item}")
+    if payload.get("next_instruction"):
+        lines.append(f"Next: {payload['next_instruction']}")
+    return "\n".join(lines)
+
+
+def _candidate_lines(candidate: dict) -> list[str]:
+    lines = [
+        f"Adapter: {candidate.get('adapter')} / {candidate.get('transport')}",
+        f"State: {candidate.get('state')}",
+        f"Category: {candidate.get('category') or 'not classified'}",
+        f"Start first: {candidate.get('first_start_side') or 'not decided'}",
+        f"Runnable now: {'yes' if candidate.get('runnable') else 'no'}",
+    ]
+    topology = candidate.get("topology") or {}
+    if topology:
+        lines.append(f"Controller process role: {topology.get('controller_process_role') or 'not prepared'}")
+        lines.append(f"Worker process role: {topology.get('worker_process_role') or 'not prepared'}")
+        lines.append(f"Listening side: {topology.get('listening_side') or 'not decided'}")
+        lines.append(f"Connecting side: {topology.get('connecting_side') or 'not decided'}")
+        if topology.get("effective_transport_port"):
+            lines.append(f"Effective transport port: {topology.get('effective_transport_port')}")
+    controller_service = candidate.get("controller_service_name")
+    worker_service = candidate.get("worker_service_name")
+    if controller_service or worker_service:
+        lines.append(f"Controller service: {controller_service or 'not prepared'}")
+        lines.append(f"Worker service: {worker_service or 'not prepared'}")
+    controller_exec = candidate.get("controller_executable")
+    worker_exec = candidate.get("worker_executable")
+    if controller_exec or worker_exec:
+        lines.append(f"Controller executable: {controller_exec or 'not prepared'}")
+        lines.append(f"Worker executable: {worker_exec or 'not prepared'}")
+    controller_ports = candidate.get("controller_owned_ports") or []
+    worker_ports = candidate.get("worker_owned_ports") or []
+    lines.append(f"Controller owned ports: {', '.join(str(item) for item in controller_ports) or 'none'}")
+    lines.append(f"Worker owned ports: {', '.join(str(item) for item in worker_ports) or 'none'}")
+    probe = candidate.get("probe") or {}
+    if probe:
+        lines.append(f"Probe path: {probe.get('path') or 'not prepared'}")
+        lines.append(f"Probe port: {probe.get('port') or 'not prepared'}")
+        lines.append(f"Worker probe bind host: {probe.get('worker_bind_host') or 'not prepared'}")
+    controller_cmd = candidate.get("controller_command_summary") or []
+    worker_cmd = candidate.get("worker_command_summary") or []
+    if controller_cmd:
+        lines.append(f"Controller command: {' '.join(str(item) for item in controller_cmd)}")
+    if worker_cmd:
+        lines.append(f"Worker command: {' '.join(str(item) for item in worker_cmd)}")
+    for item in candidate.get("healthchecks") or []:
+        lines.append(f"Healthcheck: {item.get('label')} -> {item.get('host')}:{item.get('port')}")
+    if candidate.get("notes"):
+        lines.append(f"Notes: {candidate['notes']}")
+    return lines
 
 
 def _profile_candidates(values: list[str]) -> list[Candidate]:
@@ -1192,7 +1331,7 @@ def main(argv: list[str] | None = None) -> int:
             if link is None:
                 raise KeyError("No active link is configured")
             pairing_code = export_pairing_code(link)
-        except (KeyError, ValueError) as exc:
+        except (KeyError, OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
         write_audit_log(
@@ -1384,6 +1523,97 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if args.command == "candidate" and args.candidate_command == "prepare-all":
+        try:
+            payload = prepare_all_candidates(
+                config=config,
+                state=state,
+                paths=switch_paths,
+                requested_platform=args.platform,
+                link_label=args.link,
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate prepare failed\n{exc}")
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        _emit_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
+
+    if args.command == "candidate" and args.candidate_command == "plan":
+        try:
+            payload = plan_candidate(
+                config=config,
+                state=state,
+                paths=switch_paths,
+                adapter_name=args.adapter,
+                link_label=args.link,
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate plan failed\n{exc}")
+            return 1
+        _emit_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
+
+    if args.command == "candidate" and args.candidate_command == "start":
+        try:
+            payload = start_candidate(
+                config=config,
+                state=state,
+                paths=switch_paths,
+                adapter_name=args.adapter,
+                link_label=args.link,
+                requested_platform=args.platform,
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate start failed\n{exc}")
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        _emit_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
+
+    if args.command == "candidate" and args.candidate_command == "stop":
+        try:
+            payload = stop_candidate(
+                config=config,
+                state=state,
+                paths=switch_paths,
+                adapter_name=args.adapter,
+                link_label=args.link,
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate stop failed\n{exc}")
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        _emit_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
+
+    if args.command == "candidate" and args.candidate_command == "smoke-test":
+        try:
+            payload = smoke_test_candidate(
+                config=config,
+                state=state,
+                paths=switch_paths,
+                adapter_name=args.adapter,
+                attempts=args.attempts,
+                timeout=args.timeout,
+                link_label=args.link,
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate smoke test failed\n{exc}")
+            return 1
+        _save_runtime(config, state, registry, config_path, state_path, registry_path)
+        _emit_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
+
+    if args.command == "candidate" and args.candidate_command == "result":
+        try:
+            payload = candidate_results(config=config, link_label=args.link)
+        except (KeyError, ValueError) as exc:
+            print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate results failed\n{exc}")
+            return 1
+        _emit_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
 
     if args.command == "runtime" and args.runtime_command == "plan":
         try:

@@ -14,7 +14,15 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .audit import write_audit_log
-from .binaries import binary_spec, provider_required_adapters
+from .binaries import (
+    binary_components,
+    binary_filename_for_component,
+    binary_record_key,
+    binary_spec,
+    normalize_binary_component,
+    primary_binary_component,
+    provider_required_adapters,
+)
 from .binary_provider import LOCAL_HOSTS, ProviderBinary, load_manifest, resolve_platform_id, select_manifest_binary
 from .config import AppConfig
 from .state import AppState
@@ -56,29 +64,40 @@ def build_binary_install_plan(
                 }
             )
             continue
-        try:
-            entry = select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id)
-        except ValueError as exc:
-            blockers.append(str(exc))
+        component_entries: list[ProviderBinary] = []
+        component_errors: list[str] = []
+        component_plans: list[dict[str, Any]] = []
+        for component in binary_components(adapter):
+            try:
+                entry = select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id, component=component)
+                component_entries.append(entry)
+                component_plans.append(
+                    _plan_entry(
+                        adapter=adapter,
+                        component=component,
+                        platform_id=platform_id,
+                        entry=entry,
+                        install_dir=managed_install_dir,
+                        config=config,
+                        state=state,
+                    )
+                )
+            except ValueError as exc:
+                component_errors.append(str(exc))
+        if component_errors:
+            blockers.extend(component_errors)
             results.append(
                 {
                     "adapter": adapter,
                     "platform": platform_id,
                     "result": "missing_from_manifest",
-                    "message": str(exc),
+                    "message": "; ".join(component_errors),
+                    "components": component_plans,
+                    "missing_components": [component for component in binary_components(adapter) if component not in {entry.component for entry in component_entries}],
                 }
             )
             continue
-        results.append(
-            _plan_entry(
-                adapter=adapter,
-                platform_id=platform_id,
-                entry=entry,
-                install_dir=managed_install_dir,
-                config=config,
-                state=state,
-            )
-        )
+        results.append(_aggregate_plan_entry(adapter=adapter, platform_id=platform_id, component_plans=component_plans))
     return {
         "ok": not blockers,
         "action": "binary-install-plan",
@@ -156,28 +175,50 @@ def apply_binary_install(
                 }
             )
             continue
-        try:
-            entry = select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id)
-            result = _install_entry(
-                adapter=adapter,
-                platform_id=platform_id,
-                entry=entry,
-                install_dir=resolved_install_dir,
-                config=config,
-                state=state,
-            )
-            downloads_performed = downloads_performed or result.get("source") == "provider_download"
-            results.append(result)
-        except Exception as exc:
+        component_results: list[dict[str, Any]] = []
+        component_failures: list[str] = []
+        for component in binary_components(adapter):
+            try:
+                entry = select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id, component=component)
+            except ValueError as exc:
+                component_failures.append(str(exc))
+                component_results.append(
+                    {
+                        "adapter": adapter,
+                        "component": component,
+                        "platform": platform_id,
+                        "result": "missing_from_manifest",
+                        "message": str(exc),
+                    }
+                )
+                continue
+            try:
+                result = _install_entry(
+                    adapter=adapter,
+                    component=component,
+                    platform_id=platform_id,
+                    entry=entry,
+                    install_dir=resolved_install_dir,
+                    config=config,
+                    state=state,
+                )
+                downloads_performed = downloads_performed or result.get("source") == "provider_download"
+                component_results.append(result)
+            except Exception as exc:
+                component_failures.append(str(exc))
+                component_results.append(
+                    {
+                        "adapter": adapter,
+                        "component": component,
+                        "platform": platform_id,
+                        "result": "failed",
+                        "message": str(exc),
+                    }
+                )
+        aggregated = _aggregate_apply_entry(adapter=adapter, platform_id=platform_id, component_results=component_results)
+        results.append(aggregated)
+        if component_failures:
             failures.append(adapter)
-            results.append(
-                {
-                    "adapter": adapter,
-                    "platform": platform_id,
-                    "result": "failed",
-                    "message": str(exc),
-                }
-            )
 
     summary_path = resolved_install_dir / INSTALL_SUMMARY_FILENAME
     payload = {
@@ -224,13 +265,35 @@ def list_binary_installations(*, install_dir: Path) -> dict[str, Any]:
             if not platform_dir.is_dir():
                 continue
             platform_id = platform_dir.name
+            summary_item = summary_index.get((adapter, platform_id), {})
+            components = summary_item.get("components") or []
+            if components:
+                for component_item in components:
+                    component = component_item.get("component") or primary_binary_component(adapter)
+                    path = _binary_destination(resolved_install_dir, adapter, platform_id, component)
+                    if not path.exists():
+                        continue
+                    entries.append(
+                        {
+                            "adapter": adapter,
+                            "component": component,
+                            "platform": platform_id,
+                            "path": str(path),
+                            "size_bytes": path.stat().st_size,
+                            "sha256": _sha256_file(path),
+                            "source": component_item.get("source", ""),
+                            "version": component_item.get("version", ""),
+                            "exists": True,
+                        }
+                    )
+                continue
             path = _binary_destination(resolved_install_dir, adapter, platform_id)
             if not path.exists():
                 continue
-            summary_item = summary_index.get((adapter, platform_id), {})
             entries.append(
                 {
                     "adapter": adapter,
+                    "component": primary_binary_component(adapter),
                     "platform": platform_id,
                     "path": str(path),
                     "size_bytes": path.stat().st_size,
@@ -257,28 +320,30 @@ def list_binary_installations(*, install_dir: Path) -> dict[str, Any]:
 def resolve_binary_reference(
     *,
     adapter: str,
+    component: str | None = None,
     config: AppConfig,
     state: AppState,
     requested_platform: str | None = None,
     path_lookup: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     spec = binary_spec(adapter)
+    resolved_component = normalize_binary_component(adapter, component)
     platform_id = resolve_platform_id(requested_platform)
     if platform_id not in spec.supported_platforms:
         raise ValueError(f"Unsupported platform '{platform_id}' for adapter '{adapter}'")
     lookup = path_lookup or shutil.which
     managed_install_dir = _configured_install_dir(config, None)
     candidates: list[dict[str, Any]] = []
-    managed_candidate = _managed_candidate(adapter, platform_id, managed_install_dir)
+    managed_candidate = _managed_candidate(adapter, platform_id, managed_install_dir, resolved_component)
     if managed_candidate:
         candidates.append(managed_candidate)
-    system_candidate = _system_path_candidate(adapter, platform_id, lookup) if config.binary_resolution.allow_system_path else None
+    system_candidate = _system_path_candidate(adapter, platform_id, lookup, resolved_component) if config.binary_resolution.allow_system_path else None
     if system_candidate:
         if config.binary_resolution.prefer_managed_install:
             candidates.append(system_candidate)
         else:
             candidates.insert(0, system_candidate)
-    cache_candidate = _local_cache_candidate(adapter, platform_id, state)
+    cache_candidate = _local_cache_candidate(adapter, platform_id, state, resolved_component)
     if cache_candidate:
         candidates.append(cache_candidate)
     for candidate in candidates:
@@ -286,6 +351,7 @@ def resolve_binary_reference(
             return {
                 "ok": True,
                 "adapter": adapter,
+                "component": resolved_component,
                 "platform": platform_id,
                 "resolved": True,
                 "source": candidate["source"],
@@ -296,12 +362,13 @@ def resolve_binary_reference(
     provider_available = False
     provider_message = ""
     if config.binary_resolution.provider_manifest:
-        provider_available = _manifest_has_entry(config.binary_resolution.provider_manifest, adapter, platform_id)
+        provider_available = _manifest_has_entry(config.binary_resolution.provider_manifest, adapter, platform_id, resolved_component)
         if provider_available:
-            provider_message = "Provider manifest contains a managed binary entry"
+            provider_message = f"Provider manifest contains a managed binary entry for component '{resolved_component}'"
     return {
         "ok": False,
         "adapter": adapter,
+        "component": resolved_component,
         "platform": platform_id,
         "resolved": False,
         "source": "",
@@ -309,22 +376,23 @@ def resolve_binary_reference(
         "provider_manifest": config.binary_resolution.provider_manifest,
         "managed_install_dir": config.binary_resolution.managed_install_dir,
         "provider_available": provider_available,
-        "message": provider_message or f"No binary source is available for adapter '{adapter}' on platform '{platform_id}'",
+        "message": provider_message or _missing_binary_message(adapter, resolved_component, platform_id),
     }
 
 
 def _plan_entry(
     *,
     adapter: str,
+    component: str,
     platform_id: str,
     entry: ProviderBinary,
     install_dir: Path | None,
     config: AppConfig,
     state: AppState,
 ) -> dict[str, Any]:
-    destination = _binary_destination(install_dir, adapter, platform_id) if install_dir else None
+    destination = _binary_destination(install_dir, adapter, platform_id, component) if install_dir else None
     destination_status = _installed_status(destination, entry.sha256) if destination else {"exists": False, "checksum_match": False}
-    sources = _source_candidates(adapter=adapter, platform_id=platform_id, entry=entry, config=config, state=state)
+    sources = _source_candidates(adapter=adapter, component=component, platform_id=platform_id, entry=entry, config=config, state=state)
     selected_source = _select_install_source(sources)
     result = "already_installed" if destination_status["checksum_match"] else "install_dir_required"
     if install_dir and selected_source:
@@ -333,9 +401,10 @@ def _plan_entry(
         result = "already_installed"
     return {
         "adapter": adapter,
+        "component": component,
         "platform": platform_id,
         "version": entry.version,
-        "binary_name": _managed_binary_name(adapter, platform_id),
+        "binary_name": _managed_binary_name(adapter, platform_id, component),
         "manifest_url": entry.url,
         "manifest_sha256": entry.sha256,
         "manifest_size_bytes": entry.size_bytes,
@@ -353,19 +422,21 @@ def _plan_entry(
 def _install_entry(
     *,
     adapter: str,
+    component: str,
     platform_id: str,
     entry: ProviderBinary,
     install_dir: Path,
     config: AppConfig,
     state: AppState,
 ) -> dict[str, Any]:
-    destination = _binary_destination(install_dir, adapter, platform_id)
+    destination = _binary_destination(install_dir, adapter, platform_id, component)
     install_dir.mkdir(parents=True, exist_ok=True)
     _validate_destination_path(destination, install_dir)
     destination_status = _installed_status(destination, entry.sha256)
     if destination_status["checksum_match"]:
         return {
             "adapter": adapter,
+            "component": component,
             "platform": platform_id,
             "result": "already_installed",
             "source": "managed_install",
@@ -375,10 +446,10 @@ def _install_entry(
             "size_bytes": destination.stat().st_size,
         }
 
-    sources = _source_candidates(adapter=adapter, platform_id=platform_id, entry=entry, config=config, state=state)
+    sources = _source_candidates(adapter=adapter, component=component, platform_id=platform_id, entry=entry, config=config, state=state)
     selected_source = _select_install_source(sources)
     if selected_source is None:
-        raise ValueError(f"No verified binary source is available for adapter '{adapter}' on platform '{platform_id}'")
+        raise ValueError(_missing_binary_message(adapter, component, platform_id))
     if selected_source["source"] == "provider_download":
         payload = _download_provider_binary(entry)
         binary_bytes = payload["bytes"]
@@ -390,11 +461,12 @@ def _install_entry(
         binary_bytes = source_path.read_bytes()
         sha256_value = _sha256_bytes(binary_bytes)
         if sha256_value.lower() != entry.sha256.lower():
-            raise ValueError(f"Checksum verification failed for adapter '{adapter}'")
+            raise ValueError(f"Checksum verification failed for adapter '{adapter}' component '{component}'")
         size_bytes = len(binary_bytes)
     _atomic_write(destination, binary_bytes, executable=not platform_id.startswith("windows"))
     return {
         "adapter": adapter,
+        "component": component,
         "platform": platform_id,
         "result": "installed",
         "source": selected_source["source"],
@@ -409,6 +481,7 @@ def _install_entry(
 def _source_candidates(
     *,
     adapter: str,
+    component: str,
     platform_id: str,
     entry: ProviderBinary,
     config: AppConfig,
@@ -416,11 +489,11 @@ def _source_candidates(
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     if config.binary_resolution.allow_system_path:
-        system_candidate = _system_path_candidate(adapter, platform_id, shutil.which)
+        system_candidate = _system_path_candidate(adapter, platform_id, shutil.which, component)
         if system_candidate:
             system_candidate["checksum_match"] = _candidate_checksum_match(system_candidate["path"], entry.sha256)
             candidates.append(system_candidate)
-    cache_candidate = _local_cache_candidate(adapter, platform_id, state)
+    cache_candidate = _local_cache_candidate(adapter, platform_id, state, component)
     if cache_candidate:
         cache_candidate["checksum_match"] = _candidate_checksum_match(cache_candidate["path"], entry.sha256)
         candidates.append(cache_candidate)
@@ -448,15 +521,15 @@ def _select_install_source(candidates: list[dict[str, Any]]) -> dict[str, Any] |
     return None
 
 
-def _managed_candidate(adapter: str, platform_id: str, install_dir: Path | None) -> dict[str, Any] | None:
+def _managed_candidate(adapter: str, platform_id: str, install_dir: Path | None, component: str) -> dict[str, Any] | None:
     if install_dir is None:
         return None
-    path = _binary_destination(install_dir, adapter, platform_id)
+    path = _binary_destination(install_dir, adapter, platform_id, component)
     return {"source": "managed_install", "path": str(path), "exists": path.exists()}
 
 
-def _local_cache_candidate(adapter: str, platform_id: str, state: AppState) -> dict[str, Any] | None:
-    record = state.binaries.get(adapter)
+def _local_cache_candidate(adapter: str, platform_id: str, state: AppState, component: str) -> dict[str, Any] | None:
+    record = state.binaries.get(binary_record_key(adapter, component))
     if record is None:
         return None
     if record.platform != platform_id:
@@ -468,18 +541,18 @@ def _system_path_candidate(
     adapter: str,
     platform_id: str,
     path_lookup: Callable[[str], str | None],
+    component: str,
 ) -> dict[str, Any] | None:
-    for name in _path_lookup_names(adapter, platform_id):
+    for name in _path_lookup_names(adapter, platform_id, component):
         resolved = path_lookup(name)
         if resolved:
             return {"source": "system_path", "path": resolved, "exists": True}
     return None
 
 
-def _path_lookup_names(adapter: str, platform_id: str) -> tuple[str, ...]:
-    spec = binary_spec(adapter)
-    names = [spec.binary_name]
-    managed_name = _managed_binary_name(adapter, platform_id)
+def _path_lookup_names(adapter: str, platform_id: str, component: str) -> tuple[str, ...]:
+    names = [normalize_binary_component(adapter, component)]
+    managed_name = _managed_binary_name(adapter, platform_id, component)
     if managed_name not in names:
         names.append(managed_name)
     return tuple(names)
@@ -497,9 +570,9 @@ def _download_provider_binary(entry: ProviderBinary) -> dict[str, Any]:
     payload = _download_url_bytes(entry.url, expected_host=(urllib.parse.urlparse(entry.url).hostname or "").lower())
     actual_sha = _sha256_bytes(payload)
     if actual_sha.lower() != entry.sha256.lower():
-        raise ValueError(f"Checksum verification failed for adapter '{entry.adapter}'")
+        raise ValueError(f"Checksum verification failed for adapter '{entry.adapter}' component '{entry.component}'")
     if entry.size_bytes and len(payload) != entry.size_bytes:
-        raise ValueError(f"Size verification failed for adapter '{entry.adapter}'")
+        raise ValueError(f"Size verification failed for adapter '{entry.adapter}' component '{entry.component}'")
     return {"bytes": payload, "sha256": actual_sha, "size_bytes": len(payload)}
 
 
@@ -538,15 +611,12 @@ def _validate_provider_url(url: str, *, expected_host: str) -> None:
         raise ValueError("Path traversal blocked in provider binary URL")
 
 
-def _binary_destination(install_dir: Path, adapter: str, platform_id: str) -> Path:
-    return (install_dir / adapter / platform_id / _managed_binary_name(adapter, platform_id)).resolve()
+def _binary_destination(install_dir: Path, adapter: str, platform_id: str, component: str | None = None) -> Path:
+    return (install_dir / adapter / platform_id / _managed_binary_name(adapter, platform_id, component)).resolve()
 
 
-def _managed_binary_name(adapter: str, platform_id: str) -> str:
-    filename = binary_spec(adapter).binary_name
-    if platform_id.startswith("windows") and not filename.endswith(".exe"):
-        return f"{filename}.exe"
-    return filename
+def _managed_binary_name(adapter: str, platform_id: str, component: str | None = None) -> str:
+    return binary_filename_for_component(adapter, component, platform_id=platform_id)
 
 
 def _installed_status(path: Path, expected_sha256: str) -> dict[str, Any]:
@@ -633,14 +703,14 @@ def _write_summary(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _manifest_has_entry(manifest_path: str, adapter: str, platform_id: str) -> bool:
+def _manifest_has_entry(manifest_path: str, adapter: str, platform_id: str, component: str | None = None) -> bool:
     try:
         manifest = load_manifest(
             manifest_file=Path(manifest_path),
             allow_provider_host=None,
             require_allowlisted_remote_host=False,
         )
-        select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id)
+        select_manifest_binary(manifest, adapter=adapter, platform_id=platform_id, component=component)
         return True
     except Exception:
         return False
@@ -662,3 +732,60 @@ def _sha256_file(path: Path) -> str:
 
 def _audit(action: str, profile: str, details: dict[str, Any], path: Path) -> None:
     write_audit_log(action, profile, details, path)
+
+
+def _aggregate_plan_entry(*, adapter: str, platform_id: str, component_plans: list[dict[str, Any]]) -> dict[str, Any]:
+    primary = next((item for item in component_plans if item.get("component") == primary_binary_component(adapter)), component_plans[0])
+    selected_sources = [item.get("selected_source", "") for item in component_plans if item.get("selected_source")]
+    destinations = [item.get("destination", "") for item in component_plans if item.get("destination")]
+    if all(item.get("result") == "already_installed" for item in component_plans):
+        result = "already_installed"
+    elif any(item.get("result") == "replace" for item in component_plans):
+        result = "replace"
+    elif any(item.get("result") == "install" for item in component_plans):
+        result = "install"
+    else:
+        result = "install_dir_required"
+    return {
+        "adapter": adapter,
+        "platform": platform_id,
+        "binary_name": _managed_binary_name(adapter, platform_id),
+        "required_components": list(binary_components(adapter)),
+        "components": component_plans,
+        "destination": primary.get("destination", destinations[0] if destinations else ""),
+        "selected_source": primary.get("selected_source", selected_sources[0] if selected_sources else ""),
+        "result": result,
+        "missing_components": [],
+    }
+
+
+def _aggregate_apply_entry(*, adapter: str, platform_id: str, component_results: list[dict[str, Any]]) -> dict[str, Any]:
+    primary = next((item for item in component_results if item.get("component") == primary_binary_component(adapter)), component_results[0])
+    failed_components = [item.get("component", "") for item in component_results if item.get("result") == "failed"]
+    if failed_components:
+        result = "failed"
+    elif any(item.get("result") == "missing_from_manifest" for item in component_results):
+        result = "missing_from_manifest"
+    elif all(item.get("result") == "already_installed" for item in component_results):
+        result = "already_installed"
+    else:
+        result = "installed"
+    return {
+        "adapter": adapter,
+        "platform": platform_id,
+        "result": result,
+        "required_components": list(binary_components(adapter)),
+        "components": component_results,
+        "failed_components": failed_components,
+        "message": "; ".join(item.get("message", "") for item in component_results if item.get("message")),
+        "source": primary.get("source", ""),
+        "destination": primary.get("destination", ""),
+        "version": primary.get("version", ""),
+        "sha256": primary.get("sha256", ""),
+    }
+
+
+def _missing_binary_message(adapter: str, component: str, platform_id: str) -> str:
+    if len(binary_components(adapter)) > 1:
+        return f"No verified binary source is available for adapter '{adapter}' component '{component}' on platform '{platform_id}'"
+    return f"No binary source is available for adapter '{adapter}' on platform '{platform_id}'"

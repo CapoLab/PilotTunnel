@@ -240,6 +240,12 @@ def _binary_status(
             warnings.append(f"Adapter '{adapter_name}' uses system dependency '{plan.get('system_command')}'")
     elif status in {"template_only", "listed_only"}:
         warnings.append(f"Adapter '{adapter_name}' is categorized as '{status}'")
+    elif status == "partial_import":
+        missing_components = plan.get("missing_components") or []
+        if missing_components:
+            blockers.append(f"Binary for adapter '{adapter_name}' is missing required components: {', '.join(missing_components)}")
+        else:
+            blockers.append(f"Binary for adapter '{adapter_name}' is only partially imported")
     elif not imported:
         warnings.append(f"Binary for adapter '{adapter_name}' is '{coverage or status}' and not imported yet")
     return {
@@ -256,6 +262,10 @@ def _binary_status(
         "checksum": plan.get("checksum"),
         "imported_path": plan.get("imported_path"),
         "supported_platforms": plan.get("supported_platforms"),
+        "required_components": plan.get("required_components", []),
+        "verified_components": plan.get("verified_components", []),
+        "missing_components": plan.get("missing_components", []),
+        "component_paths": plan.get("component_paths", {}),
         "download_performed": plan.get("download_performed", False),
         "system_command": plan.get("system_command"),
         "system_command_available": plan.get("system_command_available", False),

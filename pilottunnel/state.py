@@ -40,6 +40,7 @@ class BinaryRecord:
     provider_host: str = ""
     downloaded_at: str = ""
     run_version_result: dict[str, Any] = field(default_factory=dict)
+    component: str = ""
 
 
 @dataclass
@@ -49,6 +50,7 @@ class AppState:
     manual_active_tunnel: str = ""
     manual_previous_tunnel: str = ""
     last_manual_switch: dict[str, Any] = field(default_factory=dict)
+    active_link_candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def clone(self) -> "AppState":
         return copy.deepcopy(self)
@@ -66,6 +68,7 @@ def load_state(path: Path = DEFAULT_STATE_PATH) -> AppState:
         manual_active_tunnel=data.get("manual_active_tunnel", ""),
         manual_previous_tunnel=data.get("manual_previous_tunnel", ""),
         last_manual_switch=data.get("last_manual_switch") or {},
+        active_link_candidates=data.get("active_link_candidates") or {},
     )
 
 

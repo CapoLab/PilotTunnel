@@ -20,16 +20,25 @@ def render_unit_file(
     command: str,
     output_dir: Path,
     apply_changes: bool,
+    environment: dict[str, str] | None = None,
 ) -> UnitRenderResult:
     path = output_dir / unit_name
-    content = "\n".join(
+    service_lines = [
+        "# Managed-by: PilotTunnel",
+        "[Unit]",
+        f"Description={description}",
+        "",
+        "[Service]",
+        "Type=simple",
+    ]
+    for key, value in sorted((environment or {}).items()):
+        safe_key = key.strip()
+        if not safe_key or any(char.isspace() for char in safe_key):
+            raise ValueError(f"Invalid systemd environment variable name: {key!r}")
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        service_lines.append(f'Environment="{safe_key}={escaped}"')
+    service_lines.extend(
         [
-            "# Managed-by: PilotTunnel",
-            "[Unit]",
-            f"Description={description}",
-            "",
-            "[Service]",
-            "Type=simple",
             f"ExecStart={command}",
             "Restart=always",
             "",
@@ -38,6 +47,7 @@ def render_unit_file(
             "",
         ]
     )
+    content = "\n".join(service_lines)
     if apply_changes:
         output_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")

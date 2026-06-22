@@ -13,11 +13,12 @@ from .binary_install import resolve_binary_reference
 from .config import AppConfig, Profile, canonical_runtime_role
 from .state import AppState
 
-SUPPORTED_RUNTIME_ADAPTERS = {"rathole", "frp", "gost"}
+SUPPORTED_RUNTIME_ADAPTERS = {"rathole", "frp", "gost", "chisel"}
 SUPPORTED_RUNTIME_TRANSPORTS = {
     "rathole": {"tcp"},
     "frp": {"tcp"},
     "gost": {"tcp"},
+    "chisel": {"tcp"},
 }
 
 
@@ -184,6 +185,7 @@ def _profile_runtime_plan(
     try:
         binary_resolution = resolve_binary_reference(
             adapter=adapter_name,
+            component=_runtime_component(adapter_name, profile.role),
             config=config,
             state=state,
             requested_platform=requested_platform,
@@ -278,6 +280,12 @@ def _healthcheck_summary(profile: Profile) -> dict[str, Any]:
         "service_port": profile.ports.service_port,
         "check_port": profile.ports.check_port,
     }
+
+
+def _runtime_component(adapter_name: str, role: str) -> str | None:
+    if adapter_name != "frp":
+        return None
+    return "frps" if role == "controller" else "frpc"
 
 
 def _redact_text(value: str) -> str:

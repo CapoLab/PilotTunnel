@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pilottunnel import cli
-from pilottunnel.binaries import binary_spec, current_platform_id
+from pilottunnel.binaries import binary_components, binary_filename_for_component, current_platform_id
 from pilottunnel.config import AppConfig, BinaryResolutionSettings, Profile, ProfilePorts, save_config
 from pilottunnel.state import AppState, save_state
 
@@ -70,12 +70,11 @@ class ServiceRenderPlanTests(unittest.TestCase):
         install_dir = self.base / "managed-install"
         platform_id = current_platform_id()
         for adapter in adapters:
-            filename = binary_spec(adapter).binary_name
-            if platform_id.startswith("windows") and not filename.endswith(".exe"):
-                filename = f"{filename}.exe"
-            binary_path = install_dir / adapter / platform_id / filename
-            binary_path.parent.mkdir(parents=True, exist_ok=True)
-            binary_path.write_bytes(f"{adapter}-binary".encode("utf-8"))
+            for component in binary_components(adapter):
+                filename = binary_filename_for_component(adapter, component, platform_id=platform_id)
+                binary_path = install_dir / adapter / platform_id / filename
+                binary_path.parent.mkdir(parents=True, exist_ok=True)
+                binary_path.write_bytes(f"{adapter}-{component}-binary".encode("utf-8"))
         return install_dir
 
     def _write_config(self, profiles: list[Profile], *, managed_install_dir: Path) -> None:
@@ -255,8 +254,8 @@ class ServiceRenderPlanTests(unittest.TestCase):
         service = json.loads(output)["services"][0]
         content = Path(service["staged_unit_file_path"]).read_text(encoding="utf-8")
         self.assertIn("ExecStart=", content)
-        self.assertIn("frpc", content)
-        self.assertIn("frp-controller.ini", content)
+        self.assertIn("frps", content)
+        self.assertIn("frp-controller.toml", content)
 
     def test_staged_unit_content_contains_expected_execstart_for_gost(self) -> None:
         install_dir = self._managed_install_dir("gost")
@@ -267,4 +266,4 @@ class ServiceRenderPlanTests(unittest.TestCase):
         content = Path(service["staged_unit_file_path"]).read_text(encoding="utf-8")
         self.assertIn("ExecStart=", content)
         self.assertIn("gost", content)
-        self.assertIn("gost-controller.toml", content)
+        self.assertIn("gost-controller.yaml", content)

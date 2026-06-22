@@ -24,6 +24,7 @@ class BinarySpec:
     source_type: str
     system_command: str = ""
     notes: str = ""
+    components: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,12 +49,23 @@ class BinaryPlan:
     source_provider: str = ""
     downloaded_at: str = ""
     notes: str = ""
+    required_components: tuple[str, ...] = ()
+    verified_components: tuple[str, ...] = ()
+    missing_components: tuple[str, ...] = ()
+    component_paths: dict[str, str] | None = None
 
 
 BINARY_SPECS: dict[str, BinarySpec] = {
     "backhaul": BinarySpec("backhaul", "backhaul", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
     "rathole": BinarySpec("rathole", "rathole", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
-    "frp": BinarySpec("frp", "frpc", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
+    "frp": BinarySpec(
+        "frp",
+        "frpc",
+        ("linux-amd64", "linux-arm64", "windows-amd64"),
+        "provider_required",
+        "official_release",
+        components=("frpc", "frps"),
+    ),
     "gost": BinarySpec("gost", "gost", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
     "chisel": BinarySpec("chisel", "chisel", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
     "realm": BinarySpec("realm", "realm", ("linux-amd64", "linux-arm64", "windows-amd64"), "provider_required", "official_release"),
@@ -70,6 +82,69 @@ def all_binary_adapters() -> tuple[str, ...]:
 
 def provider_required_adapters() -> tuple[str, ...]:
     return tuple(adapter for adapter, spec in BINARY_SPECS.items() if spec.coverage == "provider_required")
+
+
+def split_binary_identity(identity: str, component: str | None = None) -> tuple[str, str | None]:
+    raw_identity = identity.strip()
+    if ":" not in raw_identity:
+        return raw_identity, component
+    adapter_name, qualified_component = raw_identity.split(":", 1)
+    if component and component != qualified_component:
+        raise ValueError(
+            f"Binary component mismatch for adapter '{adapter_name}': "
+            f"qualified identifier requested '{qualified_component}' but component '{component}' was provided"
+        )
+    return adapter_name, component or qualified_component
+
+
+def binary_components(adapter: str) -> tuple[str, ...]:
+    adapter_name, _component = split_binary_identity(adapter)
+    spec = binary_spec(adapter_name)
+    return spec.components or (spec.binary_name,)
+
+
+def primary_binary_component(adapter: str) -> str:
+    return binary_components(adapter)[0]
+
+
+def normalize_binary_component(adapter: str, component: str | None) -> str:
+    adapter_name, qualified_component = split_binary_identity(adapter, component)
+    resolved = (qualified_component or primary_binary_component(adapter_name)).strip()
+    if resolved not in binary_components(adapter_name):
+        raise ValueError(f"Unknown binary component '{qualified_component}' for adapter '{adapter_name}'")
+    return resolved
+
+
+def binary_record_key(adapter: str, component: str | None = None) -> str:
+    adapter_name, qualified_component = split_binary_identity(adapter, component)
+    resolved = normalize_binary_component(adapter_name, qualified_component)
+    if resolved == primary_binary_component(adapter_name):
+        return adapter_name
+    return f"{adapter_name}:{resolved}"
+
+
+def binary_filename_for_component(adapter: str, component: str | None = None, *, platform_id: str | None = None) -> str:
+    adapter_name, qualified_component = split_binary_identity(adapter, component)
+    filename = normalize_binary_component(adapter_name, qualified_component)
+    resolved_platform = platform_id or current_platform_id()
+    if resolved_platform.startswith("windows") and not filename.endswith(".exe"):
+        return f"{filename}.exe"
+    return filename
+
+
+def binary_records_for_adapter(state: AppState | None, adapter: str) -> dict[str, BinaryRecord]:
+    if state is None:
+        return {}
+    adapter_name, _component = split_binary_identity(adapter)
+    records: dict[str, BinaryRecord] = {}
+    for component in binary_components(adapter_name):
+        record = state.binaries.get(binary_record_key(adapter_name, component))
+        if record is None and component == primary_binary_component(adapter_name):
+            record = state.binaries.get(adapter_name)
+        if record is None:
+            continue
+        records[component] = record
+    return records
 
 
 def supported_platforms() -> set[str]:
@@ -96,19 +171,24 @@ def current_platform_id() -> str:
 
 
 def binary_spec(adapter: str) -> BinarySpec:
+    adapter_name, _component = split_binary_identity(adapter)
     try:
-        return BINARY_SPECS[adapter]
+        return BINARY_SPECS[adapter_name]
     except KeyError as exc:
-        raise KeyError(f"Unknown binary adapter '{adapter}'") from exc
+        raise KeyError(f"Unknown binary adapter '{adapter_name}'") from exc
 
 
 def binary_catalog(root: Path, state: AppState | None = None) -> dict[str, BinaryPlan]:
     layout = cache_layout(root)
     catalog: dict[str, BinaryPlan] = {}
     for adapter, spec in BINARY_SPECS.items():
-        record = state.binaries.get(adapter) if state else None
-        status = _status_for(spec, record)
-        imported_path = record.imported_path if record else str(layout["bin_dir"] / binary_filename(adapter))
+        records = binary_records_for_adapter(state, adapter)
+        primary_record = records.get(primary_binary_component(adapter))
+        status = _status_for(spec, records)
+        imported_path = primary_record.imported_path if primary_record else str(layout["bin_dir"] / binary_filename(adapter))
+        required_components = binary_components(adapter)
+        verified_components = tuple(component for component in required_components if component in records)
+        missing_components = tuple(component for component in required_components if component not in records)
         catalog[adapter] = BinaryPlan(
             adapter=adapter,
             binary_name=spec.binary_name,
@@ -116,20 +196,24 @@ def binary_catalog(root: Path, state: AppState | None = None) -> dict[str, Binar
             install_status=status,
             expected_cache_path=str(layout["cache_dir"] / adapter / spec.binary_name),
             expected_bin_path=_expected_bin_path(spec, layout),
-            source_type=record.source_type if record else spec.source_type,
-            version=record.version if record else _planned_version(spec),
-            checksum=record.sha256 if record else None,
-            download_performed=bool(record and record.downloaded_at),
-            imported_path=record.imported_path if record else (imported_path if spec.coverage == "provider_required" else None),
-            executable=record.executable if record else None,
-            run_version_result=record.run_version_result if record and record.run_version_result else None,
+            source_type=primary_record.source_type if primary_record else spec.source_type,
+            version=_component_versions(required_components, records) or _planned_version(spec),
+            checksum=primary_record.sha256 if primary_record else None,
+            download_performed=any(record.downloaded_at for record in records.values()),
+            imported_path=primary_record.imported_path if primary_record else (imported_path if spec.coverage == "provider_required" else None),
+            executable=primary_record.executable if primary_record else None,
+            run_version_result=primary_record.run_version_result if primary_record and primary_record.run_version_result else None,
             coverage=spec.coverage,
             system_command=spec.system_command,
             system_command_available=bool(spec.system_command and shutil.which(spec.system_command)),
-            provider_host=record.provider_host if record else "",
-            source_provider=record.source_provider if record else "",
-            downloaded_at=record.downloaded_at if record else "",
+            provider_host=primary_record.provider_host if primary_record else "",
+            source_provider=primary_record.source_provider if primary_record else "",
+            downloaded_at=primary_record.downloaded_at if primary_record else "",
             notes=spec.notes,
+            required_components=required_components,
+            verified_components=verified_components,
+            missing_components=missing_components,
+            component_paths={component: record.imported_path for component, record in records.items()} or {},
         )
     return catalog
 
@@ -154,11 +238,7 @@ def cache_layout(root: Path) -> dict[str, Path]:
 
 
 def binary_filename(adapter: str) -> str:
-    spec = binary_spec(adapter)
-    filename = spec.binary_name
-    if platform.system().lower().startswith("win") and not filename.endswith(".exe"):
-        return f"{filename}.exe"
-    return filename
+    return binary_filename_for_component(adapter)
 
 
 def import_binary(
@@ -174,10 +254,12 @@ def import_binary(
     source_provider: str = "",
     provider_host: str = "",
     downloaded_at: str = "",
+    component: str | None = None,
 ) -> dict[str, Any]:
     spec = binary_spec(adapter)
     if spec.coverage != "provider_required":
         raise ValueError(f"Adapter '{adapter}' uses '{spec.coverage}' and does not support binary import")
+    resolved_component = normalize_binary_component(adapter, component)
     if ".." in source.as_posix().split("/"):
         raise ValueError(f"Path traversal blocked for source path: {source}")
     source_path = source.resolve()
@@ -192,7 +274,7 @@ def import_binary(
     cache_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    imported_path = (bin_dir / binary_filename(adapter)).resolve()
+    imported_path = (bin_dir / binary_filename_for_component(adapter, resolved_component)).resolve()
     if layout["root"] not in imported_path.parents:
         raise ValueError(f"Refusing to write outside cache root: {imported_path}")
     if imported_path.exists() and not force:
@@ -224,10 +306,12 @@ def import_binary(
         source_provider=source_provider,
         provider_host=provider_host,
         downloaded_at=downloaded_at,
+        component=resolved_component,
     )
-    state.binaries[adapter] = record
+    state.binaries[binary_record_key(adapter, resolved_component)] = record
     return {
         "adapter": adapter,
+        "component": resolved_component,
         "imported_path": str(imported_path),
         "cached_source_path": str(cached_source),
         "sha256": sha256_actual,
@@ -328,9 +412,11 @@ def _run_version(path: Path, *, timeout_seconds: float) -> dict[str, Any]:
         }
 
 
-def _status_for(spec: BinarySpec, record: BinaryRecord | None) -> str:
-    if record is not None:
+def _status_for(spec: BinarySpec, records: dict[str, BinaryRecord]) -> str:
+    if records and len(records) == len(spec.components or (spec.binary_name,)):
         return "imported"
+    if records:
+        return "partial_import"
     if spec.coverage == "system_dependency":
         return "system_dependency"
     if spec.coverage == "template_only":
@@ -343,16 +429,22 @@ def _status_for(spec: BinarySpec, record: BinaryRecord | None) -> str:
 def _expected_bin_path(spec: BinarySpec, layout: dict[str, Path]) -> str:
     if spec.coverage == "system_dependency":
         return shutil.which(spec.system_command) or spec.system_command
-    filename = spec.binary_name
-    if platform.system().lower().startswith("win") and not filename.endswith(".exe"):
-        filename = f"{filename}.exe"
-    return str(layout["bin_dir"] / filename)
+    return str(layout["bin_dir"] / binary_filename_for_component(spec.adapter, primary_binary_component(spec.adapter)))
 
 
 def _planned_version(spec: BinarySpec) -> str:
     if spec.coverage == "system_dependency":
         return "system"
     return "planned"
+
+
+def _component_versions(required_components: tuple[str, ...], records: dict[str, BinaryRecord]) -> str:
+    versions = {records[component].version for component in required_components if component in records}
+    if not versions:
+        return ""
+    if len(versions) == 1:
+        return next(iter(versions))
+    return "mixed"
 
 
 def _sanitize_output(value: str) -> str:

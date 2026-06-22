@@ -391,10 +391,18 @@ def _binary_section(config: AppConfig, state: AppState, work_dir: Path) -> dict[
             "catalog_status": catalog_plan.get("install_status", ""),
             "catalog_expected_bin_path": catalog_plan.get("expected_bin_path", ""),
             "catalog_expected_cache_path": catalog_plan.get("expected_cache_path", ""),
+            "required_components": catalog_plan.get("required_components", []),
+            "verified_components": catalog_plan.get("verified_components", []),
+            "missing_components": catalog_plan.get("missing_components", []),
             "system_command_available": catalog_plan.get("system_command_available", False),
             "message": resolution.get("message", ""),
         }
         plans.append(plan)
+        if catalog_plan.get("install_status") == "partial_import":
+            blockers.append("Binary resolver is not ready")
+            blockers.append(
+                f"Adapter '{adapter}' is missing required components: {', '.join(catalog_plan.get('missing_components', []))}"
+            )
         if not resolution.get("ok"):
             blockers.append("Binary resolver is not ready")
             blockers.append(resolution.get("message", f"Binary resolver is not ready for adapter '{adapter}'"))

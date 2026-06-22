@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from pilottunnel import cli
-from pilottunnel.binaries import all_binary_adapters, binary_spec, current_platform_id, provider_required_adapters
+from pilottunnel.binaries import all_binary_adapters, binary_components, binary_spec, current_platform_id, provider_required_adapters
 from pilottunnel.bootstrap import build_bootstrap_command
 from pilottunnel.upstream_sources import (
     SOURCE_SUMMARY_FILENAME,
@@ -80,11 +80,13 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         platform_id: str | None = None,
         binary_name: str | None = None,
         filename: str | None = None,
+        component: str | None = None,
     ) -> dict[str, object]:
-        spec = binary_spec(adapter)
+        resolved_component = component or (binary_name if binary_name in binary_components(adapter) else binary_components(adapter)[0])
         return {
             "adapter": adapter,
-            "binary_name": binary_name or spec.binary_name,
+            "binary_name": binary_name or resolved_component,
+            "component": resolved_component,
             "version": "v0.0.1",
             "platform": platform_id or current_platform_id(),
             "filename": filename or Path(urllib.parse.urlparse(url).path).name,
@@ -112,17 +114,28 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
 
     def _supported_manifest_entries(self, base_url: str, metadata: dict[str, dict[str, object]]) -> list[dict[str, object]]:
         platform_id = current_platform_id()
-        return [
-            self._manifest_entry(
-                adapter=adapter,
-                url=f"{base_url}/{info['relative_path']}",
-                sha256=str(info["sha256"]),
-                size_bytes=int(info["size_bytes"]),
-                platform_id=platform_id,
+        entries: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for info in metadata.values():
+            adapter = str(info["adapter"])
+            component = str(info["component"])
+            if (adapter, component) in seen:
+                continue
+            if platform_id not in binary_spec(adapter).supported_platforms:
+                continue
+            seen.add((adapter, component))
+            entries.append(
+                self._manifest_entry(
+                    adapter=adapter,
+                    component=component,
+                    binary_name=str(info["binary_name"]),
+                    url=f"{base_url}/{info['relative_path']}",
+                    sha256=str(info["sha256"]),
+                    size_bytes=int(info["size_bytes"]),
+                    platform_id=platform_id,
+                )
             )
-            for adapter, info in metadata.items()
-            if platform_id in binary_spec(adapter).supported_platforms
-        ]
+        return entries
 
     def _provider_fixture(self, adapters: tuple[str, ...] | None = None) -> tuple[Path, dict[str, dict[str, object]]]:
         fixture_root = self.base / "provider-fixture"
@@ -130,17 +143,22 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         binaries_root.mkdir(parents=True, exist_ok=True)
         metadata: dict[str, dict[str, object]] = {}
         for adapter in adapters or provider_required_adapters():
-            spec = binary_spec(adapter)
-            payload = f"{adapter}-fixture".encode("utf-8")
-            relative_path = Path("binaries") / f"{adapter}-{spec.binary_name}"
-            binary_path = fixture_root / relative_path
-            binary_path.write_bytes(payload)
-            metadata[adapter] = {
-                "binary_name": spec.binary_name,
-                "relative_path": relative_path.as_posix(),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "size_bytes": len(payload),
-            }
+            for index, component in enumerate(binary_components(adapter)):
+                payload = f"{adapter}-{component}-fixture".encode("utf-8")
+                relative_path = Path("binaries") / f"{adapter}-{component}"
+                binary_path = fixture_root / relative_path
+                binary_path.write_bytes(payload)
+                entry = {
+                    "adapter": adapter,
+                    "component": component,
+                    "binary_name": component,
+                    "relative_path": relative_path.as_posix(),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size_bytes": len(payload),
+                }
+                metadata[f"{adapter}:{component}"] = entry
+                if index == 0:
+                    metadata[adapter] = entry
         return fixture_root, metadata
 
     def _provider_source_tree(self, adapters: tuple[str, ...] | None = None) -> tuple[Path, dict[str, dict[str, object]]]:
@@ -151,18 +169,24 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             platform_id = current_platform_id()
             if platform_id not in spec.supported_platforms:
                 continue
-            binary_dir = source_root / adapter / platform_id
-            binary_dir.mkdir(parents=True, exist_ok=True)
-            payload = f"{adapter}-{platform_id}-fixture".encode("utf-8")
-            binary_path = binary_dir / spec.binary_name
-            binary_path.write_bytes(payload)
-            metadata[adapter] = {
-                "platform": platform_id,
-                "binary_name": spec.binary_name,
-                "relative_path": Path(adapter) / platform_id / spec.binary_name,
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "size_bytes": len(payload),
-            }
+            for index, component in enumerate(binary_components(adapter)):
+                binary_dir = source_root / adapter / platform_id
+                binary_dir.mkdir(parents=True, exist_ok=True)
+                payload = f"{adapter}-{component}-{platform_id}-fixture".encode("utf-8")
+                binary_path = binary_dir / component
+                binary_path.write_bytes(payload)
+                entry = {
+                    "adapter": adapter,
+                    "component": component,
+                    "platform": platform_id,
+                    "binary_name": component,
+                    "relative_path": Path(adapter) / platform_id / component,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size_bytes": len(payload),
+                }
+                metadata[f"{adapter}:{component}"] = entry
+                if index == 0:
+                    metadata[adapter] = entry
         return source_root, metadata
 
     def _sample_asset_name(self, adapter: str, platform_id: str) -> str:
@@ -252,12 +276,28 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 continue
             asset_name = self._sample_asset_name(adapter, platform_id)
             asset_url = f"https://github.com/{source.repo_slug}/releases/download/v0.0.1/{asset_name}"
-            binary_payload = f"{adapter}-{platform_id}-upstream".encode("utf-8")
-            archive_payload = self._archive_payload(
-                source.archive_handling[platform_id],
-                self._sample_member_name(adapter, platform_id),
-                binary_payload,
-            )
+            if adapter == "frp":
+                if source.archive_handling[platform_id] == "tar.gz":
+                    archive_payload = self._tar_gz_payload_from_entries(
+                        [
+                            ("bundle/frpc", f"{adapter}-frpc-{platform_id}-upstream".encode("utf-8"), 0o755),
+                            ("bundle/frps", f"{adapter}-frps-{platform_id}-upstream".encode("utf-8"), 0o755),
+                        ]
+                    )
+                else:
+                    archive_payload = self._zip_payload_from_entries(
+                        [
+                            ("bundle/frpc.exe", f"{adapter}-frpc-{platform_id}-upstream".encode("utf-8"), 0o755),
+                            ("bundle/frps.exe", f"{adapter}-frps-{platform_id}-upstream".encode("utf-8"), 0o755),
+                        ]
+                    )
+            else:
+                binary_payload = f"{adapter}-{platform_id}-upstream".encode("utf-8")
+                archive_payload = self._archive_payload(
+                    source.archive_handling[platform_id],
+                    self._sample_member_name(adapter, platform_id),
+                    binary_payload,
+                )
             release_index[adapter] = {
                 "version": "v0.0.1",
                 "assets": [{"name": asset_name, "url": asset_url}],
@@ -517,9 +557,13 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["schema"], "pilottunnel-binary-provider-v1")
         manifest = json.loads(output_path.read_text(encoding="utf-8"))
-        entries = {(item["adapter"], item["platform"]): item for item in manifest["binaries"]}
-        for adapter, info in metadata.items():
-            key = (adapter, str(info["platform"]))
+        entries = {(item["adapter"], item.get("component"), item["platform"]): item for item in manifest["binaries"]}
+        seen: set[tuple[str, str, str]] = set()
+        for info in metadata.values():
+            key = (str(info["adapter"]), str(info["component"]), str(info["platform"]))
+            if key in seen:
+                continue
+            seen.add(key)
             self.assertIn(key, entries)
             self.assertEqual(entries[key]["filename"], Path(str(info["relative_path"])).name)
             self.assertEqual(entries[key]["sha256"], info["sha256"])
@@ -561,7 +605,12 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             self.assertEqual(item["version"], "v0.0.1")
             self.assertIn(f"/releases/download/{urllib.parse.quote(release_tag)}/", item["url"])
             self.assertIn("example/PilotTunnel-Binaries", item["url"])
-            self.assertTrue(item["filename"].startswith(f"{item['adapter']}-{item['platform']}-v0.0.1-"))
+            expected_prefix = (
+                f"{item['adapter']}-{item['component']}-{item['platform']}-v0.0.1-"
+                if item.get("component") and item["component"] != item["adapter"]
+                else f"{item['adapter']}-{item['platform']}-v0.0.1-"
+            )
+            self.assertTrue(item["filename"].startswith(expected_prefix))
 
     def test_provider_release_assets_writes_manifest_and_normalized_files(self) -> None:
         selected = tuple(provider_required_adapters())
@@ -804,6 +853,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             asset_name="backhaul_linux_amd64.tar.gz",
             archive_type="tar.gz",
             payload=payload,
+            component="backhaul",
         )
         self.assertEqual(extracted, b"binary-payload")
 
@@ -821,6 +871,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             asset_name="backhaul_linux_amd64.tar.gz",
             archive_type="tar.gz",
             payload=payload,
+            component="backhaul",
         )
         self.assertEqual(extracted, b"top-level-backhaul")
 
@@ -838,6 +889,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             asset_name="rathole-x86_64-unknown-linux-gnu.zip",
             archive_type="zip",
             payload=payload,
+            component="rathole",
         )
         self.assertEqual(extracted, b"zip-binary")
 
@@ -853,6 +905,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             asset_name="rathole-x86_64-unknown-linux-gnu.zip",
             archive_type="zip",
             payload=payload,
+            component="rathole",
         )
         self.assertEqual(extracted, b"top-level-rathole")
 
@@ -871,6 +924,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
             asset_name="gost_3.2.6_linux_amd64.tar.gz",
             archive_type="tar.gz",
             payload=payload,
+            component="gost",
         )
         self.assertEqual(extracted, b"top-level-gost")
 
@@ -888,6 +942,7 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 asset_name="backhaul_linux_amd64.tar.gz",
                 archive_type="tar.gz",
                 payload=payload,
+                component="backhaul",
             )
         self.assertIn("Ambiguous binary payloads", str(exc.exception))
 
@@ -954,7 +1009,8 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         for adapter, source in ((adapter, upstream_source(adapter)) for adapter in provider_required_adapters()):
             if current_platform_id() in source.supported_platforms:
                 self.assertEqual(results[adapter]["result"], "downloaded")
-                self.assertTrue((source_dir / adapter / current_platform_id() / source.binary_name).exists())
+                for component in source.components:
+                    self.assertTrue((source_dir / adapter / current_platform_id() / component).exists())
             else:
                 self.assertEqual(results[adapter]["result"], "skipped_unsupported_platform")
 
@@ -1133,12 +1189,16 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
                 fixture_root,
                 [
                     self._manifest_entry(
-                        adapter=adapter,
+                        adapter=str(info["adapter"]),
+                        component=str(info["component"]),
                         url=f"{base_url}/{info['relative_path']}",
                         sha256=str(info["sha256"]),
                         size_bytes=int(info["size_bytes"]),
                     )
-                    for adapter, info in metadata.items()
+                    for info in {(
+                        str(item["adapter"]),
+                        str(item["component"]),
+                    ): item for item in metadata.values()}.values()
                 ],
             )
             code, output = self.run_cli(

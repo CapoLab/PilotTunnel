@@ -928,7 +928,9 @@ class CliWorkflowTests(unittest.TestCase):
         code, output = self.run_cli("staged", "show", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
         self.assertEqual(code, 0)
         payload = json.loads(output)
-        self.assertTrue(any("role = controller" in content for content in payload["configs"].values()))
+        self.assertTrue(any("[server]" in content for content in payload["configs"].values()))
+        self.assertTrue(any('transport = "tcpmux"' in content for content in payload["configs"].values()))
+        self.assertTrue(any('bind_addr = "0.0.0.0:' in content for content in payload["configs"].values()))
 
     def test_path_traversal_staging_root_or_profile_name_is_blocked(self) -> None:
         self.run_cli("init", "--role", "controller")

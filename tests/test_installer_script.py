@@ -277,7 +277,7 @@ class InstallerScriptTests(unittest.TestCase):
                 "--repo-url",
                 repo_url,
                 "--without-binaries",
-                input_text="7\n",
+                input_text="8\n",
                 extra_env={"PILOTTUNNEL_MENU_ALLOW_NON_TTY": "1"},
             )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -292,7 +292,7 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("Opening PilotTunnel menu...", result.stdout)
         self.assertIn("PilotTunnel Menu", result.stdout)
         self.assertIn("1. Setup / Configure this server", result.stdout)
-        self.assertIn("7. Exit", result.stdout)
+        self.assertIn("8. Exit", result.stdout)
         self.assertNotIn("PilotTunnel installer plan", result.stdout)
         self.assertNotIn('"action": "binary-download-all"', result.stdout)
         self.assertNotIn('"results": [', result.stdout)
@@ -569,7 +569,7 @@ class InstallerScriptTests(unittest.TestCase):
             self.write_config_fixture(base_dir)
             result = self.run_menu(
                 base_dir,
-                "1\n1\nworker.example.invalid\n41013\n41012\n41011\n\n7\n",
+                "1\n1\nworker.example.invalid\n41013\n41012\n41011\n\n8\n",
                 extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "198.51.100.10"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -619,7 +619,7 @@ class InstallerScriptTests(unittest.TestCase):
             )
             result = self.run_menu(
                 base_dir,
-                "1\n1\n\n7\n",
+                "1\n1\n\n8\n",
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Current setup:", result.stdout)
@@ -652,7 +652,7 @@ class InstallerScriptTests(unittest.TestCase):
             )
             result = self.run_menu(
                 base_dir,
-                "1\n2\n2\n2\niran.example.invalid\n41041\n41042\n\n7\n",
+                "1\n2\n2\n2\niran.example.invalid\n41041\n41042\n\n8\n",
                 extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "198.51.100.20"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -674,7 +674,7 @@ class InstallerScriptTests(unittest.TestCase):
             self.write_config_fixture(base_dir)
             result = self.run_menu(
                 base_dir,
-                "1\n2\n2\niran.example.invalid\n41051\n41052\n\n7\n",
+                "1\n2\n2\niran.example.invalid\n41051\n41052\n\n8\n",
                 extra_env={"PILOTTUNNEL_LOCAL_ADDRESS_OVERRIDE": "198.51.100.20"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -711,7 +711,7 @@ class InstallerScriptTests(unittest.TestCase):
                     }
                 ],
             )
-            result = self.run_menu(base_dir, "2\n\n7\n")
+            result = self.run_menu(base_dir, "2\n\n8\n")
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Side: Kharej side / worker", result.stdout)
             self.assertIn("Initialized: yes", result.stdout)
@@ -726,7 +726,7 @@ class InstallerScriptTests(unittest.TestCase):
         with self.menu_install_root() as base_dir:
             manifest_path = self.write_manifest_fixture(base_dir)
             self.write_config_fixture(base_dir, role="controller", display_name="entry-node", manifest_path=manifest_path)
-            result = self.run_menu(base_dir, "4\n\n7\n")
+            result = self.run_menu(base_dir, "4\n\n8\n")
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("Required binaries verified:", result.stdout)
             self.assertIn("Missing binaries:", result.stdout)

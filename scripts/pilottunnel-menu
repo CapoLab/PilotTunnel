@@ -1058,6 +1058,101 @@ show_binary_status() {
   show_binary_status_summary
 }
 
+prompt_candidate_adapter() {
+  printf '%bAdapter:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
+  IFS= read -r CANDIDATE_ADAPTER || return 1
+  CANDIDATE_ADAPTER="$(normalize_input "$CANDIDATE_ADAPTER")"
+  [ -n "$CANDIDATE_ADAPTER" ] || {
+    warning "Adapter is required."
+    return 1
+  }
+}
+
+candidate_prepare_all() {
+  section_heading "Prepare all candidates"
+  pt_cli candidate prepare-all
+}
+
+candidate_plan() {
+  prompt_candidate_adapter || return
+  section_heading "Candidate plan"
+  pt_cli candidate plan --adapter "$CANDIDATE_ADAPTER"
+}
+
+candidate_start() {
+  prompt_candidate_adapter || return
+  section_heading "Candidate start"
+  pt_cli candidate start --adapter "$CANDIDATE_ADAPTER"
+}
+
+candidate_stop() {
+  section_heading "Candidate stop"
+  pt_cli candidate stop
+}
+
+candidate_smoke_test() {
+  prompt_candidate_adapter || return
+  section_heading "Candidate smoke test"
+  pt_cli candidate smoke-test --adapter "$CANDIDATE_ADAPTER"
+}
+
+candidate_results() {
+  section_heading "Candidate results"
+  pt_cli candidate result
+}
+
+candidate_testing_menu() {
+  while true; do
+    show_header
+    section_heading "Candidate Testing"
+    if [ "$NODE_ROLE" = "worker" ]; then
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Prepare all candidates" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Show candidate plans" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Start selected candidate" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Stop current candidate" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "5. Show results" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "6. Back" "$RESET"
+      printf '\n'
+      menu_hint "Manual workflow: prepare -> start the selected worker-side candidate -> wait for the controller smoke test."
+      prompt_input
+      IFS= read -r selection || return
+      selection="$(normalize_input "$selection")"
+      case "$selection" in
+        1) candidate_prepare_all; pause_menu ;;
+        2) candidate_plan; pause_menu ;;
+        3) candidate_start; pause_menu ;;
+        4) candidate_stop; pause_menu ;;
+        5) candidate_results; pause_menu ;;
+        6) return ;;
+        *) warning "Enter a number from 1 to 6."; pause_menu ;;
+      esac
+    else
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "1. Prepare all candidates" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Show candidate plans" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Start selected candidate" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Run real smoke test" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "5. Stop current candidate" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "6. Show comparison" "$RESET"
+      printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "7. Back" "$RESET"
+      printf '\n'
+      menu_hint "Manual workflow: prepare -> start the controller side when required -> start the worker side -> run the controller smoke test."
+      prompt_input
+      IFS= read -r selection || return
+      selection="$(normalize_input "$selection")"
+      case "$selection" in
+        1) candidate_prepare_all; pause_menu ;;
+        2) candidate_plan; pause_menu ;;
+        3) candidate_start; pause_menu ;;
+        4) candidate_smoke_test; pause_menu ;;
+        5) candidate_stop; pause_menu ;;
+        6) candidate_results; pause_menu ;;
+        7) return ;;
+        *) warning "Enter a number from 1 to 7."; pause_menu ;;
+      esac
+    fi
+  done
+}
+
 prompt_service_identity() {
   printf '%bProfile:%b ' "$PROMPT_COLOR$BOLD" "$RESET"
   IFS= read -r SERVICE_PROFILE || return 1
@@ -1218,9 +1313,10 @@ main_menu() {
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "2. Status" "$RESET"
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "3. Readiness report" "$RESET"
     printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "4. Binary status" "$RESET"
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "5. Service management" "$RESET"
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "6. Backup / Restore" "$RESET"
-    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "7. Exit" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "5. Candidate Testing" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "6. Service management" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "7. Backup / Restore" "$RESET"
+    printf '%b%s%b\n' "$VALUE_COLOR$BOLD" "8. Exit" "$RESET"
     printf '\n'
     menu_hint "Select an option and press Enter."
     menu_hint "Safety: no service action runs without confirmation."
@@ -1232,10 +1328,11 @@ main_menu() {
       2) show_status; pause_menu ;;
       3) show_readiness; pause_menu ;;
       4) show_binary_status; pause_menu ;;
-      5) service_menu ;;
-      6) backup_restore_menu ;;
-      7) success "Goodbye."; return ;;
-      *) warning "Enter a number from 1 to 7."; pause_menu ;;
+      5) candidate_testing_menu ;;
+      6) service_menu ;;
+      7) backup_restore_menu ;;
+      8) success "Goodbye."; return ;;
+      *) warning "Enter a number from 1 to 8."; pause_menu ;;
     esac
   done
 }
