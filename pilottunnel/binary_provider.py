@@ -273,10 +273,15 @@ def verify_manifest_file(
         allow_provider_host=None,
         require_allowlisted_remote_host=False,
     )
+    represented_platforms = tuple(sorted({entry.platform for entry in manifest.binaries}))
+    checked_platforms = _verification_platforms(
+        manifest.binaries,
+        requested_platforms=required_platforms,
+    )
     duplicates = _duplicate_manifest_keys(manifest.binaries)
     missing_required = _missing_required_entries(
         manifest.binaries,
-        required_platforms=required_platforms,
+        required_platforms=checked_platforms,
         required_adapters=required_adapters,
     )
     warnings: list[str] = []
@@ -289,6 +294,9 @@ def verify_manifest_file(
         "source": manifest.source,
         "generated_at": manifest.generated_at,
         "entries": len(manifest.binaries),
+        "represented_platforms": list(represented_platforms),
+        "checked_platforms": list(checked_platforms),
+        "required_platforms": list(checked_platforms),
         "duplicates": duplicates,
         "missing_required": missing_required,
         "downloads_performed": False,
@@ -1108,6 +1116,21 @@ def _missing_required_entries(
                         item["component"] = component
                     missing.append(item)
     return missing
+
+
+def _verification_platforms(
+    entries: tuple[ProviderBinary, ...],
+    *,
+    requested_platforms: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    if requested_platforms:
+        normalized: list[str] = []
+        for platform_id in requested_platforms:
+            resolved = resolve_platform_id(platform_id)
+            if resolved not in normalized:
+                normalized.append(resolved)
+        return tuple(normalized)
+    return tuple(sorted({entry.platform for entry in entries}))
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

@@ -112,6 +112,36 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         )
         return manifest_path
 
+    def _complete_manifest_entries(
+        self,
+        *,
+        platform_id: str,
+        omit_components: set[tuple[str, str]] | None = None,
+    ) -> list[dict[str, object]]:
+        _fixture_root, metadata = self._provider_fixture(tuple(provider_required_adapters()))
+        entries: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        omitted = omit_components or set()
+        for info in metadata.values():
+            adapter = str(info["adapter"])
+            component = str(info["component"])
+            key = (adapter, component)
+            if key in seen or key in omitted:
+                continue
+            seen.add(key)
+            entries.append(
+                self._manifest_entry(
+                    adapter=adapter,
+                    component=component,
+                    binary_name=str(info["binary_name"]),
+                    url=f"https://downloads.example.com/pilot/{platform_id}/{adapter}-{component}",
+                    sha256=str(info["sha256"]),
+                    size_bytes=int(info["size_bytes"]),
+                    platform_id=platform_id,
+                )
+            )
+        return entries
+
     def _supported_manifest_entries(self, base_url: str, metadata: dict[str, dict[str, object]]) -> list[dict[str, object]]:
         platform_id = current_platform_id()
         entries: list[dict[str, object]] = []
@@ -1155,6 +1185,111 @@ class BinaryProviderBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 1)
         payload = json.loads(output)
         self.assertTrue(payload["missing_required"])
+
+    def test_provider_verify_manifest_passes_complete_single_platform_manifest(self) -> None:
+        manifest_path = self._write_manifest(
+            self.base,
+            self._complete_manifest_entries(platform_id="linux-amd64"),
+        )
+        code, output = self.run_cli(
+            self.base / "verify-complete-linux",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(manifest_path),
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["checked_platforms"], ["linux-amd64"])
+        self.assertEqual(payload["required_platforms"], ["linux-amd64"])
+        self.assertEqual(payload["represented_platforms"], ["linux-amd64"])
+        self.assertFalse(payload["missing_required"])
+
+    def test_provider_verify_manifest_explicit_platform_limits_scope(self) -> None:
+        manifest_path = self._write_manifest(
+            self.base,
+            self._complete_manifest_entries(platform_id="linux-amd64"),
+        )
+        code, output = self.run_cli(
+            self.base / "verify-explicit-linux",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(manifest_path),
+            "--platform",
+            "linux-amd64",
+        )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["checked_platforms"], ["linux-amd64"])
+        self.assertFalse(payload["missing_required"])
+
+    def test_provider_verify_manifest_missing_frps_fails_for_linux_manifest(self) -> None:
+        manifest_path = self._write_manifest(
+            self.base,
+            self._complete_manifest_entries(
+                platform_id="linux-amd64",
+                omit_components={("frp", "frps")},
+            ),
+        )
+        code, output = self.run_cli(
+            self.base / "verify-missing-frps",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(manifest_path),
+        )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["checked_platforms"], ["linux-amd64"])
+        self.assertIn(
+            {"adapter": "frp", "component": "frps", "platform": "linux-amd64"},
+            payload["missing_required"],
+        )
+
+    def test_provider_verify_manifest_fails_when_explicit_platform_is_absent(self) -> None:
+        manifest_path = self._write_manifest(
+            self.base,
+            self._complete_manifest_entries(platform_id="linux-amd64"),
+        )
+        code, output = self.run_cli(
+            self.base / "verify-explicit-windows",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(manifest_path),
+            "--platform",
+            "windows-amd64",
+        )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["checked_platforms"], ["windows-amd64"])
+        self.assertTrue(payload["missing_required"])
+
+    def test_provider_verify_manifest_rejects_unknown_platform(self) -> None:
+        manifest_path = self._write_manifest(
+            self.base,
+            self._complete_manifest_entries(platform_id="linux-amd64"),
+        )
+        code, output = self.run_cli(
+            self.base / "verify-invalid-platform",
+            "binary",
+            "provider",
+            "verify-manifest",
+            "--manifest-file",
+            str(manifest_path),
+            "--platform",
+            "solaris-amd64",
+        )
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+        self.assertIn("Unsupported platform 'solaris-amd64'", payload["message"])
 
     def test_binary_download_refuses_without_confirm(self) -> None:
         fixture_root, metadata = self._provider_fixture(("backhaul",))

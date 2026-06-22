@@ -8,7 +8,7 @@ DEFAULT_REF="main"
 DEFAULT_INSTALL_DIR="/opt/pilottunnel"
 DEFAULT_LAYER="layer4"
 DEFAULT_PROVIDER_REPO="CapoLab/PilotTunnel-Binaries"
-DEFAULT_PROVIDER_TAG="pt-binaries-20""26-06-20"
+DEFAULT_PROVIDER_TAG="pt-binaries-20""26-06-22"
 DEFAULT_MANIFEST_NAME="provider-manifest.json"
 DEFAULT_RELEASES_SEGMENT="releases"
 DEFAULT_DOWNLOAD_SEGMENT="download"
@@ -44,6 +44,7 @@ GIT_LAST_STATUS=0
 ARCHIVE_LAST_LOG=""
 ARCHIVE_LAST_STATUS=0
 SOURCE_BACKUP_DIR=""
+ARCHIVE_REFRESH_ACTION=""
 
 usage() {
   cat <<EOF
@@ -532,6 +533,35 @@ validate_repo_source_dir() {
   [ -d "${candidate_dir}/pilottunnel" ] || return 1
 }
 
+repo_source_trees_equal() {
+  current_dir="$1"
+  candidate_dir="$2"
+  "$PYTHON_BIN" - "$current_dir" "$candidate_dir" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+left = Path(sys.argv[1]).resolve()
+right = Path(sys.argv[2]).resolve()
+
+
+def digest_tree(root: Path) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if relative.startswith(".git/") or relative == ".git":
+            continue
+        if path.is_dir():
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        items.append((relative, digest))
+    return items
+
+
+raise SystemExit(0 if digest_tree(left) == digest_tree(right) else 1)
+PY
+}
+
 find_staged_repo_root() {
   extract_dir="$1"
   valid_roots=()
@@ -586,6 +616,7 @@ checkout_repo_ref() {
 
 install_repo_from_archive() {
   archive_url="$1"
+  ARCHIVE_REFRESH_ACTION=""
   [ -n "$archive_url" ] || {
     ARCHIVE_LAST_STATUS=1
     ARCHIVE_LAST_LOG="$(mktemp)"
@@ -625,8 +656,17 @@ install_repo_from_archive() {
     return 1
   fi
 
+  if [ -e "$REPO_DIR" ] && [ ! -d "$REPO_DIR/.git" ] && validate_repo_source_dir "$REPO_DIR" && repo_source_trees_equal "$REPO_DIR" "$extracted_root"; then
+    ARCHIVE_REFRESH_ACTION="unchanged"
+    rm -rf "$temp_dir"
+    return 0
+  fi
+
   if [ -e "$REPO_DIR" ]; then
     backup_repo_dir
+    ARCHIVE_REFRESH_ACTION="replaced"
+  else
+    ARCHIVE_REFRESH_ACTION="installed"
   fi
   mkdir -p "$BASE_DIR"
   mv "$extracted_root" "$REPO_DIR"
@@ -670,10 +710,19 @@ sync_repo() {
   fi
 
   if [ -e "$REPO_DIR" ]; then
-    git_summary="existing repo path is not a valid git checkout"
-    info "Existing source is not a valid git checkout, trying source archive fallback..."
+    if validate_repo_source_dir "$REPO_DIR"; then
+      git_summary="existing repo path is a valid archive-installed source tree"
+      info "Existing source is a valid archive-installed tree, checking source archive for refresh..."
+    else
+      git_summary="existing repo path is not a valid PilotTunnel source tree"
+      info "Existing source is not a valid PilotTunnel source tree, trying source archive fallback..."
+    fi
     if install_repo_from_archive "$archive_url"; then
-      info "Source installed from archive fallback."
+      if [ "$ARCHIVE_REFRESH_ACTION" = "unchanged" ]; then
+        info "Existing source is already up to date from archive fallback."
+      else
+        info "Source installed from archive fallback."
+      fi
       return 0
     fi
     archive_summary="$(archive_failure_summary)"

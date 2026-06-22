@@ -645,6 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     binary_provider_generate.add_argument("--json", action="store_true")
     binary_provider_verify = binary_provider_subparsers.add_parser("verify-manifest")
     binary_provider_verify.add_argument("--manifest-file", type=Path, required=True)
+    binary_provider_verify.add_argument("--platform", action="append", dest="platforms", default=[])
     binary_provider_verify.add_argument("--json", action="store_true")
     binary_provider_prepare = binary_provider_subparsers.add_parser("prepare")
     binary_provider_prepare.add_argument("--source-dir", type=Path, required=True)
@@ -2941,7 +2942,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "binary" and args.binary_command == "provider" and args.binary_provider_command == "verify-manifest":
         try:
-            payload = verify_manifest_file(manifest_file=args.manifest_file)
+            payload = verify_manifest_file(
+                manifest_file=args.manifest_file,
+                required_platforms=tuple(args.platforms) if args.platforms else None,
+            )
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1

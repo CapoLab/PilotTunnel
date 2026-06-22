@@ -12,6 +12,19 @@ from pilottunnel.binaries import binary_spec, provider_required_adapters
 
 
 class InstallerScriptTests(unittest.TestCase):
+    SNAPSHOT_IGNORE_PATTERNS = (
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".var",
+        ".provider-source",
+        ".provider-release",
+        ".provider-release-2026-06-22",
+        ".provider-debug",
+    )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.script_path = Path("scripts") / "install.sh"
@@ -46,14 +59,7 @@ class InstallerScriptTests(unittest.TestCase):
             shutil.copytree(
                 Path.cwd(),
                 source_root,
-                ignore=shutil.ignore_patterns(
-                    ".git",
-                    "__pycache__",
-                    ".pytest_cache",
-                    ".mypy_cache",
-                    ".ruff_cache",
-                    ".var",
-                ),
+                ignore=shutil.ignore_patterns(*self.SNAPSHOT_IGNORE_PATTERNS),
             )
             for command in (
                 [git_bin, "init", "--initial-branch", "main"],
@@ -73,14 +79,7 @@ class InstallerScriptTests(unittest.TestCase):
             shutil.copytree(
                 Path.cwd(),
                 repo_root,
-                ignore=shutil.ignore_patterns(
-                    ".git",
-                    "__pycache__",
-                    ".pytest_cache",
-                    ".mypy_cache",
-                    ".ruff_cache",
-                    ".var",
-                ),
+                ignore=shutil.ignore_patterns(*self.SNAPSHOT_IGNORE_PATTERNS),
             )
             for name in ("state", "work", "staging", "install-root"):
                 (root / name).mkdir(parents=True, exist_ok=True)
@@ -122,15 +121,44 @@ class InstallerScriptTests(unittest.TestCase):
             env=env,
         )
 
-    def create_source_archive(self, output_dir: Path) -> Path:
-        archive_path = output_dir / "PilotTunnel-source.tar.gz"
+    def create_source_archive_from_tree(self, tree_root: Path, output_dir: Path, *, archive_name: str = "PilotTunnel-source.tar.gz") -> Path:
+        archive_path = output_dir / archive_name
         with tarfile.open(archive_path, "w:gz") as tar_handle:
-            for path in Path.cwd().rglob("*"):
-                if any(part in {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".var"} for part in path.parts):
+            for path in tree_root.rglob("*"):
+                if any(part in set(self.SNAPSHOT_IGNORE_PATTERNS) for part in path.parts):
                     continue
-                arcname = Path("PilotTunnel-main") / path.relative_to(Path.cwd())
+                arcname = Path("PilotTunnel-main") / path.relative_to(tree_root)
                 tar_handle.add(path, arcname=str(arcname), recursive=False)
         return archive_path
+
+    def create_source_archive(self, output_dir: Path) -> Path:
+        return self.create_source_archive_from_tree(Path.cwd(), output_dir)
+
+    def create_modified_source_archive(
+        self,
+        output_dir: Path,
+        *,
+        archive_name: str,
+        replacements: dict[str, str] | None = None,
+        removals: tuple[str, ...] = (),
+    ) -> Path:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir) / "archive-source"
+            shutil.copytree(
+                Path.cwd(),
+                source_root,
+                ignore=shutil.ignore_patterns(*self.SNAPSHOT_IGNORE_PATTERNS),
+            )
+            for relative_path, content in (replacements or {}).items():
+                target = source_root / relative_path
+                target.write_text(content, encoding="utf-8")
+            for relative_path in removals:
+                target = source_root / relative_path
+                if target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
+            return self.create_source_archive_from_tree(source_root, output_dir, archive_name=archive_name)
 
     def write_fake_git(self, target_dir: Path, body: str) -> Path:
         bash_bin = self.find_bash()
@@ -416,6 +444,30 @@ class InstallerScriptTests(unittest.TestCase):
             "https://github.com/CapoLab/PilotTunnel/archive/refs/heads/main.tar.gz",
         )
 
+    def test_default_manifest_url_uses_current_provider_release_tag(self) -> None:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        result = subprocess.run(
+            [
+                bash_bin,
+                "-c",
+                (
+                    f"source '{self.script_path.as_posix()}'; "
+                    "default_manifest_url"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "https://github.com/CapoLab/PilotTunnel-Binaries/releases/download/pt-binaries-2026-06-22/provider-manifest.json",
+        )
+
     def test_installer_falls_back_to_source_archive_when_git_times_out(self) -> None:
         bash_bin = self.find_bash()
         if not bash_bin or not Path(bash_bin).exists():
@@ -475,6 +527,140 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertEqual((state_dir / "config.json").read_text(encoding="utf-8"), "{\"keep\": true}\n")
             self.assertEqual((work_dir / "marker.txt").read_text(encoding="utf-8"), "keep-work\n")
+
+    def test_unchanged_archive_rerun_creates_no_redundant_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            archive_path = self.create_source_archive(Path(temp_dir))
+            env = {
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                "PILOTTUNNEL_SOURCE_ARCHIVE_URL": archive_path.resolve().as_uri(),
+            }
+            first = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env=env,
+            )
+            self.assertEqual(first.returncode, 0, msg=first.stderr)
+            second = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env=env,
+            )
+            self.assertEqual(second.returncode, 0, msg=second.stderr)
+            self.assertIn("valid archive-installed tree", second.stdout)
+            self.assertIn("already up to date from archive fallback", second.stdout)
+            self.assertNotIn("not a valid git checkout", second.stdout)
+            backup_root = install_dir / "backups" / "source"
+            backups = list(backup_root.glob("repo-*")) if backup_root.exists() else []
+            self.assertEqual(backups, [])
+
+    def test_changed_archive_refresh_creates_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            original_archive = self.create_source_archive(Path(temp_dir))
+            changed_archive = self.create_modified_source_archive(
+                Path(temp_dir),
+                archive_name="PilotTunnel-source-changed.tar.gz",
+                replacements={"README.md": "Archive refresh changed\n"},
+            )
+            env = {
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                "PILOTTUNNEL_SOURCE_ARCHIVE_URL": original_archive.resolve().as_uri(),
+            }
+            first = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env=env,
+            )
+            self.assertEqual(first.returncode, 0, msg=first.stderr)
+            env["PILOTTUNNEL_SOURCE_ARCHIVE_URL"] = changed_archive.resolve().as_uri()
+            second = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env=env,
+            )
+            self.assertEqual(second.returncode, 0, msg=second.stderr)
+            backup_root = install_dir / "backups" / "source"
+            backups = list(backup_root.glob("repo-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertNotEqual((backups[0] / "README.md").read_text(encoding="utf-8"), "Archive refresh changed\n")
+            self.assertEqual((install_dir / "repo" / "README.md").read_text(encoding="utf-8"), "Archive refresh changed\n")
+
+    def test_failed_archive_refresh_preserves_installed_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            self.write_fake_git(fake_bin, "sleep 3\nexit 124")
+            valid_archive = self.create_modified_source_archive(
+                Path(temp_dir),
+                archive_name="PilotTunnel-source-valid.tar.gz",
+                replacements={"README.md": "Valid archive install\n"},
+            )
+            invalid_archive = self.create_modified_source_archive(
+                Path(temp_dir),
+                archive_name="PilotTunnel-source-invalid.tar.gz",
+                removals=("scripts/pilottunnel-menu",),
+            )
+            env = {
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PILOTTUNNEL_GIT_BIN": str(fake_bin / "git.cmd"),
+                "PILOTTUNNEL_GIT_TIMEOUT_SECONDS": "1",
+                "PILOTTUNNEL_SOURCE_ARCHIVE_URL": valid_archive.resolve().as_uri(),
+            }
+            first = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env=env,
+            )
+            self.assertEqual(first.returncode, 0, msg=first.stderr)
+            env["PILOTTUNNEL_SOURCE_ARCHIVE_URL"] = invalid_archive.resolve().as_uri()
+            second = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                "https://github.com/CapoLab/PilotTunnel.git",
+                "--without-binaries",
+                "--no-menu",
+                extra_env=env,
+            )
+            self.assertNotEqual(second.returncode, 0)
+            self.assertTrue((install_dir / "repo" / "scripts" / "pilottunnel-menu").exists())
+            self.assertEqual((install_dir / "repo" / "README.md").read_text(encoding="utf-8"), "Valid archive install\n")
+            backup_root = install_dir / "backups" / "source"
+            backups = list(backup_root.glob("repo-*")) if backup_root.exists() else []
+            self.assertEqual(backups, [])
 
     def test_existing_repo_is_backed_up_before_archive_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
