@@ -30,6 +30,7 @@ from .systemd_control import (
     apply_reload,
     apply_start,
     apply_stop,
+    inspect_managed_status,
 )
 
 CANDIDATE_TRANSPORTS = {
@@ -149,6 +150,7 @@ def plan_candidate(
     payload = _candidate_payload(candidate)
     payload["current_server_role"] = role
     payload["current_server_owned_ports"] = _owned_ports_for_role(candidate, role)
+    payload["current_server_dependency_ports"] = list(_side_plan(candidate, role).get("dependency_ports") or [])
     payload["start_first"] = candidate.first_start_side or candidate.topology.get("first_start_side", "")
     payload["next_instruction"] = _plan_next_instruction(role, candidate)
     payload["real_systemd_touched"] = False
@@ -340,6 +342,52 @@ def start_candidate(
             }
         started.append(service)
 
+    status_payload = inspect_managed_status(
+        service_dir=Path(side_plan["service_dir"]),
+        service_name=None,
+        audit_path=paths.audit_path,
+    )
+    status_services = {item.get("service_name", ""): item for item in status_payload.get("services", [])}
+    inactive_services = [
+        service["service_name"]
+        for service in side_plan["services"]
+        if status_services.get(service["service_name"], {}).get("active_state") != "active"
+    ]
+    if not status_payload.get("ok") or inactive_services:
+        for started_service in reversed(started):
+            apply_stop(
+                service_dir=Path(started_service["service_dir"]),
+                service_name=started_service["service_name"],
+                confirm=STOP_CONFIRM_TOKEN,
+                audit_path=paths.audit_path,
+            )
+        _rollback_service_install(install_payload, audit_path=paths.audit_path)
+        _mark_candidate(link, candidate.adapter, "test_failed")
+        state.active_link_candidates.pop(link.id, None)
+        return {
+            "ok": False,
+            "action": "candidate-start",
+            "message": (
+                status_payload.get("errors", ["Candidate start verification failed because systemd reported inactive service state"])[0]
+                if not status_payload.get("ok")
+                else f"Candidate start verification failed because systemd reported inactive service state for: {', '.join(sorted(inactive_services))}"
+            ),
+            "link_id": link.id,
+            "link_label": link.label,
+            "role": role,
+            "candidate": _candidate_payload(candidate),
+            "install": install_payload,
+            "daemon_reload": reload_payload,
+            "start": start_results,
+            "systemd_status": status_payload,
+            "rolled_back": True,
+            "next_instruction": "Review the systemd status output, then retry the candidate after the service reports active.",
+            "real_systemd_touched": True,
+            "services_started": False,
+            "firewall_touched": False,
+            "routes_touched": False,
+        }
+
     _mark_candidate(link, candidate.adapter, "running")
     state.active_link_candidates[link.id]["state"] = "running"
     state.active_link_candidates[link.id]["updated_at"] = _now_utc()
@@ -354,6 +402,7 @@ def start_candidate(
         "install": install_payload,
         "daemon_reload": reload_payload,
         "start": start_results,
+        "systemd_status": status_payload,
         "next_instruction": _start_next_instruction(role, candidate),
         "real_systemd_touched": True,
         "services_started": True,
@@ -469,11 +518,12 @@ def smoke_test_candidate(
             candidate=candidate,
             role=role,
         )
+    real_port = int(candidate.topology.get("ports", {}).get("controller_user_facing_port") or candidate.probe.get("port") or 0)
     probe_port = int(candidate.probe.get("port") or 0)
-    if probe_port < 1:
+    if real_port < 1:
         return _failure(
             "candidate-smoke-test",
-            "Candidate probe mapping is missing. Re-run candidate prepare-all first.",
+            "Candidate real service mapping is missing. Re-run candidate prepare-all first.",
             link=link,
             candidate=candidate,
             role=role,
@@ -487,7 +537,7 @@ def smoke_test_candidate(
     roundtrip_latencies: list[float] = []
     errors: list[str] = []
     for _index in range(attempts):
-        result = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
+        result = probe_roundtrip(host="127.0.0.1", port=real_port, timeout=timeout).to_dict()
         attempt_results.append(result)
         if result["ok"]:
             success_count += 1
@@ -505,11 +555,13 @@ def smoke_test_candidate(
         "checked_at": _now_utc(),
         "adapter": candidate.adapter,
         "category": candidate.category,
+        "smoke_mode": "real_service" if real_port else "probe_only",
         "attempt_count": attempts,
         "timeout": timeout,
         "controller_role": candidate.topology.get("controller_process_role", ""),
         "worker_role": candidate.topology.get("worker_process_role", ""),
         "tested_ports": {
+            "real_service_port": real_port,
             "probe_port": probe_port,
             "transport_port": link.transport_port,
             "controller_user_facing_port": link.controller_user_facing_port,
@@ -523,6 +575,8 @@ def smoke_test_candidate(
         "results": attempt_results,
         "errors": sorted(set(filter(None, errors))),
     }
+    if probe_port >= 1:
+        summary["probe_roundtrip"] = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
     candidate.last_result = summary
     candidate.history.append(summary)
     if real_pass and link.pairing_state == "awaiting_worker_import":
@@ -642,16 +696,25 @@ def _stage_candidate(
         runnable = runnable and side_payload["runnable"]
 
     topology["sides"] = {name: payload["side"] for name, payload in side_payloads.items()}
+    ports = topology.get("ports", {})
     candidate.healthchecks = [
         {
-            "label": "controller_probe_entry",
+            "label": "controller_user_facing_port",
             "host": "127.0.0.1",
-            "port": probe["port"],
+            "port": ports.get("controller_user_facing_port", probe["port"]),
+            "mode": "real",
         },
         {
-            "label": "worker_probe_responder",
+            "label": "worker_service_port",
+            "host": probe["worker_bind_host"],
+            "port": ports.get("worker_service_port", probe["port"]),
+            "mode": "real",
+        },
+        {
+            "label": "probe_responder",
             "host": probe["worker_bind_host"],
             "port": probe["port"],
+            "mode": "probe",
         },
     ]
 
@@ -703,7 +766,7 @@ def _stage_side(
     blockers: list[str],
 ) -> dict[str, Any]:
     side_template = topology["sides"][side_name]
-    profile = _candidate_profile(link, side_name, probe)
+    profile = _candidate_profile(link, side_name, probe, topology)
     context = _candidate_context(
         profile=profile,
         link=link,
@@ -815,6 +878,7 @@ def _stage_side(
             "unit_path": primary_unit_path or unit_path,
             "primary_service_name": primary_service_name,
             "services": services,
+            "dependency_ports": list(side_template.get("dependency_ports") or []),
             "executable": executable,
             "owned_ports": sorted(set(side_template["owned_ports"])),
             "listens_on": list(side_template["listens_on"]),
@@ -825,21 +889,41 @@ def _stage_side(
     }
 
 
-def _candidate_profile(link: LinkProfile, role: str, probe: dict[str, Any]) -> Profile:
+def _candidate_ports(link: LinkProfile, adapter_name: str, probe: dict[str, Any]) -> dict[str, int]:
     probe_port = int(probe["port"])
-    target_host = link.worker_address if role == "controller" else "127.0.0.1"
+    controller_user_facing_port = int(link.controller_user_facing_port or probe_port)
+    worker_service_port = int(link.worker_service_port or probe_port)
+    transport_port = int(link.transport_port)
+    effective_transport_port = BORE_CONTROL_PORT if adapter_name == "bore" else transport_port
+    return {
+        "probe_port": probe_port,
+        "controller_user_facing_port": controller_user_facing_port,
+        "worker_service_port": worker_service_port,
+        "transport_port": transport_port,
+        "effective_transport_port": effective_transport_port,
+    }
+
+
+def _candidate_profile(link: LinkProfile, role: str, probe: dict[str, Any], topology: dict[str, Any]) -> Profile:
+    ports = topology.get("ports") or _candidate_ports(link, topology.get("adapter", ""), probe)
+    controller_user_facing_port = int(ports["controller_user_facing_port"])
+    worker_service_port = int(ports["worker_service_port"])
+    transport_port = int(ports["transport_port"])
+    probe_port = int(ports["probe_port"])
+    target_host = link.worker_address if role == "controller" else link.controller_address
+    target_port = worker_service_port if role == "controller" else transport_port
     return Profile(
         name=link.label,
-        main_port=probe_port,
+        main_port=controller_user_facing_port if role == "controller" else worker_service_port,
         target_host=target_host,
-        target_port=probe_port,
+        target_port=target_port,
         role=role,
         active_layer="layer4",
         ports=ProfilePorts(
-            main_port=probe_port,
-            control_port=link.transport_port,
-            service_port=probe_port,
-            check_port=None,
+            main_port=controller_user_facing_port if role == "controller" else worker_service_port,
+            control_port=transport_port,
+            service_port=worker_service_port,
+            check_port=probe_port,
         ),
         safety=ProfileSafety(cooldown_seconds=0, rollback_on_failure=True, dry_run_default=False),
     )
@@ -868,6 +952,9 @@ def _candidate_context(
             "category": topology["category"],
             "probe_port": probe["port"],
             "probe_bind_host": probe["worker_bind_host"],
+            "real_controller_user_facing_port": topology.get("ports", {}).get("controller_user_facing_port", link.controller_user_facing_port or 0),
+            "real_worker_service_port": topology.get("ports", {}).get("worker_service_port", link.worker_service_port or 0),
+            "real_transport_port": topology.get("ports", {}).get("effective_transport_port", link.transport_port),
             "gost_tunnel_id": topology.get("gost_tunnel_id", ""),
             "gost_probe_host": topology.get("gost_probe_host", ""),
             "bore_control_port": topology.get("bore_control_port", BORE_CONTROL_PORT),
@@ -885,12 +972,20 @@ def _candidate_context(
 
 def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe: dict[str, Any]) -> dict[str, Any]:
     probe_port = int(probe["port"])
+    ports = _candidate_ports(link, adapter_name, probe)
+    controller_user_facing_port = ports["controller_user_facing_port"]
+    worker_service_port = ports["worker_service_port"]
+    transport_port = ports["transport_port"]
+    effective_transport_port = ports["effective_transport_port"]
+    real_service_path = f"127.0.0.1:{controller_user_facing_port} -> {adapter_name} -> 127.0.0.1:{worker_service_port}"
     category = CANDIDATE_CATEGORIES[adapter_name]
     if category == "direct_l4_baseline":
         return {
             "adapter": adapter_name,
             "transport": transport,
             "category": category,
+            "ports": ports,
+            "real_service_path": real_service_path,
             "controller_process_role": "direct_forwarder",
             "worker_process_role": "probe_responder_only",
             "listening_side": "worker_probe_responder",
@@ -904,15 +999,17 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
                 "controller": {
                     "process_role": "direct_forwarder",
                     "adapter_enabled": True,
-                    "owned_ports": [probe_port],
-                    "listens_on": [f"127.0.0.1:{probe_port}"],
-                    "connects_to": [f"{link.worker_address}:{probe_port}"],
+                    "owned_ports": [controller_user_facing_port],
+                    "dependency_ports": [worker_service_port],
+                    "listens_on": [f"127.0.0.1:{controller_user_facing_port}"],
+                    "connects_to": [f"{link.worker_address}:{worker_service_port}"],
                 },
                 "worker": {
                     "process_role": "probe_responder_only",
                     "adapter_enabled": False,
                     "owned_ports": [probe_port],
-                    "listens_on": [f"{probe['worker_bind_host']}:{probe_port}"],
+                    "dependency_ports": [worker_service_port],
+                    "listens_on": [f"{probe['worker_bind_host']}:{worker_service_port}", f"{probe['worker_bind_host']}:{probe_port}"],
                     "connects_to": [],
                 },
             },
@@ -927,19 +1024,18 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         "bore": ("server", "local-client"),
     }
     controller_role, worker_role = process_roles[adapter_name]
-    transport_port = link.transport_port
     listening_side = "controller_transport_listener"
     connecting_side = "worker_tunnel_connector"
-    if adapter_name == "gost":
-        controller_listens = [f"0.0.0.0:{transport_port}", f"127.0.0.1:{probe_port}"]
-    elif adapter_name == "bore":
-        controller_listens = [f"0.0.0.0:{BORE_CONTROL_PORT}", f"0.0.0.0:{probe_port}"]
+    if adapter_name == "bore":
+        controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
     else:
-        controller_listens = [f"0.0.0.0:{transport_port}", f"0.0.0.0:{probe_port}"]
+        controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
     return {
         "adapter": adapter_name,
         "transport": transport,
         "category": category,
+        "ports": ports,
+        "real_service_path": real_service_path,
         "controller_process_role": controller_role,
         "worker_process_role": worker_role,
         "listening_side": listening_side,
@@ -949,12 +1045,13 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         "gost_tunnel_id": _uuid_from_hmac(link, adapter_name, "gost-tunnel-id") if adapter_name == "gost" else "",
         "gost_probe_host": f"probe-{link.id[-6:]}-{adapter_name}.local" if adapter_name == "gost" else "",
         "bore_control_port": BORE_CONTROL_PORT if adapter_name == "bore" else 0,
-        "effective_transport_port": BORE_CONTROL_PORT if adapter_name == "bore" else transport_port,
+        "effective_transport_port": effective_transport_port,
         "sides": {
             "controller": {
                 "process_role": controller_role,
                 "adapter_enabled": True,
-                "owned_ports": [transport_port, probe_port] if adapter_name != "bore" else [BORE_CONTROL_PORT, probe_port],
+                "owned_ports": [effective_transport_port, controller_user_facing_port],
+                "dependency_ports": [worker_service_port],
                 "listens_on": controller_listens,
                 "connects_to": [],
             },
@@ -962,8 +1059,9 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
                 "process_role": worker_role,
                 "adapter_enabled": True,
                 "owned_ports": [probe_port],
-                "listens_on": [f"{probe['worker_bind_host']}:{probe_port}"],
-                "connects_to": [f"{link.controller_address}:{BORE_CONTROL_PORT if adapter_name == 'bore' else transport_port}"],
+                "dependency_ports": [worker_service_port],
+                "listens_on": [f"{probe['worker_bind_host']}:{worker_service_port}", f"{probe['worker_bind_host']}:{probe_port}"],
+                "connects_to": [f"{link.controller_address}:{effective_transport_port}"],
             },
         },
     }
@@ -1219,6 +1317,8 @@ def _candidate_payload(candidate: LinkCandidate) -> dict[str, Any]:
         "worker_executable": candidate.worker_executable,
         "controller_owned_ports": list(candidate.controller_owned_ports),
         "worker_owned_ports": list(candidate.worker_owned_ports),
+        "controller_dependency_ports": list(candidate.topology.get("sides", {}).get("controller", {}).get("dependency_ports", [])),
+        "worker_dependency_ports": list(candidate.topology.get("sides", {}).get("worker", {}).get("dependency_ports", [])),
         "controller_command_summary": list(candidate.controller_command_summary),
         "worker_command_summary": list(candidate.worker_command_summary),
         "controller_environment_summary": redact_secrets(candidate.controller_environment_summary),
@@ -1377,6 +1477,7 @@ def _empty_side_payload(side_name: str, side_template: dict[str, Any]) -> dict[s
         "services": [],
         "executable": "",
         "owned_ports": list(side_template["owned_ports"]),
+        "dependency_ports": list(side_template.get("dependency_ports") or []),
         "listens_on": list(side_template["listens_on"]),
         "connects_to": list(side_template["connects_to"]),
         "command_summary": [],

@@ -25,7 +25,7 @@ class BackhaulAdapter(DryRunAdapter):
     def render_runtime_plan(self, context: AdapterContext, runtime_dir, executable_path: str) -> dict:
         config_text = self._config_text(context)
         config_path = self._write_runtime_file(context, runtime_dir, config_text, self.config_filename(context.role))
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         return {
             "config_path": config_path,
             "content": config_text,
@@ -34,14 +34,15 @@ class BackhaulAdapter(DryRunAdapter):
             "healthcheck_target_summary": {
                 "kind": "tcp",
                 "host": "127.0.0.1",
-                "port": probe_port,
+                "port": real_port,
             },
         }
 
     def _config_text(self, context: AdapterContext) -> str:
         token = context.secrets.get("shared_token", "PAIRING_SECRET_REQUIRED")
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_controller_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
+        real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
         if context.role == "controller":
             return "\n".join(
                 [
@@ -51,7 +52,7 @@ class BackhaulAdapter(DryRunAdapter):
                     f'token = "{token}"',
                     "log_level = \"info\"",
                     "ports = [",
-                    f'  "{probe_port}=127.0.0.1:{probe_port}"',
+                    f'  "{real_controller_port}=127.0.0.1:{real_worker_port}"',
                     "]",
                 ]
             )

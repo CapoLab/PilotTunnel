@@ -24,7 +24,7 @@ class GostAdapter(DryRunAdapter):
             config_text,
             self.config_filename(context.role).replace(".toml", ".yaml"),
         )
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         return {
             "config_path": config_path,
             "content": config_text,
@@ -33,12 +33,13 @@ class GostAdapter(DryRunAdapter):
             "healthcheck_target_summary": {
                 "kind": "tcp",
                 "host": "127.0.0.1",
-                "port": probe_port,
+                "port": real_port,
             },
         }
 
     def _config_text(self, context: AdapterContext) -> str:
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_controller_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
+        real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
         tunnel_id = context.remote_stub.get("gost_tunnel_id", "")
         probe_host = context.remote_stub.get("gost_probe_host", "probe.local")
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
@@ -55,8 +56,8 @@ class GostAdapter(DryRunAdapter):
                     "      tunnel.direct: true",
                     "  listener:",
                     "    type: tcp",
-                    "- name: probe-visitor",
-                    f"  addr: :{probe_port}",
+                    "- name: service-visitor",
+                    f"  addr: :{real_controller_port}",
                     "  handler:",
                     "    type: tcp",
                     "    chain: chain-0",
@@ -93,8 +94,8 @@ class GostAdapter(DryRunAdapter):
                 "    chain: chain-0",
                 "  forwarder:",
                 "    nodes:",
-                "    - name: probe",
-                f"      addr: 127.0.0.1:{probe_port}",
+                "    - name: service",
+                f"      addr: 127.0.0.1:{real_worker_port}",
                 "      filter:",
                 f"        host: {probe_host}",
                 "chains:",

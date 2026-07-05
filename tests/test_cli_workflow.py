@@ -689,6 +689,35 @@ class CliWorkflowTests(unittest.TestCase):
     def _stage_switch(self, adapter: str, transport: str) -> None:
         self.run_cli("--apply", "switch", "--profile", "smoke-l4-001", "--adapter", adapter, "--transport", transport)
 
+    def _create_controller_link(self, *, worker_address: str = "worker.example.invalid") -> None:
+        self.run_cli("init", "--role", "controller")
+        code, output = self.run_cli(
+            "link",
+            "create-controller",
+            "--worker-address",
+            worker_address,
+            "--service-port",
+            str(self.main_port),
+            "--transport-port",
+            str(self.control_port),
+            "--user-facing-port",
+            str(self.main_port),
+            "--controller-address-override",
+            "controller.example.invalid",
+        )
+        self.assertEqual(code, 0, msg=output)
+
+    def _prepare_candidate_binaries(self):
+        def fake_resolve_binary_reference(*, adapter: str, component: str | None = None, **kwargs):
+            binary_name = component or adapter
+            return {
+                "ok": True,
+                "path": str(Path(self.temp_dir.name) / "managed-binaries" / binary_name),
+                "message": "",
+            }
+
+        return patch("pilottunnel.candidates.resolve_binary_reference", side_effect=fake_resolve_binary_reference)
+
     def test_cli_dry_run_switch_to_backhaul_tcpmux_works(self) -> None:
         self._create_profile()
         code, output = self.run_cli("switch", "--profile", "smoke-l4-001", "--adapter", "backhaul", "--transport", "tcpmux")
@@ -913,6 +942,158 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(payload["staged_only"])
         self.assertTrue((self.staging_root / "configs" / "smoke-l4-001" / "rathole" / "tcp" / "controller" / "rathole-controller.toml").exists())
         self.assertTrue((self.staging_root / "systemd" / "pilottunnel-smoke-l4-001-rathole-tcp-controller.service").exists())
+
+    def test_candidate_prepare_all_rathole_uses_real_service_ports(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        rathole = next(item for item in payload["candidates"] if item["adapter"] == "rathole")
+        self.assertIn(self.control_port, rathole["controller_owned_ports"])
+        self.assertIn(self.main_port, rathole["controller_owned_ports"])
+        self.assertIn(self.main_port, rathole["worker_dependency_ports"])
+        self.assertEqual(rathole["topology"]["real_service_path"], f"127.0.0.1:{self.main_port} -> rathole -> 127.0.0.1:{self.main_port}")
+        controller_config = Path(rathole["controller_config_path"]).read_text(encoding="utf-8")
+        worker_config = Path(rathole["worker_config_path"]).read_text(encoding="utf-8")
+        self.assertIn(f'bind_addr = "0.0.0.0:{self.control_port}"', controller_config)
+        self.assertIn(f'bind_addr = "0.0.0.0:{self.main_port}"', controller_config)
+        self.assertIn(f'local_addr = "127.0.0.1:{self.main_port}"', worker_config)
+
+    def test_candidate_plan_displays_controller_owned_ports(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, output = self.run_cli("candidate", "plan", "--adapter", "rathole", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertIn(self.control_port, payload["candidate"]["current_server_owned_ports"])
+        self.assertIn(self.main_port, payload["candidate"]["current_server_owned_ports"])
+        self.assertIn(self.main_port, payload["candidate"]["current_server_dependency_ports"])
+
+    def test_candidate_start_does_not_persist_running_when_systemd_reports_inactive(self) -> None:
+        self._create_controller_link()
+        service_states = []
+
+        def fake_apply_reload(**kwargs):
+            return {"ok": True, "action": "systemd-reload-apply", "real_systemd_touched": True}
+
+        def fake_apply_start(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            service_states.append(service_name or "")
+            return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
+
+        def fake_status(**kwargs):
+            return {"ok": True, "services": [], "warnings": [], "errors": [], "real_systemd_touched": False}
+
+        def fake_apply_stop(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
+
+        def fake_install_candidate_service_units(*, services, summary_name):
+            return {
+                "ok": True,
+                "summary_file": str(Path(self.temp_dir.name) / summary_name),
+                "target_dir": str(Path(self.temp_dir.name) / "systemd"),
+                "services": [
+                    {
+                        "service_name": item["service_name"],
+                        "target_unit_path": str(Path(self.temp_dir.name) / "systemd" / item["service_name"]),
+                        "backup_path": "",
+                        "action": "installed",
+                    }
+                    for item in services
+                ],
+            }
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.apply_reload", side_effect=fake_apply_reload), patch(
+            "pilottunnel.candidates.apply_start",
+            side_effect=fake_apply_start,
+        ), patch("pilottunnel.candidates.apply_stop", side_effect=fake_apply_stop), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status):
+            with patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install_candidate_service_units):
+                self.run_cli("candidate", "prepare-all", "--link", "link-001")
+                code, output = self.run_cli("candidate", "start", "--adapter", "rathole", "--link", "link-001", "--json")
+        self.assertEqual(code, 1, msg=output)
+        payload = json.loads(output)
+        self.assertIn("inactive service state", payload["message"])
+        config_data = json.loads(self.config.read_text(encoding="utf-8"))
+        candidate_state = next(item for item in config_data["links"][0]["candidates"] if item["adapter"] == "rathole")
+        self.assertNotEqual(candidate_state["state"], "running")
+        self.assertTrue(service_states)
+
+    def test_candidate_smoke_test_uses_real_service_port(self) -> None:
+        self._create_controller_link()
+        probe_calls: list[int] = []
+        started_services: list[str] = []
+
+        def fake_roundtrip(*, host: str, port: int, timeout: float):
+            probe_calls.append(port)
+
+            class Result:
+                def to_dict(self_inner):
+                    return {
+                        "ok": True,
+                        "host": host,
+                        "port": port,
+                        "timeout": timeout,
+                        "connect_latency_ms": 1.0,
+                        "roundtrip_latency_ms": 2.0,
+                        "error": "",
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "bytes_sent": 1,
+                        "bytes_received": 1,
+                        "exact_match": True,
+                    }
+
+            return Result()
+
+        def fake_apply_reload(**kwargs):
+            return {"ok": True, "action": "systemd-reload-apply", "real_systemd_touched": True}
+
+        def fake_apply_start(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            started_services.append(service_name or "")
+            return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
+
+        def fake_status(**kwargs):
+            return {
+                "ok": True,
+                "services": [{"service_name": item, "active_state": "active"} for item in started_services],
+                "warnings": [],
+                "errors": [],
+                "real_systemd_touched": False,
+            }
+
+        def fake_install_candidate_service_units(*, services, summary_name):
+            return {
+                "ok": True,
+                "summary_file": str(Path(self.temp_dir.name) / summary_name),
+                "target_dir": str(Path(self.temp_dir.name) / "systemd"),
+                "services": [
+                    {
+                        "service_name": item["service_name"],
+                        "target_unit_path": str(Path(self.temp_dir.name) / "systemd" / item["service_name"]),
+                        "backup_path": "",
+                        "action": "installed",
+                    }
+                    for item in services
+                ],
+            }
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.apply_reload", side_effect=fake_apply_reload), patch(
+            "pilottunnel.candidates.apply_start",
+            side_effect=fake_apply_start,
+        ), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch(
+            "pilottunnel.candidates.probe_roundtrip",
+            side_effect=fake_roundtrip,
+        ):
+            with patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install_candidate_service_units):
+                self.run_cli("candidate", "prepare-all", "--link", "link-001")
+                self.run_cli("candidate", "start", "--adapter", "rathole", "--link", "link-001")
+                code, output = self.run_cli("candidate", "smoke-test", "--adapter", "rathole", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["result"]["smoke_mode"], "real_service")
+        self.assertEqual(payload["result"]["tested_ports"]["real_service_port"], self.main_port)
+        self.assertGreaterEqual(len(probe_calls), 1)
+        self.assertEqual(probe_calls[0], self.main_port)
 
     def test_staged_list_shows_generated_files(self) -> None:
         self._create_profile()

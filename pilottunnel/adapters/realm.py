@@ -21,13 +21,13 @@ class RealmAdapter(DryRunAdapter):
             raise ValueError("Realm direct Layer 4 baseline only runs on the controller side in candidate smoke mode")
         config_text = self._config_text(context)
         config_path = self._write_runtime_file(context, runtime_dir, config_text, self.config_filename(context.role).replace(".toml", ".txt"))
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         argv = [
             executable_path,
             "--listen",
-            f"127.0.0.1:{probe_port}",
+            f"127.0.0.1:{real_port}",
             "--remote",
-            f"{context.worker_address}:{probe_port}",
+            f"{context.worker_address}:{context.remote_stub.get('real_worker_service_port', context.profile.ports.service_port or context.profile.target_port)}",
         ]
         return {
             "config_path": config_path,
@@ -37,25 +37,26 @@ class RealmAdapter(DryRunAdapter):
             "healthcheck_target_summary": {
                 "kind": "tcp",
                 "host": "127.0.0.1",
-                "port": probe_port,
+                "port": real_port,
             },
         }
 
     def _config_text(self, context: AdapterContext) -> str:
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
+        real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
         if context.role == "controller":
             return "\n".join(
                 [
                     "[realm]",
                     "mode = direct_l4_baseline",
-                    f"listen = 127.0.0.1:{probe_port}",
-                    f"remote = {context.worker_address}:{probe_port}",
+                    f"listen = 127.0.0.1:{real_port}",
+                    f"remote = {context.worker_address}:{real_worker_port}",
                 ]
             )
         return "\n".join(
             [
                 "[realm]",
                 "mode = probe_only",
-                f"probe_bind = {context.remote_stub.get('probe_bind_host', '0.0.0.0')}:{probe_port}",
+                f"probe_bind = {context.remote_stub.get('probe_bind_host', '0.0.0.0')}:{real_worker_port}",
             ]
         )

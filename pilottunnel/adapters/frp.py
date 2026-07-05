@@ -22,7 +22,7 @@ class FrpAdapter(DryRunAdapter):
         config_text = self._config_text(context)
         config_path = self._write_runtime_file(context, runtime_dir, config_text, self._config_filename(context))
         command = self._runtime_command(context, executable_path, config_path)
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         return {
             "config_path": config_path,
             "content": config_text,
@@ -31,14 +31,15 @@ class FrpAdapter(DryRunAdapter):
             "healthcheck_target_summary": {
                 "kind": "tcp",
                 "host": "127.0.0.1",
-                "port": probe_port,
+                "port": real_port,
             },
         }
 
     def _config_text(self, context: AdapterContext) -> str:
         token = context.secrets.get("shared_token", "PAIRING_SECRET_REQUIRED")
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
-        probe_port = context.remote_stub.get("probe_port", context.profile.ports.service_port or context.profile.target_port)
+        real_controller_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
+        real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
         if context.role == "controller":
             return "\n".join(
                 [
@@ -60,8 +61,8 @@ class FrpAdapter(DryRunAdapter):
                 f'name = "{context.profile.name}"',
                 'type = "tcp"',
                 'localIP = "127.0.0.1"',
-                f"localPort = {probe_port}",
-                f"remotePort = {probe_port}",
+                f"localPort = {real_worker_port}",
+                f"remotePort = {real_controller_port}",
             ]
         )
 
