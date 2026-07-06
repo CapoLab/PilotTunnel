@@ -503,17 +503,32 @@ def smoke_test_candidate(
     timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
     link_label: str | None = None,
 ) -> dict[str, Any]:
-    del paths
     role = _require_role(config)
     if role != "controller":
         raise ValueError("Real candidate smoke tests must be run from the controller side")
     link = _target_link(config, link_label)
     candidate = _candidate_for(link, adapter_name)
+    side_plan = _side_plan(candidate, role)
+    runtime_status = _candidate_runtime_systemd_status(audit_path=paths.audit_path, candidate=candidate, role=role)
     active = state.active_link_candidates.get(link.id) or {}
+    runtime_is_active = runtime_status.get("state") == "active"
+    if runtime_is_active:
+        reconciled = {
+            "adapter": candidate.adapter,
+            "transport": candidate.transport,
+            "category": candidate.category,
+            "role": role,
+            "state": "running",
+            "services": list(side_plan.get("services") or active.get("services") or []),
+            "updated_at": _now_utc(),
+        }
+        state.active_link_candidates[link.id] = reconciled
+        _mark_candidate(link, candidate.adapter, "running")
+        active = reconciled
     if active.get("adapter") != candidate.adapter or active.get("state") != "running":
         return _failure(
             "candidate-smoke-test",
-            f"Candidate '{candidate.adapter}' is not currently running on this controller",
+            _candidate_runtime_blocker(candidate, runtime_status),
             link=link,
             candidate=candidate,
             role=role,
@@ -560,6 +575,9 @@ def smoke_test_candidate(
         "timeout": timeout,
         "controller_role": candidate.topology.get("controller_process_role", ""),
         "worker_role": candidate.topology.get("worker_process_role", ""),
+        "persisted_state": candidate.state,
+        "runtime_systemd_state": runtime_status["state"],
+        "runtime_systemd_status": runtime_status["status"],
         "tested_ports": {
             "real_service_port": real_port,
             "probe_port": probe_port,
@@ -591,6 +609,8 @@ def smoke_test_candidate(
         "role": role,
         "candidate": _candidate_payload(candidate),
         "result": summary,
+        "runtime_systemd_state": runtime_status["state"],
+        "persisted_state": candidate.state,
         "pairing_state": link.effective_pairing_state,
         "next_instruction": _smoke_next_instruction(candidate, real_pass),
         "real_systemd_touched": False,
@@ -603,10 +623,19 @@ def smoke_test_candidate(
 def candidate_results(
     *,
     config: AppConfig,
+    paths: SwitchPaths,
     link_label: str | None = None,
 ) -> dict[str, Any]:
     role = _require_role(config)
     link = _target_link(config, link_label)
+    candidate_payloads: list[dict[str, Any]] = []
+    for candidate in link.candidates:
+        payload = _candidate_payload(candidate)
+        runtime = _candidate_runtime_systemd_status(audit_path=paths.audit_path, candidate=candidate, role=role, allow_missing=True)
+        payload["persisted_state"] = candidate.state
+        payload["runtime_systemd_state"] = runtime["state"]
+        payload["runtime_systemd_ok"] = runtime["ok"]
+        candidate_payloads.append(payload)
     return {
         "ok": True,
         "action": "candidate-results",
@@ -614,7 +643,7 @@ def candidate_results(
         "link_label": link.label,
         "role": role,
         "pairing_state": link.effective_pairing_state,
-        "candidates": [_candidate_payload(item) for item in link.candidates],
+        "candidates": candidate_payloads,
         "real_systemd_touched": False,
         "services_started": False,
         "firewall_touched": False,
@@ -1268,6 +1297,71 @@ def _candidate_for(link: LinkProfile, adapter_name: str) -> LinkCandidate:
         if candidate.adapter == adapter_name:
             return candidate
     raise ValueError(f"Candidate '{adapter_name}' has not been prepared for link '{link.label}'")
+
+
+def _candidate_service_name(candidate: LinkCandidate, role: str) -> str:
+    if role == "controller":
+        return candidate.controller_service_name
+    if role == "worker":
+        return candidate.worker_service_name
+    return ""
+
+
+def _candidate_runtime_systemd_status(*, audit_path: Path, candidate: LinkCandidate, role: str, allow_missing: bool = False) -> dict[str, Any]:
+    service_name = _candidate_service_name(candidate, role)
+    if not service_name:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "service_name": "",
+            "status": {"ok": False, "services": [], "warnings": [], "errors": ["Candidate service name is unavailable"]},
+        }
+    try:
+        payload = inspect_managed_status(
+            service_dir=SYSTEMD_TARGET_DIR,
+            service_name=service_name,
+            audit_path=audit_path,
+        )
+    except ValueError as exc:
+        if allow_missing:
+            return {
+                "ok": False,
+                "state": "missing",
+                "service_name": service_name,
+                "status": {"ok": False, "services": [], "warnings": [], "errors": [str(exc)]},
+            }
+        raise
+
+    services = payload.get("services", [])
+    service_entry = next((item for item in services if item.get("service_name") == service_name), {})
+    active_state = str(service_entry.get("active_state") or "").strip()
+    sub_state = str(service_entry.get("sub_state") or "").strip()
+    ok = payload.get("ok", False) and active_state == "active"
+    if allow_missing and not service_entry:
+        return {
+            "ok": False,
+            "state": "missing",
+            "service_name": service_name,
+            "status": payload,
+        }
+    runtime_state = "active" if ok and sub_state in {"running", "exited", "listening"} else active_state or ("inactive" if service_entry else "missing")
+    return {
+        "ok": ok,
+        "state": runtime_state,
+        "service_name": service_name,
+        "service_entry": service_entry,
+        "status": payload,
+    }
+
+
+def _candidate_runtime_blocker(candidate: LinkCandidate, runtime_status: dict[str, Any]) -> str:
+    state = runtime_status.get("state") or "missing"
+    service_name = runtime_status.get("service_name") or _candidate_service_name(candidate, "controller") or candidate.adapter
+    if state == "active":
+        return f"Candidate '{candidate.adapter}' is not currently running on this controller"
+    if state == "missing":
+        return f"Candidate '{candidate.adapter}' service '{service_name}' is not installed or not discoverable on this controller"
+    return f"Candidate '{candidate.adapter}' is not currently running on this controller (systemd state: {state})"
 
 
 def _require_role(config: AppConfig) -> str:

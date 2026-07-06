@@ -974,21 +974,27 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_start_does_not_persist_running_when_systemd_reports_inactive(self) -> None:
         self._create_controller_link()
         service_states = []
+        call_order: list[str] = []
 
         def fake_apply_reload(**kwargs):
+            call_order.append("reload")
             return {"ok": True, "action": "systemd-reload-apply", "real_systemd_touched": True}
 
         def fake_apply_start(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            call_order.append("start")
             service_states.append(service_name or "")
             return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
 
         def fake_status(**kwargs):
+            call_order.append("status")
             return {"ok": True, "services": [], "warnings": [], "errors": [], "real_systemd_touched": False}
 
         def fake_apply_stop(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            call_order.append("stop")
             return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
 
         def fake_install_candidate_service_units(*, services, summary_name):
+            call_order.append("install")
             return {
                 "ok": True,
                 "summary_file": str(Path(self.temp_dir.name) / summary_name),
@@ -1014,6 +1020,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 1, msg=output)
         payload = json.loads(output)
         self.assertIn("inactive service state", payload["message"])
+        self.assertEqual(call_order[:3], ["install", "reload", "start"])
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         candidate_state = next(item for item in config_data["links"][0]["candidates"] if item["adapter"] == "rathole")
         self.assertNotEqual(candidate_state["state"], "running")
@@ -1022,7 +1029,6 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_smoke_test_uses_real_service_port(self) -> None:
         self._create_controller_link()
         probe_calls: list[int] = []
-        started_services: list[str] = []
 
         def fake_roundtrip(*, host: str, port: int, timeout: float):
             probe_calls.append(port)
@@ -1045,17 +1051,16 @@ class CliWorkflowTests(unittest.TestCase):
 
             return Result()
 
-        def fake_apply_reload(**kwargs):
-            return {"ok": True, "action": "systemd-reload-apply", "real_systemd_touched": True}
-
-        def fake_apply_start(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
-            started_services.append(service_name or "")
-            return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
-
         def fake_status(**kwargs):
             return {
-                "ok": True,
-                "services": [{"service_name": item, "active_state": "active"} for item in started_services],
+                "ok": False,
+                "services": [
+                    {
+                        "service_name": "pilottunnel-link-001-rathole-tcp-controller.service",
+                        "active_state": "active",
+                        "sub_state": "running",
+                    }
+                ],
                 "warnings": [],
                 "errors": [],
                 "real_systemd_touched": False,
@@ -1077,16 +1082,26 @@ class CliWorkflowTests(unittest.TestCase):
                 ],
             }
 
-        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.apply_reload", side_effect=fake_apply_reload), patch(
-            "pilottunnel.candidates.apply_start",
-            side_effect=fake_apply_start,
-        ), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch(
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch(
             "pilottunnel.candidates.probe_roundtrip",
             side_effect=fake_roundtrip,
         ):
             with patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install_candidate_service_units):
                 self.run_cli("candidate", "prepare-all", "--link", "link-001")
-                self.run_cli("candidate", "start", "--adapter", "rathole", "--link", "link-001")
+                config_data = json.loads(self.config.read_text(encoding="utf-8"))
+                config_data["links"][0]["candidates"][1]["state"] = "test_failed"
+                self.config.write_text(json.dumps(config_data, indent=2, sort_keys=True), encoding="utf-8")
+                state_data = json.loads(self.state.read_text(encoding="utf-8"))
+                state_data["active_link_candidates"]["ptlink-001"] = {
+                    "adapter": "rathole",
+                    "transport": "tcp",
+                    "category": "two_sided_tunnel",
+                    "role": "controller",
+                    "state": "test_failed",
+                    "services": [],
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+                self.state.write_text(json.dumps(state_data, indent=2, sort_keys=True), encoding="utf-8")
                 code, output = self.run_cli("candidate", "smoke-test", "--adapter", "rathole", "--link", "link-001", "--json")
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
@@ -1094,6 +1109,40 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["result"]["tested_ports"]["real_service_port"], self.main_port)
         self.assertGreaterEqual(len(probe_calls), 1)
         self.assertEqual(probe_calls[0], self.main_port)
+        self.assertEqual(payload["persisted_state"], "test_passed")
+        self.assertEqual(payload["runtime_systemd_state"], "active")
+
+    def test_candidate_results_reports_persisted_and_runtime_state(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units"), patch(
+            "pilottunnel.candidates.apply_reload",
+            return_value={"ok": True},
+        ), patch("pilottunnel.candidates.apply_start", return_value={"ok": True}), patch(
+            "pilottunnel.candidates.inspect_managed_status",
+            return_value={
+                "ok": False,
+                "services": [
+                    {
+                        "service_name": "pilottunnel-link-001-rathole-tcp-controller.service",
+                        "active_state": "active",
+                        "sub_state": "running",
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            },
+        ):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            config_data = json.loads(self.config.read_text(encoding="utf-8"))
+            config_data["links"][0]["candidates"][1]["state"] = "test_failed"
+            self.config.write_text(json.dumps(config_data, indent=2, sort_keys=True), encoding="utf-8")
+            code, output = self.run_cli("candidate", "result", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        rathole = next(item for item in payload["candidates"] if item["adapter"] == "rathole")
+        self.assertEqual(rathole["persisted_state"], "test_failed")
+        self.assertEqual(rathole["runtime_systemd_state"], "active")
+        self.assertFalse(rathole["runtime_systemd_ok"])
 
     def test_staged_list_shows_generated_files(self) -> None:
         self._create_profile()

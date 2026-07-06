@@ -1609,7 +1609,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "candidate" and args.candidate_command == "result":
         try:
-            payload = candidate_results(config=config, link_label=args.link)
+            payload = candidate_results(config=config, paths=switch_paths, link_label=args.link)
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate results failed\n{exc}")
             return 1
