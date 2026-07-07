@@ -354,6 +354,7 @@ def start_candidate(
         if status_services.get(service["service_name"], {}).get("active_state") != "active"
     ]
     if not status_payload.get("ok") or inactive_services:
+        status_errors = [str(item) for item in (status_payload.get("errors") or []) if str(item).strip()]
         for started_service in reversed(started):
             apply_stop(
                 service_dir=Path(started_service["service_dir"]),
@@ -368,7 +369,9 @@ def start_candidate(
             "ok": False,
             "action": "candidate-start",
             "message": (
-                status_payload.get("errors", ["Candidate start verification failed because systemd reported inactive service state"])[0]
+                status_errors[0]
+                if not status_payload.get("ok") and status_errors
+                else "Candidate start verification failed because systemd reported inactive service state"
                 if not status_payload.get("ok")
                 else f"Candidate start verification failed because systemd reported inactive service state for: {', '.join(sorted(inactive_services))}"
             ),
@@ -1183,7 +1186,7 @@ def _install_candidate_service_units(*, services: list[dict[str, Any]], summary_
             _validate_parent_chain(target_path.parent)
         except ValueError as exc:
             return _install_failure(str(exc), installed_services, summary_name)
-        backup_path = Path()
+        backup_path: Path | None = None
         if target_path.exists() and target_path.is_symlink():
             return _install_failure(f"Symlink escape blocked for target service unit: {target_path}", installed_services, summary_name)
         if target_path.exists():
@@ -1203,7 +1206,7 @@ def _install_candidate_service_units(*, services: list[dict[str, Any]], summary_
                 "service_name": service_name,
                 "staged_unit_path": str(staged_unit),
                 "target_unit_path": str(target_path),
-                "backup_path": str(backup_path) if backup_path else "",
+                "backup_path": str(backup_path) if backup_path is not None else "",
                 "kind": service["kind"],
             }
         )
@@ -1249,7 +1252,7 @@ def _rollback_service_install(payload: dict[str, Any], *, audit_path: Path) -> N
         if not target_unit_path:
             continue
         target = Path(target_unit_path)
-        if backup_path:
+        if backup_path not in (None, "", "."):
             backup = Path(backup_path)
             if backup.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
