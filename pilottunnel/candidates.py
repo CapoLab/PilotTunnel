@@ -18,6 +18,7 @@ from .adapters.base import AdapterContext
 from .audit import redact_secrets
 from .binary_install import resolve_binary_reference
 from .config import AppConfig, LinkCandidate, LinkProfile, Profile, ProfilePorts, ProfileSafety
+from .healthcheck import tcp_healthcheck
 from .links import get_active_link, get_link
 from .probe import DEFAULT_PROBE_TIMEOUT_SECONDS, probe_roundtrip
 from .state import AppState
@@ -193,15 +194,43 @@ def start_candidate(
         )
 
     active = state.active_link_candidates.get(link.id) or {}
+    side_runtime = _candidate_side_runtime_status(audit_path=paths.audit_path, side_plan=side_plan, allow_missing=True)
     if active and active.get("state") in {"starting", "running"} and active.get("adapter") != candidate.adapter:
-        return _failure(
-            "candidate-start",
-            f"Candidate '{active.get('adapter')}' is already active for link '{link.label}'",
-            link=link,
-            candidate=candidate,
-            role=role,
-        )
-    if active and active.get("state") == "running" and active.get("adapter") == candidate.adapter:
+        active_candidate = _candidate_for(link, str(active.get("adapter")))
+        active_side_plan = _side_plan(active_candidate, role)
+        active_runtime = _candidate_side_runtime_status(audit_path=paths.audit_path, side_plan=active_side_plan, allow_missing=True)
+        if not active_runtime.get("ok"):
+            state.active_link_candidates.pop(link.id, None)
+            if active_candidate.state == "running":
+                _mark_candidate(link, active_candidate.adapter, "prepared")
+            active = {}
+        else:
+            return _failure(
+                "candidate-start",
+                f"Candidate '{active.get('adapter')}' is already active for link '{link.label}'",
+                link=link,
+                candidate=candidate,
+                role=role,
+            )
+    if side_runtime.get("ok"):
+        _mark_candidate(link, candidate.adapter, "running")
+        state.active_link_candidates[link.id] = {
+            "adapter": candidate.adapter,
+            "transport": candidate.transport,
+            "category": candidate.category,
+            "role": role,
+            "state": "running",
+            "services": [
+                {
+                    "service_name": service["service_name"],
+                    "service_dir": service["service_dir"],
+                    "runtime_dir": service["runtime_dir"],
+                    "kind": service["kind"],
+                }
+                for service in side_plan["services"]
+            ],
+            "updated_at": _now_utc(),
+        }
         return {
             "ok": True,
             "action": "candidate-start",
@@ -210,12 +239,25 @@ def start_candidate(
             "link_label": link.label,
             "role": role,
             "candidate": _candidate_payload(candidate),
+            "systemd_status": side_runtime["status"],
+            "pairing_state": link.effective_pairing_state,
+            "pairing_state_note": _pairing_state_note(link),
             "next_instruction": _start_next_instruction(role, candidate),
             "real_systemd_touched": False,
             "services_started": True,
             "firewall_touched": False,
             "routes_touched": False,
         }
+    if active and active.get("state") == "running" and active.get("adapter") == candidate.adapter:
+        state.active_link_candidates.pop(link.id, None)
+        if candidate.state == "running":
+            _mark_candidate(link, candidate.adapter, "prepared")
+        active = {}
+    if active and active.get("state") == "starting" and active.get("adapter") == candidate.adapter and not side_runtime.get("ok"):
+        state.active_link_candidates.pop(link.id, None)
+        if candidate.state == "starting":
+            _mark_candidate(link, candidate.adapter, "prepared")
+        active = {}
 
     occupied = _occupied_ports(side_plan["owned_ports"])
     if occupied:
@@ -342,19 +384,11 @@ def start_candidate(
             }
         started.append(service)
 
-    status_payload = inspect_managed_status(
-        service_dir=Path(side_plan["service_dir"]),
-        service_name=None,
-        audit_path=paths.audit_path,
-    )
-    status_services = {item.get("service_name", ""): item for item in status_payload.get("services", [])}
-    inactive_services = [
-        service["service_name"]
-        for service in side_plan["services"]
-        if status_services.get(service["service_name"], {}).get("active_state") != "active"
-    ]
-    if not status_payload.get("ok") or inactive_services:
-        status_errors = [str(item) for item in (status_payload.get("errors") or []) if str(item).strip()]
+    status_payload = _candidate_side_runtime_status(audit_path=paths.audit_path, side_plan=side_plan, allow_missing=True)
+    inactive_services = list(status_payload.get("inactive_services") or [])
+    missing_services = list(status_payload.get("missing_services") or [])
+    if not status_payload.get("ok") or inactive_services or missing_services:
+        status_errors = [str(item) for item in (status_payload.get("status", {}).get("errors") or []) if str(item).strip()]
         for started_service in reversed(started):
             apply_stop(
                 service_dir=Path(started_service["service_dir"]),
@@ -370,10 +404,12 @@ def start_candidate(
             "action": "candidate-start",
             "message": (
                 status_errors[0]
-                if not status_payload.get("ok") and status_errors
-                else "Candidate start verification failed because systemd reported inactive service state"
-                if not status_payload.get("ok")
+                if status_errors
+                else f"Candidate start verification failed because required service units are missing from systemd: {', '.join(sorted(missing_services))}"
+                if missing_services
                 else f"Candidate start verification failed because systemd reported inactive service state for: {', '.join(sorted(inactive_services))}"
+                if inactive_services
+                else "Candidate start verification failed because systemd did not report every expected service as active"
             ),
             "link_id": link.id,
             "link_label": link.label,
@@ -382,7 +418,7 @@ def start_candidate(
             "install": install_payload,
             "daemon_reload": reload_payload,
             "start": start_results,
-            "systemd_status": status_payload,
+            "systemd_status": status_payload["status"],
             "rolled_back": True,
             "next_instruction": "Review the systemd status output, then retry the candidate after the service reports active.",
             "real_systemd_touched": True,
@@ -405,7 +441,9 @@ def start_candidate(
         "install": install_payload,
         "daemon_reload": reload_payload,
         "start": start_results,
-        "systemd_status": status_payload,
+        "systemd_status": status_payload["status"],
+        "pairing_state": link.effective_pairing_state,
+        "pairing_state_note": _pairing_state_note(link),
         "next_instruction": _start_next_instruction(role, candidate),
         "real_systemd_touched": True,
         "services_started": True,
@@ -552,17 +590,21 @@ def smoke_test_candidate(
     success_count = 0
     failure_count = 0
     connect_latencies: list[float] = []
-    roundtrip_latencies: list[float] = []
     errors: list[str] = []
     for _index in range(attempts):
-        result = probe_roundtrip(host="127.0.0.1", port=real_port, timeout=timeout).to_dict()
+        result = tcp_healthcheck(
+            host="127.0.0.1",
+            port=real_port,
+            timeout=timeout,
+            role=role,
+            profile=link.label,
+            label="real_service",
+        ).to_dict()
         attempt_results.append(result)
         if result["ok"]:
             success_count += 1
-            if result["connect_latency_ms"] is not None:
-                connect_latencies.append(float(result["connect_latency_ms"]))
-            if result["roundtrip_latency_ms"] is not None:
-                roundtrip_latencies.append(float(result["roundtrip_latency_ms"]))
+            if result["latency_ms"] is not None:
+                connect_latencies.append(float(result["latency_ms"]))
         else:
             failure_count += 1
             if result["error"]:
@@ -591,7 +633,7 @@ def smoke_test_candidate(
         "success_count": success_count,
         "failure_count": failure_count,
         "average_connect_latency_ms": round(sum(connect_latencies) / len(connect_latencies), 3) if connect_latencies else None,
-        "average_roundtrip_latency_ms": round(sum(roundtrip_latencies) / len(roundtrip_latencies), 3) if roundtrip_latencies else None,
+        "average_roundtrip_latency_ms": None,
         "real_pass": real_pass,
         "results": attempt_results,
         "errors": sorted(set(filter(None, errors))),
@@ -600,7 +642,7 @@ def smoke_test_candidate(
         summary["probe_roundtrip"] = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
     candidate.last_result = summary
     candidate.history.append(summary)
-    if real_pass and link.pairing_state == "awaiting_worker_import":
+    if real_pass and link.pairing_state in {"awaiting_worker_import", "paired_address_mismatch"}:
         link.pairing_state = "paired"
         link.status = "paired"
     return {
@@ -615,6 +657,7 @@ def smoke_test_candidate(
         "runtime_systemd_state": runtime_status["state"],
         "persisted_state": candidate.state,
         "pairing_state": link.effective_pairing_state,
+        "pairing_state_note": _pairing_state_note(link),
         "next_instruction": _smoke_next_instruction(candidate, real_pass),
         "real_systemd_touched": False,
         "services_started": False,
@@ -638,6 +681,7 @@ def candidate_results(
         payload["persisted_state"] = candidate.state
         payload["runtime_systemd_state"] = runtime["state"]
         payload["runtime_systemd_ok"] = runtime["ok"]
+        payload["runtime_services"] = runtime.get("services", [])
         candidate_payloads.append(payload)
     return {
         "ok": True,
@@ -646,6 +690,7 @@ def candidate_results(
         "link_label": link.label,
         "role": role,
         "pairing_state": link.effective_pairing_state,
+        "pairing_state_note": _pairing_state_note(link),
         "candidates": candidate_payloads,
         "real_systemd_touched": False,
         "services_started": False,
@@ -865,7 +910,7 @@ def _stage_side(
                 environment_summary = redact_secrets(runtime.get("environment", {}))
                 unit = render_unit_file(
                     unit_name=adapter.service_name(context),
-                    description=f"PilotTunnel {link.label} {adapter_name} {transport} {side_name}",
+                    description=f"PilotTunnel {link.label} {adapter_name} {side_name} {transport}",
                     command=shlex.join(runtime.get("argv", [])),
                     output_dir=Path(service_dir),
                     apply_changes=True,
@@ -1140,6 +1185,7 @@ def _render_probe_service(
     runtime_dir = _role_runtime_dir(paths, link, f"{adapter_name}-probe", "worker")
     service_dir = _role_service_dir(paths, link, f"{adapter_name}-probe", "worker")
     service_name = f"pilottunnel-{link.label}-{adapter_name}-{PROBE_MARKER}-worker.service"
+    repo_root = _candidate_repo_root()
     argv = [
         sys.executable,
         "-m",
@@ -1152,10 +1198,12 @@ def _render_probe_service(
     ]
     unit = render_unit_file(
         unit_name=service_name,
-        description=f"PilotTunnel {link.label} {adapter_name} worker probe responder",
+        description=f"PilotTunnel {link.label} {adapter_name} worker probe",
         command=shlex.join(argv),
         output_dir=service_dir,
         apply_changes=True,
+        environment={"PYTHONPATH": str(repo_root)},
+        working_directory=repo_root,
     )
     return {
         "kind": "probe",
@@ -1311,50 +1359,20 @@ def _candidate_service_name(candidate: LinkCandidate, role: str) -> str:
 
 
 def _candidate_runtime_systemd_status(*, audit_path: Path, candidate: LinkCandidate, role: str, allow_missing: bool = False) -> dict[str, Any]:
-    service_name = _candidate_service_name(candidate, role)
-    if not service_name:
+    side_plan = _side_plan(candidate, role)
+    if not side_plan.get("services"):
         return {
             "ok": False,
             "state": "unknown",
-            "service_name": "",
+            "service_name": _candidate_service_name(candidate, role),
             "status": {"ok": False, "services": [], "warnings": [], "errors": ["Candidate service name is unavailable"]},
         }
-    try:
-        payload = inspect_managed_status(
-            service_dir=SYSTEMD_TARGET_DIR,
-            service_name=service_name,
-            audit_path=audit_path,
-        )
-    except ValueError as exc:
-        if allow_missing:
-            return {
-                "ok": False,
-                "state": "missing",
-                "service_name": service_name,
-                "status": {"ok": False, "services": [], "warnings": [], "errors": [str(exc)]},
-            }
-        raise
-
-    services = payload.get("services", [])
-    service_entry = next((item for item in services if item.get("service_name") == service_name), {})
-    active_state = str(service_entry.get("active_state") or "").strip()
-    sub_state = str(service_entry.get("sub_state") or "").strip()
-    ok = payload.get("ok", False) and active_state == "active"
-    if allow_missing and not service_entry:
-        return {
-            "ok": False,
-            "state": "missing",
-            "service_name": service_name,
-            "status": payload,
-        }
-    runtime_state = "active" if ok and sub_state in {"running", "exited", "listening"} else active_state or ("inactive" if service_entry else "missing")
-    return {
-        "ok": ok,
-        "state": runtime_state,
-        "service_name": service_name,
-        "service_entry": service_entry,
-        "status": payload,
-    }
+    snapshot = _candidate_side_runtime_status(audit_path=audit_path, side_plan=side_plan, allow_missing=allow_missing)
+    primary_service_name = _candidate_service_name(candidate, role)
+    primary_entry = next((item for item in snapshot.get("services", []) if item.get("service_name") == primary_service_name), {})
+    snapshot["service_name"] = primary_service_name
+    snapshot["service_entry"] = primary_entry
+    return snapshot
 
 
 def _candidate_runtime_blocker(candidate: LinkCandidate, runtime_status: dict[str, Any]) -> str:
@@ -1365,6 +1383,76 @@ def _candidate_runtime_blocker(candidate: LinkCandidate, runtime_status: dict[st
     if state == "missing":
         return f"Candidate '{candidate.adapter}' service '{service_name}' is not installed or not discoverable on this controller"
     return f"Candidate '{candidate.adapter}' is not currently running on this controller (systemd state: {state})"
+
+
+def _candidate_side_runtime_status(*, audit_path: Path, side_plan: dict[str, Any], allow_missing: bool = False) -> dict[str, Any]:
+    aggregated_services: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    errors: list[str] = []
+    missing_services: list[str] = []
+    inactive_services: list[str] = []
+    for service in side_plan.get("services", []):
+        service_name = str(service["service_name"])
+        try:
+            payload = inspect_managed_status(
+                service_dir=SYSTEMD_TARGET_DIR,
+                service_name=service_name,
+                audit_path=audit_path,
+            )
+        except ValueError as exc:
+            if not allow_missing:
+                raise
+            payload = {"ok": False, "services": [], "warnings": [], "errors": [str(exc)]}
+        warnings.extend(payload.get("warnings", []))
+        errors.extend(payload.get("errors", []))
+        service_entry = next((item for item in payload.get("services", []) if item.get("service_name") == service_name), None)
+        if service_entry is None:
+            missing_services.append(service_name)
+            aggregated_services.append(
+                {
+                    "service_name": service_name,
+                    "kind": service.get("kind", ""),
+                    "active_state": "missing",
+                    "sub_state": "",
+                }
+            )
+            continue
+        active_state = str(service_entry.get("active_state") or "").strip()
+        sub_state = str(service_entry.get("sub_state") or "").strip()
+        if not (active_state == "active" and sub_state in {"running", "exited", "listening"}):
+            inactive_services.append(service_name)
+        aggregated = dict(service_entry)
+        aggregated["kind"] = service.get("kind", "")
+        aggregated_services.append(aggregated)
+    state = "active"
+    if missing_services:
+        state = "missing"
+    elif inactive_services:
+        state = "inactive"
+    ok = state == "active"
+    return {
+        "ok": ok,
+        "state": state,
+        "services": aggregated_services,
+        "missing_services": missing_services,
+        "inactive_services": inactive_services,
+        "status": {
+            "ok": ok,
+            "services": aggregated_services,
+            "warnings": sorted(set(filter(None, warnings))),
+            "errors": sorted(set(filter(None, errors))),
+        },
+    }
+
+
+def _candidate_repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _pairing_state_note(link: LinkProfile) -> str:
+    if link.effective_pairing_state == "awaiting_worker_import":
+        return "Controller-side pairing remains local until a worker import is confirmed by a successful real smoke test or future remote coordination."
+    return ""
 
 
 def _require_role(config: AppConfig) -> str:

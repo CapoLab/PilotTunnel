@@ -287,6 +287,36 @@ class SystemdControlTests(unittest.TestCase):
         self.assertEqual(payload["services"][0]["action"], "skipped")
         self.assertEqual(calls, [])
 
+    def test_start_apply_accepts_legacy_transport_runtime_role(self) -> None:
+        install_dir = self._managed_install_dir("rathole")
+        self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)
+        render_payload = self._render_services()
+        service_name = render_payload["services"][0]["service_name"]
+        self._set_runtime_role_in_staged_unit(service_name, "tcp")
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], *, timeout_seconds: float) -> dict:
+            calls.append(command)
+            return {"returncode": 0, "stdout": "ok", "stderr": "", "timed_out": False}
+
+        with patch("pilottunnel.systemd_control._is_linux", return_value=True), patch(
+            "pilottunnel.systemd_control._systemd_available",
+            return_value=True,
+        ), patch("pilottunnel.systemd_control._default_command_runner", side_effect=fake_runner):
+            code, output = self.run_cli(
+                "systemd",
+                "start",
+                "apply",
+                "--service-dir",
+                str(self.service_dir),
+                "--confirm",
+                "START_PILOTTUNNEL_SERVICES",
+            )
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["services"][0]["action"], "started")
+        self.assertEqual(calls, [["systemctl", "start", service_name]])
+
     def test_stop_plan_is_read_only(self) -> None:
         install_dir = self._managed_install_dir("rathole")
         self._write_config([self._profile("smoke-l4-001", adapter="rathole", runtime_role="active")], managed_install_dir=install_dir)

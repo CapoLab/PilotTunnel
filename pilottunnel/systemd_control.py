@@ -29,6 +29,15 @@ LIFECYCLE_NEXT_ACTION_HINTS = [
     "rollback_not_implemented",
     "auto_switch_not_implemented",
 ]
+STARTABLE_RUNTIME_ROLES = {
+    "active",
+    "hot_standby",
+    "controller",
+    "worker",
+    "probe",
+    "tcp",
+    "tcpmux",
+}
 
 
 def build_reload_plan(*, target_dir: Path, audit_path: Path) -> dict[str, Any]:
@@ -538,9 +547,17 @@ def _lifecycle_entry(
         "errors": [],
         "next_action_hints": list(LIFECYCLE_NEXT_ACTION_HINTS),
     }
-    if runtime_role not in {"active", "hot_standby"}:
+    if not runtime_role:
         entry["action"] = "skipped"
-        entry["reason"] = f"runtime_role '{runtime_role or 'unknown'}' is not startable/stoppable in this workflow"
+        entry["reason"] = "runtime_role 'unknown' is not startable/stoppable in this workflow"
+        return entry
+    if runtime_role == "config_only":
+        entry["action"] = "skipped"
+        entry["reason"] = "runtime_role 'config_only' is not startable/stoppable in this workflow"
+        return entry
+    if runtime_role not in STARTABLE_RUNTIME_ROLES:
+        entry["action"] = "skipped"
+        entry["reason"] = f"runtime_role '{runtime_role}' is not startable/stoppable in this workflow"
         return entry
     if not apply_changes:
         entry["action"] = "would_start" if action == "start" else "would_stop"

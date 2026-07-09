@@ -21,6 +21,7 @@ def render_unit_file(
     output_dir: Path,
     apply_changes: bool,
     environment: dict[str, str] | None = None,
+    working_directory: str | Path | None = None,
 ) -> UnitRenderResult:
     path = output_dir / unit_name
     service_lines = [
@@ -37,6 +38,11 @@ def render_unit_file(
             raise ValueError(f"Invalid systemd environment variable name: {key!r}")
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         service_lines.append(f'Environment="{safe_key}={escaped}"')
+    if working_directory is not None:
+        safe_working_directory = str(working_directory).strip()
+        if not safe_working_directory:
+            raise ValueError("WorkingDirectory must not be empty")
+        service_lines.append(f"WorkingDirectory={safe_working_directory}")
     service_lines.extend(
         [
             f"ExecStart={command}",

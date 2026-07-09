@@ -707,6 +707,24 @@ class CliWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, msg=output)
 
+    def _create_worker_link_from_pairing_code(self, *, worker_address: str = "worker.example.invalid") -> str:
+        self._create_controller_link(worker_address=worker_address)
+        code, output = self.run_cli("link", "export-pairing-code", "--label", "link-001")
+        self.assertEqual(code, 0, msg=output)
+        pairing_code = json.loads(output)["pairing_code"]
+        code, output = self.run_cli("init", "--force", "--role", "worker")
+        self.assertEqual(code, 0, msg=output)
+        code, output = self.run_cli(
+            "link",
+            "import-pairing-code",
+            "--code",
+            pairing_code,
+            "--worker-address-override",
+            worker_address,
+        )
+        self.assertEqual(code, 0, msg=output)
+        return pairing_code
+
     def _prepare_candidate_binaries(self):
         def fake_resolve_binary_reference(*, adapter: str, component: str | None = None, **kwargs):
             binary_name = component or adapter
@@ -987,7 +1005,19 @@ class CliWorkflowTests(unittest.TestCase):
 
         def fake_status(**kwargs):
             call_order.append("status")
-            return {"ok": True, "services": [], "warnings": [], "errors": [], "real_systemd_touched": False}
+            return {
+                "ok": False,
+                "services": [
+                    {
+                        "service_name": "pilottunnel-link-001-rathole-tcp-controller.service",
+                        "active_state": "inactive",
+                        "sub_state": "dead",
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+                "real_systemd_touched": False,
+            }
 
         def fake_apply_stop(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
             call_order.append("stop")
@@ -1020,7 +1050,10 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 1, msg=output)
         payload = json.loads(output)
         self.assertIn("inactive service state", payload["message"])
-        self.assertEqual(call_order[:3], ["install", "reload", "start"])
+        self.assertEqual(call_order[0], "status")
+        self.assertIn("install", call_order)
+        self.assertIn("reload", call_order)
+        self.assertIn("start", call_order)
         config_data = json.loads(self.config.read_text(encoding="utf-8"))
         candidate_state = next(item for item in config_data["links"][0]["candidates"] if item["adapter"] == "rathole")
         self.assertNotEqual(candidate_state["state"], "running")
@@ -1084,9 +1117,101 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("start", call_order)
         self.assertIn("status", call_order)
 
+    def test_worker_candidate_prepare_renders_probe_unit_with_repo_context(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        rathole = next(item for item in payload["candidates"] if item["adapter"] == "rathole")
+        worker_services = rathole["topology"]["sides"]["worker"]["services"]
+        probe_service = next(item for item in worker_services if item["kind"] == "probe")
+        probe_unit = Path(probe_service["unit_path"]).read_text(encoding="utf-8")
+        self.assertIn("WorkingDirectory=", probe_unit)
+        self.assertIn('Environment="PYTHONPATH=', probe_unit)
+        self.assertIn("Description=PilotTunnel link-001 rathole worker probe", probe_unit)
+
+    def test_worker_candidate_start_reconciles_stale_state_and_installs_adapter_and_probe_units(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        status_counts: dict[str, int] = {}
+        start_calls: list[str] = []
+
+        def fake_install_candidate_service_units(*, services, summary_name):
+            return {
+                "ok": True,
+                "summary_file": str(Path(self.temp_dir.name) / summary_name),
+                "target_dir": str(Path(self.temp_dir.name) / "systemd"),
+                "services": [
+                    {
+                        "service_name": item["service_name"],
+                        "target_unit_path": str(Path(self.temp_dir.name) / "systemd" / item["service_name"]),
+                        "backup_path": "",
+                        "action": "installed",
+                        "kind": item["kind"],
+                    }
+                    for item in services
+                ],
+            }
+
+        def fake_reload(**kwargs):
+            return {"ok": True, "action": "systemd-reload-apply", "real_systemd_touched": True}
+
+        def fake_start(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            start_calls.append(service_name or "")
+            return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
+
+        def fake_status(*, service_dir: Path, service_name: str | None, audit_path: Path):
+            current_name = service_name or ""
+            status_counts[current_name] = status_counts.get(current_name, 0) + 1
+            if status_counts[current_name] == 1:
+                return {"ok": False, "services": [], "warnings": [], "errors": [f"missing {current_name}"]}
+            return {
+                "ok": True,
+                "services": [
+                    {
+                        "service_name": current_name,
+                        "active_state": "active",
+                        "sub_state": "running",
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+                "real_systemd_touched": False,
+            }
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install_candidate_service_units), patch(
+            "pilottunnel.candidates.apply_reload",
+            side_effect=fake_reload,
+        ), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch(
+            "pilottunnel.candidates.inspect_managed_status",
+            side_effect=fake_status,
+        ):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            state_data = json.loads(self.state.read_text(encoding="utf-8"))
+            state_data["active_link_candidates"]["ptlink-001"] = {
+                "adapter": "rathole",
+                "transport": "tcp",
+                "category": "two_sided_tunnel",
+                "role": "worker",
+                "state": "running",
+                "services": [],
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+            self.state.write_text(json.dumps(state_data, indent=2, sort_keys=True), encoding="utf-8")
+            code, output = self.run_cli("candidate", "start", "--adapter", "rathole", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        install_names = {item["service_name"] for item in payload["install"]["services"]}
+        self.assertEqual(len(install_names), 2)
+        self.assertTrue(any(name.endswith("rathole-tcp-worker.service") for name in install_names))
+        self.assertTrue(any("pilotunnel-probe" in name for name in install_names))
+        self.assertEqual(set(start_calls), install_names)
+        self.assertEqual(payload["systemd_status"]["ok"], True)
+
     def test_candidate_smoke_test_uses_real_service_port(self) -> None:
         self._create_controller_link()
         probe_calls: list[int] = []
+        tcp_calls: list[int] = []
 
         def fake_roundtrip(*, host: str, port: int, timeout: float):
             probe_calls.append(port)
@@ -1105,6 +1230,26 @@ class CliWorkflowTests(unittest.TestCase):
                         "bytes_sent": 1,
                         "bytes_received": 1,
                         "exact_match": True,
+                    }
+
+            return Result()
+
+        def fake_tcp_healthcheck(*, host: str, port: int, timeout: float, role: str, profile: str, label: str):
+            tcp_calls.append(port)
+
+            class Result:
+                def to_dict(self_inner):
+                    return {
+                        "ok": True,
+                        "host": host,
+                        "port": port,
+                        "timeout": timeout,
+                        "latency_ms": 1.0,
+                        "error": "",
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "role": role,
+                        "profile": profile,
+                        "label": label,
                     }
 
             return Result()
@@ -1141,6 +1286,9 @@ class CliWorkflowTests(unittest.TestCase):
             }
 
         with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch(
+            "pilottunnel.candidates.tcp_healthcheck",
+            side_effect=fake_tcp_healthcheck,
+        ), patch(
             "pilottunnel.candidates.probe_roundtrip",
             side_effect=fake_roundtrip,
         ):
@@ -1165,8 +1313,11 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["result"]["smoke_mode"], "real_service")
         self.assertEqual(payload["result"]["tested_ports"]["real_service_port"], self.main_port)
+        self.assertGreaterEqual(len(tcp_calls), 1)
+        self.assertEqual(tcp_calls[0], self.main_port)
         self.assertGreaterEqual(len(probe_calls), 1)
-        self.assertEqual(probe_calls[0], self.main_port)
+        self.assertTrue(all(port != self.main_port for port in probe_calls))
+        self.assertIsNone(payload["result"]["average_roundtrip_latency_ms"])
         self.assertEqual(payload["persisted_state"], "test_passed")
         self.assertEqual(payload["runtime_systemd_state"], "active")
 
@@ -1200,7 +1351,17 @@ class CliWorkflowTests(unittest.TestCase):
         rathole = next(item for item in payload["candidates"] if item["adapter"] == "rathole")
         self.assertEqual(rathole["persisted_state"], "test_failed")
         self.assertEqual(rathole["runtime_systemd_state"], "active")
-        self.assertFalse(rathole["runtime_systemd_ok"])
+        self.assertTrue(rathole["runtime_systemd_ok"])
+
+    def test_candidate_results_explain_local_pairing_wait_state(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, output = self.run_cli("candidate", "result", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["pairing_state"], "awaiting_worker_import")
+        self.assertIn("successful real smoke test", payload["pairing_state_note"])
 
     def test_staged_list_shows_generated_files(self) -> None:
         self._create_profile()
