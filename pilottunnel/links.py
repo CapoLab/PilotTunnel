@@ -12,7 +12,14 @@ import re
 import secrets
 from uuid import uuid4
 
-from .config import AppConfig, LinkProfile, side_label_for_role
+from .config import (
+    AppConfig,
+    DEFAULT_AUX_TEST_PORT,
+    DEFAULT_PROBE_PORT,
+    DEFAULT_RESERVED_TEST_RANGE,
+    LinkProfile,
+    side_label_for_role,
+)
 from .network import NetworkDiscoveryResult, detect_local_address
 
 SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -89,6 +96,9 @@ def _pairing_payload_without_checksum(link: LinkProfile) -> dict[str, object]:
         "controller_user_facing_port": link.controller_user_facing_port,
         "transport_port": link.transport_port,
         "worker_service_port": link.worker_service_port,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
         "pairing_secret": link.pairing_secret,
         "issued_at": link.pairing_issued_at,
     }
@@ -220,6 +230,9 @@ def link_payload(link: LinkProfile, *, active_label: str = "", role: str = "") -
         "controller_user_facing_port": link.controller_user_facing_port,
         "transport_port": link.transport_port,
         "worker_service_port": link.worker_service_port,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
         "local_side": role_summary_label(role) if role else "",
         "detected_local_address": _effective_local_address(link, role),
         "remote_address": _effective_remote_address(link, role),
@@ -275,6 +288,9 @@ def create_controller_link(
         iran_main_port=user_facing_port,
         tunnel_port=transport_port_value,
         config_port=service_port,
+        probe_port=DEFAULT_PROBE_PORT,
+        aux_test_port=DEFAULT_AUX_TEST_PORT,
+        reserved_test_range=list(DEFAULT_RESERVED_TEST_RANGE),
         kharej_address=normalized_worker_address,
         status="awaiting_worker_import",
         pairing_state="awaiting_worker_import",
@@ -364,11 +380,17 @@ def decode_pairing_code(pairing_code: str) -> dict[str, object]:
         "controller_user_facing_port": validate_link_port(int(payload["controller_user_facing_port"]), "Iran user-facing port"),
         "transport_port": validate_link_port(int(payload["transport_port"]), "Tunnel transport port"),
         "worker_service_port": validate_link_port(int(payload["worker_service_port"]), "Kharej service/config port"),
+        "probe_port": validate_link_port(int(payload.get("probe_port", DEFAULT_PROBE_PORT)), "Probe port"),
+        "aux_test_port": validate_link_port(int(payload.get("aux_test_port", DEFAULT_AUX_TEST_PORT)), "Auxiliary test port"),
+        "reserved_test_range": [
+            validate_link_port(int(item), "Reserved test port")
+            for item in list(payload.get("reserved_test_range") or list(DEFAULT_RESERVED_TEST_RANGE))
+        ],
         "pairing_secret": validate_link_address(str(payload["pairing_secret"]), "Pairing secret"),
         "issued_at": validate_link_address(str(payload["issued_at"]), "Issued timestamp"),
         "checksum": validate_link_address(str(payload["checksum"]), "Corruption checksum"),
     }
-    computed_checksum = _checksum_payload({key: value for key, value in normalized.items() if key != "checksum"})
+    computed_checksum = _checksum_payload({key: value for key, value in payload.items() if key != "checksum"})
     if normalized["checksum"] != computed_checksum:
         raise ValueError("Pairing code checksum validation failed")
     return normalized
@@ -401,6 +423,9 @@ def import_pairing_code(
         iran_main_port=payload["controller_user_facing_port"],
         tunnel_port=payload["transport_port"],
         config_port=payload["worker_service_port"],
+        probe_port=payload["probe_port"],
+        aux_test_port=payload["aux_test_port"],
+        reserved_test_range=list(payload["reserved_test_range"]),
         kharej_address=expected_worker_address,
         status="paired" if not mismatch else "paired_address_mismatch",
         pairing_state="paired" if not mismatch else "paired_address_mismatch",
@@ -443,6 +468,9 @@ def setup_worker_manual(
         iran_main_port=None,
         tunnel_port=transport_port_value,
         config_port=worker_service_port_value,
+        probe_port=DEFAULT_PROBE_PORT,
+        aux_test_port=DEFAULT_AUX_TEST_PORT,
+        reserved_test_range=list(DEFAULT_RESERVED_TEST_RANGE),
         kharej_address=discovery.preferred_address,
         status="manual_worker",
         pairing_state="manual_worker",
@@ -490,6 +518,9 @@ def setup_iran_link(
         iran_main_port=main_port,
         tunnel_port=tunnel_port_value,
         config_port=config_port_value,
+        probe_port=DEFAULT_PROBE_PORT,
+        aux_test_port=DEFAULT_AUX_TEST_PORT,
+        reserved_test_range=list(DEFAULT_RESERVED_TEST_RANGE),
         kharej_address=normalized_kharej_address,
         status="legacy_manual_controller",
         pairing_state="legacy_manual_controller",

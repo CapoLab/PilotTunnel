@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pilottunnel import cli
+from pilottunnel.config import DEFAULT_AUX_TEST_PORT, DEFAULT_PROBE_PORT, load_config
 
 
 class CliWorkflowTests(unittest.TestCase):
@@ -967,7 +968,11 @@ class CliWorkflowTests(unittest.TestCase):
             code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
         self.assertEqual(code, 0, msg=output)
         payload = json.loads(output)
+        self.assertEqual(payload["probe_port"], DEFAULT_PROBE_PORT)
+        self.assertEqual(payload["aux_test_port"], DEFAULT_AUX_TEST_PORT)
+        self.assertTrue(payload["reserved_test_range"])
         rathole = next(item for item in payload["candidates"] if item["adapter"] == "rathole")
+        self.assertTrue(all(item["probe"]["port"] == DEFAULT_PROBE_PORT for item in payload["candidates"]))
         self.assertIn(self.control_port, rathole["controller_owned_ports"])
         self.assertIn(self.main_port, rathole["controller_owned_ports"])
         self.assertIn(self.main_port, rathole["worker_dependency_ports"])
@@ -977,6 +982,98 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn(f'bind_addr = "0.0.0.0:{self.control_port}"', controller_config)
         self.assertIn(f'bind_addr = "0.0.0.0:{self.main_port}"', controller_config)
         self.assertIn(f'local_addr = "127.0.0.1:{self.main_port}"', worker_config)
+
+    def test_link_config_migration_adds_default_probe_ports(self) -> None:
+        self.config.write_text(
+            json.dumps(
+                {
+                    "node": {"normalized_role": "controller", "active_link_label": "link-001"},
+                    "links": [
+                        {
+                            "id": "ptlink-001",
+                            "label": "link-001",
+                            "iran_address": "controller.example.invalid",
+                            "iran_main_port": self.main_port,
+                            "tunnel_port": self.control_port,
+                            "config_port": self.service_port,
+                            "kharej_address": "worker.example.invalid",
+                            "pairing_secret": "secret",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = load_config(self.config)
+        self.assertEqual(config.links[0].probe_port, DEFAULT_PROBE_PORT)
+        self.assertEqual(config.links[0].aux_test_port, DEFAULT_AUX_TEST_PORT)
+        self.assertEqual(config.links[0].reserved_test_range[0], DEFAULT_PROBE_PORT)
+
+    def test_candidate_prepare_warns_when_default_probe_port_is_busy(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries(), patch(
+            "pilottunnel.candidates._port_available_local",
+            side_effect=lambda port: False if int(port) == DEFAULT_PROBE_PORT else True,
+        ), patch(
+            "pilottunnel.preflight._port_available",
+            side_effect=lambda port: False if int(port) == DEFAULT_PROBE_PORT else True,
+        ):
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertIn("Probe/test port 27777 is busy", " ".join(payload["warnings"]))
+        self.assertIn("27778", " ".join(payload["warnings"]))
+        self.assertIn("Probe/test port 27777 is unavailable", " ".join(payload["blockers"]))
+
+    def test_candidate_prepare_uses_aux_test_port_when_explicitly_requested(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--use-aux-test-port", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["probe_port"], DEFAULT_AUX_TEST_PORT)
+        self.assertTrue(all(item["probe"]["port"] == DEFAULT_AUX_TEST_PORT for item in payload["candidates"]))
+
+    def test_candidate_prepare_default_human_output_is_concise(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001")
+        self.assertEqual(code, 0, msg=output)
+        self.assertIn("Candidates summary:", output)
+        self.assertIn("Reserved test ports:", output)
+        self.assertNotIn("Controller process role:", output)
+        self.assertNotIn("Listening side:", output)
+
+    def test_candidate_json_output_contains_reserved_test_port_fields(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        for key in [
+            "ok",
+            "link_label",
+            "role",
+            "active_adapter",
+            "pairing_state",
+            "probe_port",
+            "aux_test_port",
+            "reserved_test_range",
+            "candidates_summary",
+            "next_instruction",
+        ]:
+            self.assertIn(key, payload)
+
+    def test_candidate_prepare_masks_secret_environment_summaries(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        chisel = next(item for item in payload["candidates"] if item["adapter"] == "chisel")
+        bore = next(item for item in payload["candidates"] if item["adapter"] == "bore")
+        self.assertEqual(chisel["worker_environment_summary"]["AUTH"], "***REDACTED***")
+        self.assertEqual(bore["controller_environment_summary"]["BORE_SECRET"], "***REDACTED***")
 
     def test_candidate_plan_displays_controller_owned_ports(self) -> None:
         self._create_controller_link()
@@ -1320,6 +1417,148 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIsNone(payload["result"]["average_roundtrip_latency_ms"])
         self.assertEqual(payload["persisted_state"], "test_passed")
         self.assertEqual(payload["runtime_systemd_state"], "active")
+
+    def test_candidate_real_service_smoke_test_passes_even_if_probe_fails(self) -> None:
+        self._create_controller_link()
+
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
+            class Result:
+                def to_dict(self_inner):
+                    return {
+                        "ok": False,
+                        "host": host,
+                        "port": port,
+                        "timeout": timeout,
+                        "connect_latency_ms": None,
+                        "roundtrip_latency_ms": None,
+                        "error": "probe unavailable",
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "bytes_sent": 0,
+                        "bytes_received": 0,
+                        "exact_match": False,
+                    }
+
+            return Result()
+
+        def fake_tcp_healthcheck(*, host: str, port: int, timeout: float, role: str, profile: str, label: str):
+            class Result:
+                def to_dict(self_inner):
+                    return {
+                        "ok": True,
+                        "host": host,
+                        "port": port,
+                        "timeout": timeout,
+                        "latency_ms": 1.2,
+                        "error": "",
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "role": role,
+                        "profile": profile,
+                        "label": label,
+                    }
+
+            return Result()
+
+        def fake_status(**kwargs):
+            return {
+                "ok": False,
+                "services": [
+                    {
+                        "service_name": "pilottunnel-link-001-rathole-tcp-controller.service",
+                        "active_state": "active",
+                        "sub_state": "running",
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            }
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch(
+            "pilottunnel.candidates.tcp_healthcheck",
+            side_effect=fake_tcp_healthcheck,
+        ), patch("pilottunnel.candidates.probe_roundtrip", side_effect=fake_probe_roundtrip):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            config_data = json.loads(self.config.read_text(encoding="utf-8"))
+            config_data["links"][0]["candidates"][1]["state"] = "running"
+            self.config.write_text(json.dumps(config_data, indent=2, sort_keys=True), encoding="utf-8")
+            state_data = json.loads(self.state.read_text(encoding="utf-8"))
+            state_data["active_link_candidates"]["ptlink-001"] = {
+                "adapter": "rathole",
+                "transport": "tcp",
+                "category": "two_sided_tunnel",
+                "role": "controller",
+                "state": "running",
+                "services": [],
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+            self.state.write_text(json.dumps(state_data, indent=2, sort_keys=True), encoding="utf-8")
+            code, output = self.run_cli("candidate", "smoke-test", "--adapter", "rathole", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["result"]["real_service_status"], "passed")
+        self.assertEqual(payload["result"]["probe_status"], "failed")
+        self.assertTrue(payload["ok"])
+
+    def test_candidate_probe_mode_fails_when_probe_path_is_unavailable(self) -> None:
+        self._create_controller_link()
+
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
+            class Result:
+                def to_dict(self_inner):
+                    return {
+                        "ok": False,
+                        "host": host,
+                        "port": port,
+                        "timeout": timeout,
+                        "connect_latency_ms": None,
+                        "roundtrip_latency_ms": None,
+                        "error": "probe unavailable",
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "bytes_sent": 0,
+                        "bytes_received": 0,
+                        "exact_match": False,
+                    }
+
+            return Result()
+
+        def fake_status(**kwargs):
+            return {
+                "ok": False,
+                "services": [
+                    {
+                        "service_name": "pilottunnel-link-001-rathole-tcp-controller.service",
+                        "active_state": "active",
+                        "sub_state": "running",
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            }
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch(
+            "pilottunnel.candidates.probe_roundtrip",
+            side_effect=fake_probe_roundtrip,
+        ):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            config_data = json.loads(self.config.read_text(encoding="utf-8"))
+            config_data["links"][0]["candidates"][1]["state"] = "running"
+            self.config.write_text(json.dumps(config_data, indent=2, sort_keys=True), encoding="utf-8")
+            state_data = json.loads(self.state.read_text(encoding="utf-8"))
+            state_data["active_link_candidates"]["ptlink-001"] = {
+                "adapter": "rathole",
+                "transport": "tcp",
+                "category": "two_sided_tunnel",
+                "role": "controller",
+                "state": "running",
+                "services": [],
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+            self.state.write_text(json.dumps(state_data, indent=2, sort_keys=True), encoding="utf-8")
+            code, output = self.run_cli("candidate", "smoke-test", "--adapter", "rathole", "--link", "link-001", "--mode", "probe", "--json")
+        self.assertEqual(code, 1, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["result"]["real_service_status"], "skipped")
+        self.assertEqual(payload["result"]["probe_status"], "failed")
+        self.assertIn("Probe path smoke test failed", payload["message"])
 
     def test_candidate_results_reports_persisted_and_runtime_state(self) -> None:
         self._create_controller_link()

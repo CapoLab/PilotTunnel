@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,9 +18,20 @@ from .adapters import ADAPTERS
 from .adapters.base import AdapterContext
 from .audit import redact_secrets
 from .binary_install import resolve_binary_reference
-from .config import AppConfig, LinkCandidate, LinkProfile, Profile, ProfilePorts, ProfileSafety
+from .config import (
+    AppConfig,
+    DEFAULT_AUX_TEST_PORT,
+    DEFAULT_PROBE_PORT,
+    DEFAULT_RESERVED_TEST_RANGE,
+    LinkCandidate,
+    LinkProfile,
+    Profile,
+    ProfilePorts,
+    ProfileSafety,
+)
 from .healthcheck import tcp_healthcheck
 from .links import get_active_link, get_link
+from .preflight import run_preflight
 from .probe import DEFAULT_PROBE_TIMEOUT_SECONDS, probe_roundtrip
 from .state import AppState
 from .switch_engine import SwitchPaths
@@ -65,6 +77,7 @@ CANDIDATE_STATES = {
 SYSTEMD_TARGET_DIR = Path("/etc/systemd/system")
 PROBE_MARKER = "pilotunnel-probe"
 BORE_CONTROL_PORT = 7835
+SUPPORTED_CANDIDATE_LAYERS = {"auto", "layer4"}
 
 
 def prepare_all_candidates(
@@ -74,22 +87,35 @@ def prepare_all_candidates(
     paths: SwitchPaths,
     requested_platform: str | None = None,
     link_label: str | None = None,
+    layer: str = "auto",
+    probe_port_override: int | None = None,
+    use_aux_test_port: bool = False,
+    auto_test_port: bool = False,
 ) -> dict[str, Any]:
     role = _require_role(config)
     link = _target_link(config, link_label)
     _validate_link(link)
+    requested_layer = _resolve_candidate_layer(layer)
+    test_port_selection = _select_link_test_ports(
+        link,
+        requested_probe_port=probe_port_override,
+        use_aux_test_port=use_aux_test_port,
+        auto_test_port=auto_test_port,
+    )
+    preflight = run_preflight(paths.staging_root, link=link, probe_write=False).to_dict()
     existing = {item.adapter: item for item in link.candidates}
     candidates: list[LinkCandidate] = []
-    warnings: list[str] = []
-    blockers: list[str] = []
+    warnings: list[str] = list(preflight.get("warnings", [])) + list(test_port_selection["warnings"])
+    blockers: list[str] = list(test_port_selection["blockers"])
 
     for adapter_name, transport in CANDIDATE_TRANSPORTS.items():
         candidate = existing.get(adapter_name) or LinkCandidate(adapter=adapter_name, transport=transport)
         _reset_candidate(candidate, adapter_name=adapter_name, transport=transport, local_role=role)
+        candidate.layer = _adapter_layer(adapter_name, requested_layer)
         probe = _probe_plan(link, adapter_name)
         topology = _build_topology(link, adapter_name, transport, probe)
-        local_warnings: list[str] = []
-        local_blockers: list[str] = []
+        local_warnings: list[str] = list(test_port_selection["warnings"])
+        local_blockers: list[str] = list(test_port_selection["blockers"])
         local_notes: list[str] = []
         stage_result = _stage_candidate(
             config=config,
@@ -125,10 +151,19 @@ def prepare_all_candidates(
         "link_label": link.label,
         "role": role,
         "pairing_state": link.effective_pairing_state,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": _active_candidate_adapter(link),
         "candidates": [_candidate_payload(item) for item in candidates],
+        "candidates_summary": _candidate_summary_rows(link),
         "warnings": sorted(set(filter(None, warnings))),
         "blockers": sorted(set(filter(None, blockers))),
         "next_instruction": _prepare_next_instruction(role),
+        "preflight": {
+            "test_port_availability": preflight.get("test_port_availability", {}),
+            "suggested_test_ports": preflight.get("suggested_test_ports", []),
+        },
         "real_systemd_touched": False,
         "services_started": False,
         "firewall_touched": False,
@@ -164,6 +199,12 @@ def plan_candidate(
         "link_id": link.id,
         "link_label": link.label,
         "role": role,
+        "pairing_state": link.effective_pairing_state,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": candidate.adapter,
+        "candidates_summary": _candidate_summary_rows(link),
         "candidate": payload,
         "warnings": list(candidate.warnings),
         "blockers": list(candidate.blockers),
@@ -238,9 +279,14 @@ def start_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": candidate.adapter,
+            "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "systemd_status": side_runtime["status"],
-            "pairing_state": link.effective_pairing_state,
             "pairing_state_note": _pairing_state_note(link),
             "next_instruction": _start_next_instruction(role, candidate),
             "real_systemd_touched": False,
@@ -269,6 +315,12 @@ def start_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": candidate.adapter,
+            "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "occupied_ports": occupied,
             "next_instruction": "Stop the conflicting process manually or choose another candidate. PilotTunnel did not modify it.",
@@ -311,6 +363,12 @@ def start_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": candidate.adapter,
+            "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "install": install_payload,
             "next_instruction": "Review the staged unit failure and re-run candidate prepare-all before retrying.",
@@ -332,6 +390,12 @@ def start_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": candidate.adapter,
+            "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "install": install_payload,
             "daemon_reload": reload_payload,
@@ -371,6 +435,12 @@ def start_candidate(
                 "link_id": link.id,
                 "link_label": link.label,
                 "role": role,
+                "pairing_state": link.effective_pairing_state,
+                "probe_port": link.probe_port,
+                "aux_test_port": link.aux_test_port,
+                "reserved_test_range": list(link.reserved_test_range),
+                "active_adapter": candidate.adapter,
+                "candidates_summary": _candidate_summary_rows(link),
                 "candidate": _candidate_payload(candidate),
                 "install": install_payload,
                 "daemon_reload": reload_payload,
@@ -414,6 +484,12 @@ def start_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": candidate.adapter,
+            "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "install": install_payload,
             "daemon_reload": reload_payload,
@@ -437,12 +513,17 @@ def start_candidate(
         "link_id": link.id,
         "link_label": link.label,
         "role": role,
+        "pairing_state": link.effective_pairing_state,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": candidate.adapter,
+        "candidates_summary": _candidate_summary_rows(link),
         "candidate": _candidate_payload(candidate),
         "install": install_payload,
         "daemon_reload": reload_payload,
         "start": start_results,
         "systemd_status": status_payload["status"],
-        "pairing_state": link.effective_pairing_state,
         "pairing_state_note": _pairing_state_note(link),
         "next_instruction": _start_next_instruction(role, candidate),
         "real_systemd_touched": True,
@@ -473,6 +554,12 @@ def stop_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": "",
+            "candidates_summary": _candidate_summary_rows(link),
             "real_systemd_touched": False,
             "services_started": False,
             "firewall_touched": False,
@@ -500,6 +587,12 @@ def stop_candidate(
             "link_id": link.id,
             "link_label": link.label,
             "role": role,
+            "pairing_state": link.effective_pairing_state,
+            "probe_port": link.probe_port,
+            "aux_test_port": link.aux_test_port,
+            "reserved_test_range": list(link.reserved_test_range),
+            "active_adapter": candidate.adapter,
+            "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "stop": stop_results,
             "real_systemd_touched": True,
@@ -524,6 +617,12 @@ def stop_candidate(
         "link_id": link.id,
         "link_label": link.label,
         "role": role,
+        "pairing_state": link.effective_pairing_state,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": candidate.adapter,
+        "candidates_summary": _candidate_summary_rows(link),
         "candidate": _candidate_payload(candidate),
         "stop": stop_results,
         "next_instruction": _stop_next_instruction(role),
@@ -543,10 +642,12 @@ def smoke_test_candidate(
     attempts: int = 3,
     timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
     link_label: str | None = None,
+    mode: str = "real_service",
 ) -> dict[str, Any]:
     role = _require_role(config)
     if role != "controller":
         raise ValueError("Real candidate smoke tests must be run from the controller side")
+    selected_mode = _normalize_smoke_mode(mode)
     link = _target_link(config, link_label)
     candidate = _candidate_for(link, adapter_name)
     side_plan = _side_plan(candidate, role)
@@ -591,31 +692,38 @@ def smoke_test_candidate(
     failure_count = 0
     connect_latencies: list[float] = []
     errors: list[str] = []
-    for _index in range(attempts):
-        result = tcp_healthcheck(
-            host="127.0.0.1",
-            port=real_port,
-            timeout=timeout,
-            role=role,
-            profile=link.label,
-            label="real_service",
-        ).to_dict()
-        attempt_results.append(result)
-        if result["ok"]:
-            success_count += 1
-            if result["latency_ms"] is not None:
-                connect_latencies.append(float(result["latency_ms"]))
-        else:
-            failure_count += 1
-            if result["error"]:
-                errors.append(result["error"])
-    real_pass = bool(attempt_results) and failure_count == 0 and success_count == len(attempt_results)
-    _mark_candidate(link, candidate.adapter, "test_passed" if real_pass else "test_failed")
+    real_pass = False
+    if selected_mode == "real_service":
+        for _index in range(attempts):
+            result = tcp_healthcheck(
+                host="127.0.0.1",
+                port=real_port,
+                timeout=timeout,
+                role=role,
+                profile=link.label,
+                label="real_service",
+            ).to_dict()
+            attempt_results.append(result)
+            if result["ok"]:
+                success_count += 1
+                if result["latency_ms"] is not None:
+                    connect_latencies.append(float(result["latency_ms"]))
+            else:
+                failure_count += 1
+                if result["error"]:
+                    errors.append(result["error"])
+        real_pass = bool(attempt_results) and failure_count == 0 and success_count == len(attempt_results)
+    probe_result = None
+    if probe_port >= 1:
+        probe_result = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
+    probe_pass = bool(probe_result and probe_result.get("ok"))
+    final_pass = real_pass if selected_mode == "real_service" else probe_pass
+    _mark_candidate(link, candidate.adapter, "test_passed" if final_pass else "test_failed")
     summary = {
         "checked_at": _now_utc(),
         "adapter": candidate.adapter,
         "category": candidate.category,
-        "smoke_mode": "real_service" if real_port else "probe_only",
+        "smoke_mode": selected_mode,
         "attempt_count": attempts,
         "timeout": timeout,
         "controller_role": candidate.topology.get("controller_process_role", ""),
@@ -635,30 +743,46 @@ def smoke_test_candidate(
         "average_connect_latency_ms": round(sum(connect_latencies) / len(connect_latencies), 3) if connect_latencies else None,
         "average_roundtrip_latency_ms": None,
         "real_pass": real_pass,
+        "real_service_status": _smoke_status(real_pass, selected=(selected_mode == "real_service"), skipped=(selected_mode != "real_service")),
+        "probe_status": _smoke_status(probe_pass, selected=(selected_mode == "probe"), skipped=(probe_result is None and selected_mode != "probe")),
+        "selected_verdict": "passed" if final_pass else "failed",
         "results": attempt_results,
         "errors": sorted(set(filter(None, errors))),
     }
-    if probe_port >= 1:
-        summary["probe_roundtrip"] = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
+    if probe_result is not None:
+        summary["probe_roundtrip"] = probe_result
     candidate.last_result = summary
     candidate.history.append(summary)
-    if real_pass and link.pairing_state in {"awaiting_worker_import", "paired_address_mismatch"}:
+    if final_pass and link.pairing_state in {"awaiting_worker_import", "paired_address_mismatch"}:
         link.pairing_state = "paired"
         link.status = "paired"
     return {
-        "ok": real_pass,
+        "ok": final_pass,
         "action": "candidate-smoke-test",
-        "message": "Real end-to-end candidate smoke test passed" if real_pass else "Real end-to-end candidate smoke test failed",
+        "message": (
+            "Real end-to-end candidate smoke test passed"
+            if final_pass and selected_mode == "real_service"
+            else "Probe path smoke test passed"
+            if final_pass
+            else "Real end-to-end candidate smoke test failed"
+            if selected_mode == "real_service"
+            else "Probe path smoke test failed"
+        ),
         "link_id": link.id,
         "link_label": link.label,
         "role": role,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": candidate.adapter,
+        "candidates_summary": _candidate_summary_rows(link),
         "candidate": _candidate_payload(candidate),
         "result": summary,
         "runtime_systemd_state": runtime_status["state"],
         "persisted_state": candidate.state,
         "pairing_state": link.effective_pairing_state,
         "pairing_state_note": _pairing_state_note(link),
-        "next_instruction": _smoke_next_instruction(candidate, real_pass),
+        "next_instruction": _smoke_next_instruction(candidate, final_pass),
         "real_systemd_touched": False,
         "services_started": False,
         "firewall_touched": False,
@@ -690,8 +814,13 @@ def candidate_results(
         "link_label": link.label,
         "role": role,
         "pairing_state": link.effective_pairing_state,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": _active_candidate_adapter(link),
         "pairing_state_note": _pairing_state_note(link),
         "candidates": candidate_payloads,
+        "candidates_summary": _candidate_summary_rows(link),
         "real_systemd_touched": False,
         "services_started": False,
         "firewall_touched": False,
@@ -702,6 +831,7 @@ def candidate_results(
 def _reset_candidate(candidate: LinkCandidate, *, adapter_name: str, transport: str, local_role: str) -> None:
     candidate.adapter = adapter_name
     candidate.transport = transport
+    candidate.layer = _adapter_layer(adapter_name, "layer4")
     candidate.state = "config_only"
     candidate.selected = False
     candidate.first_start_side = ""
@@ -968,12 +1098,14 @@ def _stage_side(
 
 def _candidate_ports(link: LinkProfile, adapter_name: str, probe: dict[str, Any]) -> dict[str, int]:
     probe_port = int(probe["port"])
+    aux_test_port = int(probe.get("aux_test_port") or link.aux_test_port or DEFAULT_AUX_TEST_PORT)
     controller_user_facing_port = int(link.controller_user_facing_port or probe_port)
     worker_service_port = int(link.worker_service_port or probe_port)
     transport_port = int(link.transport_port)
     effective_transport_port = BORE_CONTROL_PORT if adapter_name == "bore" else transport_port
     return {
         "probe_port": probe_port,
+        "aux_test_port": aux_test_port,
         "controller_user_facing_port": controller_user_facing_port,
         "worker_service_port": worker_service_port,
         "transport_port": transport_port,
@@ -1059,6 +1191,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
     if category == "direct_l4_baseline":
         return {
             "adapter": adapter_name,
+            "layer": _adapter_layer(adapter_name, "layer4"),
             "transport": transport,
             "category": category,
             "ports": ports,
@@ -1109,6 +1242,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
     return {
         "adapter": adapter_name,
+        "layer": _adapter_layer(adapter_name, "layer4"),
         "transport": transport,
         "category": category,
         "ports": ports,
@@ -1145,27 +1279,14 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
 
 
 def _probe_plan(link: LinkProfile, adapter_name: str) -> dict[str, Any]:
-    reserved = {
-        int(value)
-        for value in [
-            link.transport_port,
-            link.worker_service_port,
-            link.controller_user_facing_port,
-        ]
-        if value
-    }
-    seed = hashlib.sha256(f"{link.id}:{adapter_name}:probe".encode("utf-8")).digest()
-    candidate = 43000 + (int.from_bytes(seed[:2], "big") % 18000)
-    while candidate in reserved:
-        candidate += 1
-        if candidate > 62000:
-            candidate = 43000
     worker_bind_host = "0.0.0.0" if adapter_name == "realm" else "127.0.0.1"
     return {
-        "port": candidate,
+        "port": int(link.probe_port or DEFAULT_PROBE_PORT),
+        "aux_test_port": int(link.aux_test_port or DEFAULT_AUX_TEST_PORT),
+        "reserved_test_range": [int(port) for port in (link.reserved_test_range or list(DEFAULT_RESERVED_TEST_RANGE))],
         "worker_bind_host": worker_bind_host,
         "controller_connect_host": "127.0.0.1",
-        "path": f"127.0.0.1:{candidate} -> {adapter_name} -> {worker_bind_host}:{candidate}",
+        "path": f"127.0.0.1:{link.probe_port or DEFAULT_PROBE_PORT} -> {adapter_name} -> {worker_bind_host}:{link.probe_port or DEFAULT_PROBE_PORT}",
     }
 
 
@@ -1475,12 +1596,17 @@ def _validate_link(link: LinkProfile) -> None:
         raise ValueError("Paired link is missing the controller user-facing port")
     if not link.pairing_secret:
         raise ValueError("Paired link is missing the pairing secret")
+    if not link.probe_port:
+        raise ValueError("Paired link is missing the reserved probe port")
+    if not link.aux_test_port:
+        raise ValueError("Paired link is missing the auxiliary test port")
 
 
 def _candidate_payload(candidate: LinkCandidate) -> dict[str, Any]:
     return {
         "adapter": candidate.adapter,
         "transport": candidate.transport,
+        "layer": candidate.layer,
         "state": candidate.state,
         "selected": candidate.selected,
         "runnable": candidate.runnable,
@@ -1542,15 +1668,15 @@ def _mark_candidate(link: LinkProfile, adapter_name: str, state_name: str) -> No
 
 def _prepare_next_instruction(role: str) -> str:
     if role == "worker":
-        return "Next: open Candidate Testing and start one candidate when the controller tells you which adapter to test."
-    return "Next: review a candidate plan, start the controller side first when required, then coordinate the matching worker-side start."
+        return "Next: run candidate plan or candidate start when the controller tells you which adapter to test."
+    return "Next: run candidate plan, then run candidate start on the side that must start first."
 
 
 def _plan_next_instruction(role: str, candidate: LinkCandidate) -> str:
     first_side = candidate.first_start_side or candidate.topology.get("first_start_side", "")
     if role == first_side:
-        return f"Start this adapter on the {role} server first, then continue on the other server."
-    return f"Wait for the {first_side} server to start '{candidate.adapter}' first, then continue here."
+        return f"Run candidate start for '{candidate.adapter}' on this {role} first, then continue on the other server."
+    return f"Run candidate start for '{candidate.adapter}' on the {first_side} first, then continue here."
 
 
 def _start_next_instruction(role: str, candidate: LinkCandidate) -> str:
@@ -1558,31 +1684,23 @@ def _start_next_instruction(role: str, candidate: LinkCandidate) -> str:
     first_side = candidate.first_start_side or candidate.topology.get("first_start_side", "")
     if role == "controller":
         if first_side == "controller":
-            return (
-                f"Next: on the worker server open Candidate Testing, choose Start selected candidate, and start '{adapter}'. "
-                f"After the worker side is running, return here and choose Run real smoke test."
-            )
-        return f"Next: once the worker side is already running for '{adapter}', choose Run real smoke test on this controller."
+            return f"Run candidate start for '{adapter}' on the worker, then run candidate smoke-test on the controller."
+        return f"Run candidate smoke-test for '{adapter}' on the controller once the worker side is already running."
     if first_side == "worker":
-        return (
-            f"Next: on the controller server open Candidate Testing, choose Start selected candidate for '{adapter}', "
-            f"then run the real smoke test there."
-        )
-    return (
-        f"Next: return to the controller server, start '{adapter}' there if needed, then use Run real smoke test on the controller."
-    )
+        return f"Run candidate start for '{adapter}' on the controller next, then run candidate smoke-test there."
+    return f"Run candidate smoke-test for '{adapter}' on the controller after the controller side is running."
 
 
 def _stop_next_instruction(role: str) -> str:
     if role == "worker":
-        return "Next: tell the controller that this worker-side candidate is stopped, then move to the next adapter."
-    return "Next: stop the worker-side candidate too before moving to the next adapter."
+        return "Run candidate stop on the controller too before moving to the next adapter."
+    return "Run candidate stop on the worker too before moving to the next adapter."
 
 
 def _smoke_next_instruction(candidate: LinkCandidate, real_pass: bool) -> str:
     if real_pass:
-        return f"Real smoke test passed for '{candidate.adapter}'. Stop both sides before moving to the next candidate."
-    return "Real smoke test did not pass. Review both sides, then stop or retry the candidate without touching unrelated services."
+        return f"Real smoke test passed for '{candidate.adapter}'. Run candidate stop on both sides before moving to the next candidate."
+    return "Smoke test did not pass. Review both sides, then run candidate stop or retry without touching unrelated services."
 
 
 def _failure(action: str, message: str, *, link: LinkProfile, candidate: LinkCandidate, role: str) -> dict[str, Any]:
@@ -1593,6 +1711,12 @@ def _failure(action: str, message: str, *, link: LinkProfile, candidate: LinkCan
         "link_id": link.id,
         "link_label": link.label,
         "role": role,
+        "pairing_state": link.effective_pairing_state,
+        "probe_port": link.probe_port,
+        "aux_test_port": link.aux_test_port,
+        "reserved_test_range": list(link.reserved_test_range),
+        "active_adapter": candidate.adapter,
+        "candidates_summary": _candidate_summary_rows(link),
         "candidate": _candidate_payload(candidate),
         "real_systemd_touched": False,
         "services_started": False,
@@ -1615,6 +1739,113 @@ def _role_service_dir(paths: SwitchPaths, link: LinkProfile, adapter_name: str, 
 
 def _redacted_command_summary(argv: list[str]) -> list[str]:
     return [str(item) for item in redact_secrets(list(argv))]
+
+
+def _adapter_layer(adapter_name: str, requested_layer: str) -> str:
+    adapter = ADAPTERS[adapter_name]()
+    detected = adapter.metadata().layer or "layer4"
+    if requested_layer == "auto":
+        return detected
+    return requested_layer
+
+
+def _resolve_candidate_layer(layer: str) -> str:
+    normalized = (layer or "auto").strip().lower()
+    if normalized not in SUPPORTED_CANDIDATE_LAYERS:
+        raise ValueError(f"Unsupported candidate layer '{layer}'. Use --layer auto or --layer layer4.")
+    return "layer4" if normalized == "auto" else normalized
+
+
+def _normalize_smoke_mode(mode: str) -> str:
+    normalized = (mode or "real_service").strip().lower()
+    if normalized not in {"real_service", "probe"}:
+        raise ValueError("Unsupported smoke-test mode. Use --mode real_service or --mode probe.")
+    return normalized
+
+
+def _smoke_status(ok: bool, *, selected: bool, skipped: bool) -> str:
+    if skipped and not selected:
+        return "skipped"
+    return "passed" if ok else "failed"
+
+
+def _active_candidate_adapter(link: LinkProfile) -> str:
+    for candidate in link.candidates:
+        if candidate.selected or candidate.state in {"running", "starting", "test_passed"}:
+            return candidate.adapter
+    return ""
+
+
+def _candidate_summary_rows(link: LinkProfile) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for candidate in link.candidates:
+        last_result = candidate.last_result or {}
+        rows.append(
+            {
+                "adapter": candidate.adapter,
+                "layer": candidate.layer or "layer4",
+                "state": candidate.state,
+                "selected": candidate.selected,
+                "runtime": str(last_result.get("runtime_systemd_state") or ("running" if candidate.state == "running" else "not_running")),
+                "real_service": str(last_result.get("real_service_status") or ("passed" if last_result.get("real_pass") else "skipped")),
+                "probe": str(last_result.get("probe_status") or ("passed" if (last_result.get("probe_roundtrip") or {}).get("ok") else "skipped")),
+                "latency_ms": last_result.get("average_connect_latency_ms"),
+            }
+        )
+    return rows
+
+
+def _select_link_test_ports(
+    link: LinkProfile,
+    *,
+    requested_probe_port: int | None,
+    use_aux_test_port: bool,
+    auto_test_port: bool,
+) -> dict[str, list[str]]:
+    warnings: list[str] = []
+    blockers: list[str] = []
+    selected_probe_port = int(requested_probe_port or link.probe_port or DEFAULT_PROBE_PORT)
+    selected_aux_test_port = int(link.aux_test_port or DEFAULT_AUX_TEST_PORT)
+    reserved_range = [int(port) for port in (link.reserved_test_range or list(DEFAULT_RESERVED_TEST_RANGE))]
+    if selected_probe_port not in reserved_range:
+        reserved_range = [selected_probe_port, *[port for port in reserved_range if port != selected_probe_port]]
+    if selected_aux_test_port not in reserved_range:
+        reserved_range = [selected_aux_test_port, *[port for port in reserved_range if port != selected_aux_test_port]]
+    if use_aux_test_port:
+        selected_probe_port = selected_aux_test_port
+        warnings.append(f"Using auxiliary test port {selected_aux_test_port} as the link probe port because --use-aux-test-port was requested.")
+    elif auto_test_port:
+        for port in reserved_range:
+            if _port_available_local(port):
+                selected_probe_port = int(port)
+                if selected_probe_port != int(link.probe_port or DEFAULT_PROBE_PORT):
+                    warnings.append(f"Auto-selected available reserved test port {selected_probe_port} for this link.")
+                break
+    elif requested_probe_port is None and not _port_available_local(selected_probe_port):
+        warnings.append(
+            f"Probe/test port {selected_probe_port} is busy. Use --use-aux-test-port to switch to {selected_aux_test_port}, or choose a custom probe port."
+        )
+        blockers.append(f"Probe/test port {selected_probe_port} is unavailable for candidate preparation.")
+    if requested_probe_port is not None and not _port_available_local(selected_probe_port):
+        blockers.append(f"Explicit probe/test port {selected_probe_port} is unavailable.")
+    if use_aux_test_port and not _port_available_local(selected_probe_port):
+        blockers.append(f"Auxiliary test port {selected_probe_port} is unavailable.")
+    link.probe_port = int(selected_probe_port)
+    link.aux_test_port = int(selected_aux_test_port)
+    link.reserved_test_range = reserved_range
+    return {"warnings": warnings, "blockers": blockers}
+
+
+def _port_available_local(port: int) -> bool:
+    if port < 1:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
 
 
 def _occupied_ports(ports: list[int]) -> list[dict[str, Any]]:

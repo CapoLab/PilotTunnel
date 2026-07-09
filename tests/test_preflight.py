@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pilottunnel.binaries import get_binary_plan, list_binary_plans, verify_binary
-from pilottunnel.config import Profile
+from pilottunnel.config import DEFAULT_AUX_TEST_PORT, DEFAULT_PROBE_PORT, LinkProfile, Profile
 from pilottunnel.state import AppState, BinaryRecord
 from pilottunnel.preflight import run_preflight
 from testsupport import allocate_tcp_ports
@@ -52,6 +52,27 @@ class PreflightTests(unittest.TestCase):
             profile = Profile(name="smoke-l4-001", main_port=self.main_port, target_host="127.0.0.1", target_port=self.target_port)
             result = run_preflight(Path(temp_dir), profile).to_dict()
             self.assertIn(self.main_port, {int(key) for key in result["port_availability"].keys()})
+
+    @patch("pilottunnel.preflight._port_available")
+    def test_busy_default_probe_port_produces_clear_warning(self, mock_port_available) -> None:
+        mock_port_available.side_effect = lambda port: False if int(port) == DEFAULT_PROBE_PORT else True
+        with tempfile.TemporaryDirectory() as temp_dir:
+            link = LinkProfile(
+                id="ptlink-001",
+                label="link-001",
+                iran_address="controller.example.invalid",
+                iran_main_port=self.main_port,
+                tunnel_port=self.target_port,
+                config_port=self.main_port,
+                probe_port=DEFAULT_PROBE_PORT,
+                aux_test_port=DEFAULT_AUX_TEST_PORT,
+                kharej_address="worker.example.invalid",
+                pairing_secret="secret",
+            )
+            result = run_preflight(Path(temp_dir), link=link).to_dict()
+        self.assertFalse(result["test_port_availability"][DEFAULT_PROBE_PORT])
+        self.assertTrue(result["test_port_availability"][DEFAULT_AUX_TEST_PORT])
+        self.assertIn("Use aux_test_port 27778", " ".join(result["warnings"]))
 
     @patch("pilottunnel.binaries.subprocess.run")
     def test_verify_run_version_is_timeout_safe(self, mock_run) -> None:

@@ -1297,6 +1297,8 @@ prompt_candidate_adapter() {
 
 candidate_prepare_all() {
   section_heading "Prepare all candidates"
+  menu_hint "PilotTunnel reserves 27777 for internal probe checks and 27778 as the auxiliary test fallback."
+  menu_hint "These are internal health/discovery ports only. They are not the public tunnel port or the target service port."
   pt_cli candidate prepare-all
 }
 

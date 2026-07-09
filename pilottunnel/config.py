@@ -13,6 +13,9 @@ DEFAULT_CONFIG_PATH = Path("/etc/pilottunnel/config.json")
 DEFAULT_STATE_PATH = Path("/var/lib/pilottunnel/state.json")
 DEFAULT_REGISTRY_PATH = Path("/var/lib/pilottunnel/registry.json")
 DEFAULT_AUDIT_PATH = Path("/var/log/pilottunnel/audit.log")
+DEFAULT_PROBE_PORT = 27777
+DEFAULT_AUX_TEST_PORT = 27778
+DEFAULT_RESERVED_TEST_RANGE = range(27777, 27787)
 
 Role = Literal["controller", "worker"]
 RuntimeRole = Literal["active", "hot_standby", "config_only", ""]
@@ -61,6 +64,7 @@ class Candidate:
 class LinkCandidate:
     adapter: str
     transport: str
+    layer: str = "layer4"
     state: str = "config_only"
     selected: bool = False
     first_start_side: str = ""
@@ -124,6 +128,9 @@ class LinkProfile:
     tunnel_port: int
     config_port: int
     iran_main_port: int | None = None
+    probe_port: int = DEFAULT_PROBE_PORT
+    aux_test_port: int = DEFAULT_AUX_TEST_PORT
+    reserved_test_range: list[int] = field(default_factory=lambda: list(DEFAULT_RESERVED_TEST_RANGE))
     kharej_address: str = ""
     status: str = "configured"
     pairing_state: str = ""
@@ -324,6 +331,12 @@ def _link_from_dict(data: dict[str, Any]) -> LinkProfile:
     user_facing_port = data.get("iran_main_port", data.get("controller_user_facing_port"))
     transport_port = data.get("tunnel_port", data.get("transport_port"))
     service_port = data.get("config_port", data.get("service_port"))
+    probe_port = data.get("probe_port", DEFAULT_PROBE_PORT)
+    aux_test_port = data.get("aux_test_port", DEFAULT_AUX_TEST_PORT)
+    reserved_test_range = data.get("reserved_test_range", list(DEFAULT_RESERVED_TEST_RANGE))
+    if not isinstance(reserved_test_range, list) or not reserved_test_range:
+        reserved_test_range = list(DEFAULT_RESERVED_TEST_RANGE)
+    reserved_test_range = [int(item) for item in reserved_test_range]
     return LinkProfile(
         id=data.get("id") or data["label"],
         label=data["label"],
@@ -331,6 +344,9 @@ def _link_from_dict(data: dict[str, Any]) -> LinkProfile:
         iran_main_port=user_facing_port,
         tunnel_port=transport_port,
         config_port=service_port,
+        probe_port=int(probe_port),
+        aux_test_port=int(aux_test_port),
+        reserved_test_range=reserved_test_range,
         kharej_address=worker_address,
         status=data.get("status", "configured"),
         pairing_state=data.get("pairing_state", ""),

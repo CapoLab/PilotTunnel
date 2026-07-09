@@ -30,6 +30,10 @@ python -m pilottunnel.cli readiness report --json
 
 No auto-switch. No background monitoring. No UI.
 
+## Reserved test ports
+
+PilotTunnel reserves `27777` for its internal probe path and `27778` as the auxiliary test fallback. These are not the public tunnel port and not the target service port. Advanced or future multi-layer tests may use the reserved internal range `27777-27786`.
+
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md)

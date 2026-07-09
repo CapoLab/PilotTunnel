@@ -9,6 +9,7 @@ from .binaries import get_binary_plan
 from .config import AppConfig, Profile, validate_profile_name
 from .healthcheck import run_profile_healthchecks, summarize_healthchecks
 from .install_plan import build_install_plan
+from .links import get_active_link
 from .node_role import node_status_payload
 from .registry import PortRegistry, RegistryEntry
 from .preflight import run_preflight
@@ -51,7 +52,7 @@ def build_readiness_report(
     staging_target = _safe_path(staging_root or switch_paths.staging_root, "staging-root")
     install_target = _safe_path(install_root, "install-root") if install_root else None
 
-    preflight = run_preflight(staging_target, profile, probe_write=False).to_dict()
+    preflight = run_preflight(staging_target, profile, link=get_active_link(config), probe_write=False).to_dict()
     warnings = list(preflight.get("warnings", []))
     blockers: list[str] = []
 

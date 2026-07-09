@@ -496,28 +496,44 @@ def build_parser() -> argparse.ArgumentParser:
     candidate_prepare = candidate_subparsers.add_parser("prepare-all")
     candidate_prepare.add_argument("--link")
     candidate_prepare.add_argument("--platform", default="auto")
+    candidate_prepare.add_argument("--layer", default="auto")
+    candidate_prepare.add_argument("--probe-port", type=int)
+    candidate_prepare.add_argument("--use-aux-test-port", action="store_true")
+    candidate_prepare.add_argument("--auto-test-port", action="store_true")
+    candidate_prepare.add_argument("--verbose", action="store_true")
     candidate_prepare.add_argument("--json", action="store_true")
     candidate_plan = candidate_subparsers.add_parser("plan")
     candidate_plan.add_argument("--adapter", required=True)
     candidate_plan.add_argument("--link")
+    candidate_plan.add_argument("--layer", default="auto")
+    candidate_plan.add_argument("--verbose", action="store_true")
     candidate_plan.add_argument("--json", action="store_true")
     candidate_start = candidate_subparsers.add_parser("start")
     candidate_start.add_argument("--adapter", required=True)
     candidate_start.add_argument("--link")
     candidate_start.add_argument("--platform", default="auto")
+    candidate_start.add_argument("--layer", default="auto")
+    candidate_start.add_argument("--verbose", action="store_true")
     candidate_start.add_argument("--json", action="store_true")
     candidate_stop = candidate_subparsers.add_parser("stop")
     candidate_stop.add_argument("--adapter")
     candidate_stop.add_argument("--link")
+    candidate_stop.add_argument("--layer", default="auto")
+    candidate_stop.add_argument("--verbose", action="store_true")
     candidate_stop.add_argument("--json", action="store_true")
     candidate_smoke = candidate_subparsers.add_parser("smoke-test")
     candidate_smoke.add_argument("--adapter", required=True)
     candidate_smoke.add_argument("--link")
     candidate_smoke.add_argument("--attempts", type=int, default=3)
     candidate_smoke.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    candidate_smoke.add_argument("--mode", choices=["real_service", "probe"], default="real_service")
+    candidate_smoke.add_argument("--layer", default="auto")
+    candidate_smoke.add_argument("--verbose", action="store_true")
     candidate_smoke.add_argument("--json", action="store_true")
     candidate_result = candidate_subparsers.add_parser("result")
     candidate_result.add_argument("--link")
+    candidate_result.add_argument("--layer", default="auto")
+    candidate_result.add_argument("--verbose", action="store_true")
     candidate_result.add_argument("--json", action="store_true")
 
     systemd = subparsers.add_parser("systemd")
@@ -884,18 +900,18 @@ def _save_runtime(
     save_registry(registry, registry_path)
 
 
-def _emit_payload(payload: dict, *, as_json: bool) -> None:
+def _emit_payload(payload: dict, *, as_json: bool, verbose: bool = False) -> None:
     if as_json:
         print(json.dumps(payload, indent=2))
         return
     action = payload.get("action", "")
     if action.startswith("candidate-"):
-        print(_format_candidate_payload(payload))
+        print(_format_candidate_payload(payload, verbose=verbose))
         return
     print(json.dumps(payload, indent=2))
 
 
-def _format_candidate_payload(payload: dict) -> str:
+def _format_candidate_payload(payload: dict, *, verbose: bool = False) -> str:
     lines: list[str] = []
     title = payload.get("action", "").replace("-", " ").title()
     lines.append(title)
@@ -905,31 +921,48 @@ def _format_candidate_payload(payload: dict) -> str:
         lines.append(f"Link: {payload['link_label']}")
     if payload.get("role"):
         lines.append(f"Current side: {payload['role']}")
+    if payload.get("pairing_state"):
+        lines.append(f"Pairing state: {payload['pairing_state']}")
+    if payload.get("probe_port"):
+        lines.append(
+            f"Reserved test ports: probe={payload.get('probe_port')} aux={payload.get('aux_test_port')} "
+            f"range={','.join(str(item) for item in (payload.get('reserved_test_range') or []))}"
+        )
     candidate = payload.get("candidate")
     if isinstance(candidate, dict):
-        lines.extend(_candidate_lines(candidate))
+        lines.extend(_candidate_concise_lines(candidate))
+        if verbose:
+            lines.extend(_candidate_lines(candidate))
     candidates = payload.get("candidates")
     if isinstance(candidates, list):
-        lines.append("Candidates:")
-        for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            state = item.get("state", "")
-            runnable = "real-smoke-ready" if item.get("runnable") else "comparison-only"
-            category = item.get("category") or "uncategorized"
-            lines.append(f"- {item.get('adapter')}/{item.get('transport')}: {state} ({runnable}, {category})")
-            if item.get("notes"):
-                lines.append(f"  note: {item['notes']}")
+        lines.extend(_candidate_summary_lines(payload.get("candidates_summary") or []))
+        if verbose:
+            lines.append("Candidates:")
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                state = item.get("state", "")
+                runnable = "real-smoke-ready" if item.get("runnable") else "comparison-only"
+                category = item.get("category") or "uncategorized"
+                lines.append(f"- {item.get('adapter')}/{item.get('transport')}: {state} ({runnable}, {category})")
+                if item.get("notes"):
+                    lines.append(f"  note: {item['notes']}")
     if payload.get("occupied_ports"):
         lines.append("Occupied ports:")
         for entry in payload["occupied_ports"]:
             lines.append(f"- {entry.get('port')}: {entry.get('owner') or 'owner unavailable'}")
     result = payload.get("result")
     if isinstance(result, dict):
-        lines.append(f"Real pass: {'yes' if result.get('real_pass') else 'no'}")
         lines.append(
-            f"Attempts: successes={result.get('success_count', 0)} failures={result.get('failure_count', 0)} timeout={result.get('timeout')}"
+            f"Smoke verdict: {result.get('selected_verdict', 'unknown')} "
+            f"(real_service={result.get('real_service_status', 'unknown')}, probe={result.get('probe_status', 'unknown')})"
         )
+        if result.get("average_connect_latency_ms") is not None:
+            lines.append(f"Average connect latency: {result.get('average_connect_latency_ms')} ms")
+        if verbose:
+            lines.append(
+                f"Attempts: successes={result.get('success_count', 0)} failures={result.get('failure_count', 0)} timeout={result.get('timeout')}"
+            )
     if payload.get("warnings"):
         lines.append("Warnings:")
         for item in payload["warnings"]:
@@ -941,6 +974,46 @@ def _format_candidate_payload(payload: dict) -> str:
     if payload.get("next_instruction"):
         lines.append(f"Next: {payload['next_instruction']}")
     return "\n".join(lines)
+
+
+def _candidate_summary_lines(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    lines = ["Candidates summary:", "adapter | state | selected | runtime | real_service | probe | latency_ms"]
+    for row in rows:
+        lines.append(
+            " | ".join(
+                [
+                    str(row.get("adapter", "")),
+                    str(row.get("state", "")),
+                    "yes" if row.get("selected") else "no",
+                    str(row.get("runtime", "")),
+                    str(row.get("real_service", "")),
+                    str(row.get("probe", "")),
+                    str(row.get("latency_ms", "")),
+                ]
+            )
+        )
+    return lines
+
+
+def _candidate_concise_lines(candidate: dict) -> list[str]:
+    lines = [
+        f"Adapter: {candidate.get('adapter')} / {candidate.get('transport')}",
+        f"Layer: {candidate.get('layer') or 'layer4'}",
+        f"State: {candidate.get('state')}",
+        f"Runnable now: {'yes' if candidate.get('runnable') else 'no'}",
+    ]
+    controller_ports = candidate.get("controller_owned_ports") or []
+    worker_ports = candidate.get("worker_owned_ports") or []
+    lines.append(f"Controller owned ports: {', '.join(str(item) for item in controller_ports) or 'none'}")
+    lines.append(f"Worker owned ports: {', '.join(str(item) for item in worker_ports) or 'none'}")
+    probe = candidate.get("probe") or {}
+    if probe:
+        lines.append(f"Probe port: {probe.get('port') or 'not prepared'}")
+        if probe.get("aux_test_port"):
+            lines.append(f"Aux test port: {probe.get('aux_test_port')}")
+    return lines
 
 
 def _candidate_lines(candidate: dict) -> list[str]:
@@ -1533,12 +1606,16 @@ def main(argv: list[str] | None = None) -> int:
                 paths=switch_paths,
                 requested_platform=args.platform,
                 link_label=args.link,
+                layer=args.layer,
+                probe_port_override=args.probe_port,
+                use_aux_test_port=args.use_aux_test_port,
+                auto_test_port=args.auto_test_port,
             )
         except (KeyError, OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate prepare failed\n{exc}")
             return 1
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
-        _emit_payload(payload, as_json=args.json)
+        _emit_payload(payload, as_json=args.json, verbose=args.verbose)
         return 0 if payload["ok"] else 1
 
     if args.command == "candidate" and args.candidate_command == "plan":
@@ -1553,7 +1630,7 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate plan failed\n{exc}")
             return 1
-        _emit_payload(payload, as_json=args.json)
+        _emit_payload(payload, as_json=args.json, verbose=args.verbose)
         return 0 if payload["ok"] else 1
 
     if args.command == "candidate" and args.candidate_command == "start":
@@ -1570,7 +1647,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate start failed\n{exc}")
             return 1
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
-        _emit_payload(payload, as_json=args.json)
+        _emit_payload(payload, as_json=args.json, verbose=args.verbose)
         return 0 if payload["ok"] else 1
 
     if args.command == "candidate" and args.candidate_command == "stop":
@@ -1586,7 +1663,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate stop failed\n{exc}")
             return 1
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
-        _emit_payload(payload, as_json=args.json)
+        _emit_payload(payload, as_json=args.json, verbose=args.verbose)
         return 0 if payload["ok"] else 1
 
     if args.command == "candidate" and args.candidate_command == "smoke-test":
@@ -1599,12 +1676,13 @@ def main(argv: list[str] | None = None) -> int:
                 attempts=args.attempts,
                 timeout=args.timeout,
                 link_label=args.link,
+                mode=args.mode,
             )
         except (KeyError, OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate smoke test failed\n{exc}")
             return 1
         _save_runtime(config, state, registry, config_path, state_path, registry_path)
-        _emit_payload(payload, as_json=args.json)
+        _emit_payload(payload, as_json=args.json, verbose=args.verbose)
         return 0 if payload["ok"] else 1
 
     if args.command == "candidate" and args.candidate_command == "result":
@@ -1613,7 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, ValueError) as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2) if args.json else f"Candidate results failed\n{exc}")
             return 1
-        _emit_payload(payload, as_json=args.json)
+        _emit_payload(payload, as_json=args.json, verbose=args.verbose)
         return 0 if payload["ok"] else 1
 
     if args.command == "runtime" and args.runtime_command == "plan":
@@ -2508,7 +2586,7 @@ def main(argv: list[str] | None = None) -> int:
         except KeyError as exc:
             print(json.dumps({"ok": False, "message": str(exc)}, indent=2))
             return 1
-        payload = run_preflight(switch_paths.staging_root, profile).to_dict()
+        payload = run_preflight(switch_paths.staging_root, profile, link=get_active_link(config)).to_dict()
         print(json.dumps(payload, indent=2))
         return 0
 

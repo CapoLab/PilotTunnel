@@ -19,16 +19,50 @@ SECRET_KEYS = {
     "pairing_secret",
     "pairing_code",
 }
+SECRET_KEY_MARKERS = (
+    "auth",
+    "secret",
+    "token",
+    "password",
+    "pass",
+    "private",
+    "key",
+    "bore_secret",
+    "apikey",
+    "api_key",
+    "pairing_code",
+)
+
+
+def _is_secret_key(value: Any) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in SECRET_KEYS:
+        return True
+    return any(marker in normalized for marker in SECRET_KEY_MARKERS)
+
+
+def _redact_secret_string(value: str) -> str:
+    stripped = value.strip()
+    upper_value = stripped.upper()
+    if stripped.startswith("ptlink://"):
+        return "***REDACTED***"
+    if stripped.startswith("-----BEGIN ") and "PRIVATE KEY-----" in upper_value:
+        return "***REDACTED***"
+    if any(token in upper_value for token in ("AUTH=", "SECRET=", "TOKEN=", "PASSWORD=", "PRIVATE_KEY=", "BORE_SECRET=")):
+        return "***REDACTED***"
+    return value
 
 
 def redact_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: ("***REDACTED***" if str(key).lower() in SECRET_KEYS else redact_secrets(inner))
+            key: ("***REDACTED***" if _is_secret_key(key) else redact_secrets(inner))
             for key, inner in value.items()
         }
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
+    if isinstance(value, str):
+        return _redact_secret_string(value)
     return value
 
 

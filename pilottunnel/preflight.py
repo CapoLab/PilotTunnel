@@ -9,7 +9,7 @@ import socket
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .config import Profile
+from .config import LinkProfile, Profile
 
 
 @dataclass
@@ -28,6 +28,8 @@ class HostPreflightResult:
     staging_writable: bool
     systemd_available: bool
     port_availability: dict[int, bool] = field(default_factory=dict)
+    test_port_availability: dict[int, bool] = field(default_factory=dict)
+    suggested_test_ports: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     safe_to_stage: bool = True
     safe_to_real_apply: bool = False
@@ -55,6 +57,7 @@ def run_preflight(
     staging_root: Path,
     profile: Profile | None = None,
     *,
+    link: LinkProfile | None = None,
     command_lookup=None,
     platform_name: str | None = None,
     probe_write: bool = True,
@@ -89,6 +92,30 @@ def run_preflight(
             if not port_availability[port]:
                 warnings.append(f"Port {port} does not appear available")
 
+    test_port_availability: dict[int, bool] = {}
+    suggested_test_ports: list[int] = []
+    if link is not None:
+        checked_ports = []
+        for port in [link.probe_port, link.aux_test_port]:
+            if port not in checked_ports:
+                checked_ports.append(port)
+        for port in checked_ports:
+            available = _port_available(port)
+            test_port_availability[port] = available
+        if not test_port_availability.get(link.probe_port, True):
+            warnings.append(
+                f"Probe/test port {link.probe_port} is already in use. Use aux_test_port {link.aux_test_port} or choose a custom probe port."
+            )
+        if not test_port_availability.get(link.aux_test_port, True):
+            warnings.append(
+                f"Auxiliary test port {link.aux_test_port} is already in use. Choose a custom probe port or another reserved test port."
+            )
+        suggested_test_ports = [
+            int(port)
+            for port in link.reserved_test_range
+            if int(port) not in checked_ports and _port_available(int(port))
+        ]
+
     host = {
         "python_version": platform.python_version(),
         "platform": platform.platform(),
@@ -104,6 +131,8 @@ def run_preflight(
         staging_writable=staging_writable,
         systemd_available=systemd_available,
         port_availability=port_availability,
+        test_port_availability=test_port_availability,
+        suggested_test_ports=suggested_test_ports,
         warnings=warnings,
         safe_to_stage=staging_writable,
         safe_to_real_apply=False,
