@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from pilottunnel.adapters import ADAPTERS
-from pilottunnel.audit import write_audit_log
+from pilottunnel.audit import redact_secrets, write_audit_log
 from pilottunnel.config import AppConfig, Profile, ProfilePorts, SUPPORTED_LAYERS
 from pilottunnel.registry import PortRegistry, RegistryEntry
 from pilottunnel.state import AppState
@@ -32,6 +32,39 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(record["details"]["token"], "***REDACTED***")
             self.assertEqual(record["details"]["nested"]["password"], "***REDACTED***")
             self.assertTrue(record["details"]["dry_run"])
+
+    def test_secret_redaction_keeps_health_fields_visible(self) -> None:
+        payload = {
+            "real_pass": True,
+            "pass": "passed",
+            "pass_rate": 0.75,
+            "passed": True,
+            "password": "hidden",
+            "token": "token-value",
+            "auth": "user:pass",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+            "nested": {
+                "BORE_SECRET": "secret-token",
+                "AUTH": "operator:secret",
+                "ok": True,
+                "runtime_systemd_ok": False,
+                "failure_count": 1,
+            },
+        }
+        redacted = redact_secrets(payload)
+        self.assertIs(redacted["real_pass"], True)
+        self.assertEqual(redacted["pass"], "passed")
+        self.assertEqual(redacted["pass_rate"], 0.75)
+        self.assertIs(redacted["passed"], True)
+        self.assertEqual(redacted["password"], "***REDACTED***")
+        self.assertEqual(redacted["token"], "***REDACTED***")
+        self.assertEqual(redacted["auth"], "***REDACTED***")
+        self.assertEqual(redacted["private_key"], "***REDACTED***")
+        self.assertEqual(redacted["nested"]["BORE_SECRET"], "***REDACTED***")
+        self.assertEqual(redacted["nested"]["AUTH"], "***REDACTED***")
+        self.assertIs(redacted["nested"]["ok"], True)
+        self.assertIs(redacted["nested"]["runtime_systemd_ok"], False)
+        self.assertEqual(redacted["nested"]["failure_count"], 1)
 
     def test_unsupported_layers_are_listed_but_blocked(self) -> None:
         self.assertIn("layer7", SUPPORTED_LAYERS)

@@ -10,35 +10,35 @@ from typing import Any
 from .config import DEFAULT_AUDIT_PATH
 
 SECRET_KEYS = {
+    "auth",
+    "auth_token",
+    "bearer_token",
+    "bore_secret",
+    "passcode",
+    "passwd",
+    "passphrase",
     "secret",
     "password",
     "token",
+    "private",
     "private_key",
     "apikey",
     "api_key",
     "pairing_secret",
     "pairing_code",
 }
-SECRET_KEY_MARKERS = (
-    "auth",
-    "secret",
-    "token",
-    "password",
-    "pass",
-    "private",
-    "key",
-    "bore_secret",
-    "apikey",
-    "api_key",
-    "pairing_code",
-)
+SECRET_KEY_SUFFIXES = {
+    "auth_key",
+    "secret_key",
+    "token_key",
+}
 
 
 def _is_secret_key(value: Any) -> bool:
-    normalized = str(value).strip().lower()
+    normalized = str(value).strip().lower().replace("-", "_")
     if normalized in SECRET_KEYS:
         return True
-    return any(marker in normalized for marker in SECRET_KEY_MARKERS)
+    return normalized.endswith(tuple(SECRET_KEY_SUFFIXES))
 
 
 def _redact_secret_string(value: str) -> str:

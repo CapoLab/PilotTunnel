@@ -1496,6 +1496,7 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["result"]["real_service_status"], "passed")
         self.assertEqual(payload["result"]["probe_status"], "failed")
+        self.assertIs(payload["result"]["real_pass"], True)
         self.assertTrue(payload["ok"])
 
     def test_candidate_probe_mode_fails_when_probe_path_is_unavailable(self) -> None:
