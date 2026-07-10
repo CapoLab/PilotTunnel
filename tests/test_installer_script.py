@@ -229,13 +229,17 @@ class InstallerScriptTests(unittest.TestCase):
         sleep_seconds = int(sleep_match.group(1)) if sleep_match else 0
         exit_code = int(exit_match.group(1)) if exit_match else 0
         git_cmd = target_dir / "git.cmd"
-        git_cmd.write_text(
-            "@echo off\r\n"
-            "setlocal\r\n"
-            "python -c \"import sys,time; time.sleep(%d); sys.exit(%d)\"\r\n"
-            "exit /b %d\r\n" % (sleep_seconds, exit_code, exit_code),
-            encoding="utf-8",
-        )
+        if os.name == "nt":
+            git_cmd.write_text(
+                "@echo off\r\n"
+                "setlocal\r\n"
+                "python -c \"import sys,time; time.sleep(%d); sys.exit(%d)\"\r\n"
+                "exit /b %d\r\n" % (sleep_seconds, exit_code, exit_code),
+                encoding="utf-8",
+            )
+        else:
+            git_cmd.write_text(f"#!/usr/bin/env bash\nset -eu\n{body}\n", encoding="utf-8")
+            git_cmd.chmod(0o755)
         return git_path
 
     def write_fake_python(self, target_dir: Path, *, readiness_stdout: str, readiness_exit_code: int = 0) -> None:

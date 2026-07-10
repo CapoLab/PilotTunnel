@@ -612,7 +612,10 @@ def _validate_provider_url(url: str, *, expected_host: str) -> None:
 
 
 def _binary_destination(install_dir: Path, adapter: str, platform_id: str, component: str | None = None) -> Path:
-    return (install_dir / adapter / platform_id / _managed_binary_name(adapter, platform_id, component)).resolve()
+    # Keep the lexical path intact until its parent chain has been checked.
+    # Resolving here would follow an attacker-controlled adapter symlink and
+    # hide which managed path caused the escape.
+    return install_dir / adapter / platform_id / _managed_binary_name(adapter, platform_id, component)
 
 
 def _managed_binary_name(adapter: str, platform_id: str, component: str | None = None) -> str:
@@ -669,14 +672,14 @@ def _validate_destination_path(path: Path, install_dir: Path) -> None:
     _validate_parent_chain(path.parent)
     if install_dir not in path.parents:
         raise ValueError(f"Refusing to write outside install dir: {path}")
-    if path.exists() and path.is_symlink():
+    if path.is_symlink():
         raise ValueError(f"Symlink escape blocked for destination path: {path}")
 
 
 def _validate_parent_chain(path: Path) -> None:
     current = path
     while True:
-        if current.exists() and current.is_symlink():
+        if current.is_symlink():
             raise ValueError(f"Symlink escape blocked for install path: {current}")
         if current.parent == current:
             return
