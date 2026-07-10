@@ -39,27 +39,44 @@ class RatholeAdapter(DryRunAdapter):
     def _config_text(self, context: AdapterContext) -> str:
         token = context.secrets.get("shared_token", "PAIRING_SECRET_REQUIRED")
         service_name = context.profile.name.replace("-", "_")
+        probe_service_name = f"{service_name}_probe"
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
+        probe_port = int(context.remote_stub.get("probe_port") or context.profile.ports.check_port or 0)
+        include_probe = context.remote_stub.get("mode") == "candidate-smoke" and probe_port > 0
         if context.role == "controller":
-            return "\n".join(
-                [
-                    "[server]",
-                    f'bind_addr = "0.0.0.0:{transport_port}"',
-                    f'default_token = "{token}"',
-                    "",
-                    f"[server.services.{service_name}]",
-                    f'bind_addr = "0.0.0.0:{context.profile.ports.main_port}"',
-                ]
-            )
-        controller_address = context.controller_address or context.profile.target_host
-        worker_target_port = context.profile.ports.service_port or context.profile.target_port
-        return "\n".join(
-            [
-                "[client]",
-                f'remote_addr = "{controller_address}:{transport_port}"',
+            lines = [
+                "[server]",
+                f'bind_addr = "0.0.0.0:{transport_port}"',
                 f'default_token = "{token}"',
                 "",
-                f"[client.services.{service_name}]",
-                f'local_addr = "127.0.0.1:{worker_target_port}"',
+                f"[server.services.{service_name}]",
+                f'bind_addr = "0.0.0.0:{context.profile.ports.main_port}"',
             ]
-        )
+            if include_probe:
+                lines.extend(
+                    [
+                        "",
+                        f"[server.services.{probe_service_name}]",
+                        f'bind_addr = "127.0.0.1:{probe_port}"',
+                    ]
+                )
+            return "\n".join(lines)
+        controller_address = context.controller_address or context.profile.target_host
+        worker_target_port = context.profile.ports.service_port or context.profile.target_port
+        lines = [
+            "[client]",
+            f'remote_addr = "{controller_address}:{transport_port}"',
+            f'default_token = "{token}"',
+            "",
+            f"[client.services.{service_name}]",
+            f'local_addr = "127.0.0.1:{worker_target_port}"',
+        ]
+        if include_probe:
+            lines.extend(
+                [
+                    "",
+                    f"[client.services.{probe_service_name}]",
+                    f'local_addr = "127.0.0.1:{probe_port}"',
+                ]
+            )
+        return "\n".join(lines)

@@ -236,6 +236,7 @@ def start_candidate(
 
     active = state.active_link_candidates.get(link.id) or {}
     side_runtime = _candidate_side_runtime_status(audit_path=paths.audit_path, side_plan=side_plan, allow_missing=True)
+    runtime_config_status = _candidate_runtime_config_status(candidate=candidate, role=role, active_state=active)
     if active and active.get("state") in {"starting", "running"} and active.get("adapter") != candidate.adapter:
         active_candidate = _candidate_for(link, str(active.get("adapter")))
         active_side_plan = _side_plan(active_candidate, role)
@@ -253,7 +254,8 @@ def start_candidate(
                 candidate=candidate,
                 role=role,
             )
-    if side_runtime.get("ok"):
+    if side_runtime.get("ok") and runtime_config_status["status"] == "current":
+        runtime_fingerprint = _candidate_runtime_fingerprint(candidate, role)
         _mark_candidate(link, candidate.adapter, "running")
         state.active_link_candidates[link.id] = {
             "adapter": candidate.adapter,
@@ -261,6 +263,7 @@ def start_candidate(
             "category": candidate.category,
             "role": role,
             "state": "running",
+            "runtime_fingerprint": runtime_fingerprint,
             "services": [
                 {
                     "service_name": service["service_name"],
@@ -287,6 +290,8 @@ def start_candidate(
             "candidates_summary": _candidate_summary_rows(link),
             "candidate": _candidate_payload(candidate),
             "systemd_status": side_runtime["status"],
+            "runtime_config_status": runtime_config_status["status"],
+            "runtime_config_details": runtime_config_status,
             "pairing_state_note": _pairing_state_note(link),
             "next_instruction": _start_next_instruction(role, candidate),
             "real_systemd_touched": False,
@@ -294,6 +299,44 @@ def start_candidate(
             "firewall_touched": False,
             "routes_touched": False,
         }
+    if side_runtime.get("ok") and runtime_config_status["status"] == "drifted":
+        stop_results: list[dict[str, Any]] = []
+        for service in reversed(side_plan["services"]):
+            stop_results.append(
+                apply_stop(
+                    service_dir=Path(service["service_dir"]),
+                    service_name=service["service_name"],
+                    confirm=STOP_CONFIRM_TOKEN,
+                    audit_path=paths.audit_path,
+                )
+            )
+        if any(not item.get("ok") for item in stop_results):
+            _mark_candidate(link, candidate.adapter, "test_failed")
+            state.active_link_candidates.pop(link.id, None)
+            failed = next(item for item in stop_results if not item.get("ok"))
+            return {
+                "ok": False,
+                "action": "candidate-start",
+                "message": failed.get("errors", [failed.get("message", "Candidate stop failed before runtime reconciliation")])[0],
+                "link_id": link.id,
+                "link_label": link.label,
+                "role": role,
+                "pairing_state": link.effective_pairing_state,
+                "probe_port": link.probe_port,
+                "aux_test_port": link.aux_test_port,
+                "reserved_test_range": list(link.reserved_test_range),
+                "active_adapter": candidate.adapter,
+                "candidates_summary": _candidate_summary_rows(link),
+                "candidate": _candidate_payload(candidate),
+                "systemd_status": side_runtime["status"],
+                "runtime_config_status": runtime_config_status["status"],
+                "runtime_config_details": runtime_config_status,
+                "stop": stop_results,
+                "real_systemd_touched": True,
+                "services_started": False,
+                "firewall_touched": False,
+                "routes_touched": False,
+            }
     if active and active.get("state") == "running" and active.get("adapter") == candidate.adapter:
         state.active_link_candidates.pop(link.id, None)
         if candidate.state == "running":
@@ -337,6 +380,7 @@ def start_candidate(
         "category": candidate.category,
         "role": role,
         "state": "starting",
+        "runtime_fingerprint": _candidate_runtime_fingerprint(candidate, role),
         "services": [
             {
                 "service_name": service["service_name"],
@@ -505,6 +549,7 @@ def start_candidate(
 
     _mark_candidate(link, candidate.adapter, "running")
     state.active_link_candidates[link.id]["state"] = "running"
+    state.active_link_candidates[link.id]["runtime_fingerprint"] = _candidate_runtime_fingerprint(candidate, role)
     state.active_link_candidates[link.id]["updated_at"] = _now_utc()
     return {
         "ok": True,
@@ -524,6 +569,7 @@ def start_candidate(
         "daemon_reload": reload_payload,
         "start": start_results,
         "systemd_status": status_payload["status"],
+        "runtime_config_status": _candidate_runtime_config_status(candidate=candidate, role=role, active_state=state.active_link_candidates.get(link.id) or {})["status"],
         "pairing_state_note": _pairing_state_note(link),
         "next_instruction": _start_next_instruction(role, candidate),
         "real_systemd_touched": True,
@@ -653,6 +699,7 @@ def smoke_test_candidate(
     side_plan = _side_plan(candidate, role)
     runtime_status = _candidate_runtime_systemd_status(audit_path=paths.audit_path, candidate=candidate, role=role)
     active = state.active_link_candidates.get(link.id) or {}
+    runtime_config_status = _candidate_runtime_config_status(candidate=candidate, role=role, active_state=active)
     runtime_is_active = runtime_status.get("state") == "active"
     if runtime_is_active:
         reconciled = {
@@ -751,23 +798,31 @@ def smoke_test_candidate(
     }
     if probe_result is not None:
         summary["probe_roundtrip"] = probe_result
+    summary["runtime_config_status"] = runtime_config_status["status"]
+    summary["runtime_config_details"] = runtime_config_status
     candidate.last_result = summary
     candidate.history.append(summary)
     if final_pass and link.pairing_state in {"awaiting_worker_import", "paired_address_mismatch"}:
         link.pairing_state = "paired"
         link.status = "paired"
+    message = (
+        "Real end-to-end candidate smoke test passed"
+        if final_pass and selected_mode == "real_service"
+        else "Probe path smoke test passed"
+        if final_pass
+        else "Real end-to-end candidate smoke test failed"
+        if selected_mode == "real_service"
+        else "Probe path smoke test failed"
+    )
+    if selected_mode == "probe" and not final_pass:
+        if runtime_config_status["status"] == "drifted":
+            message = "Probe path smoke test failed because the controller probe listener is stale or the probe tunnel service is not installed"
+        elif probe_result and str(probe_result.get("error") or "").strip():
+            message = f"Probe path smoke test failed because the controller probe listener is unavailable: {probe_result['error']}"
     return {
         "ok": final_pass,
         "action": "candidate-smoke-test",
-        "message": (
-            "Real end-to-end candidate smoke test passed"
-            if final_pass and selected_mode == "real_service"
-            else "Probe path smoke test passed"
-            if final_pass
-            else "Real end-to-end candidate smoke test failed"
-            if selected_mode == "real_service"
-            else "Probe path smoke test failed"
-        ),
+        "message": message,
         "link_id": link.id,
         "link_label": link.label,
         "role": role,
@@ -779,6 +834,7 @@ def smoke_test_candidate(
         "candidate": _candidate_payload(candidate),
         "result": summary,
         "runtime_systemd_state": runtime_status["state"],
+        "runtime_config_status": runtime_config_status["status"],
         "persisted_state": candidate.state,
         "pairing_state": link.effective_pairing_state,
         "pairing_state_note": _pairing_state_note(link),
@@ -793,6 +849,7 @@ def smoke_test_candidate(
 def candidate_results(
     *,
     config: AppConfig,
+    state: AppState,
     paths: SwitchPaths,
     link_label: str | None = None,
 ) -> dict[str, Any]:
@@ -802,10 +859,17 @@ def candidate_results(
     for candidate in link.candidates:
         payload = _candidate_payload(candidate)
         runtime = _candidate_runtime_systemd_status(audit_path=paths.audit_path, candidate=candidate, role=role, allow_missing=True)
+        runtime_config = _candidate_runtime_config_status(
+            candidate=candidate,
+            role=role,
+            active_state=state.active_link_candidates.get(link.id) or {},
+        )
         payload["persisted_state"] = candidate.state
         payload["runtime_systemd_state"] = runtime["state"]
         payload["runtime_systemd_ok"] = runtime["ok"]
         payload["runtime_services"] = runtime.get("services", [])
+        payload["runtime_config_status"] = runtime_config["status"]
+        payload["runtime_config_details"] = runtime_config
         candidate_payloads.append(payload)
     return {
         "ok": True,
@@ -1240,6 +1304,8 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
     else:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
+    if adapter_name == "rathole":
+        controller_listens.append(f"127.0.0.1:{probe_port}")
     return {
         "adapter": adapter_name,
         "layer": _adapter_layer(adapter_name, "layer4"),
@@ -1261,7 +1327,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
             "controller": {
                 "process_role": controller_role,
                 "adapter_enabled": True,
-                "owned_ports": [effective_transport_port, controller_user_facing_port],
+                "owned_ports": [effective_transport_port, controller_user_facing_port] + ([probe_port] if adapter_name == "rathole" else []),
                 "dependency_ports": [worker_service_port],
                 "listens_on": controller_listens,
                 "connects_to": [],
@@ -1494,6 +1560,98 @@ def _candidate_runtime_systemd_status(*, audit_path: Path, candidate: LinkCandid
     snapshot["service_name"] = primary_service_name
     snapshot["service_entry"] = primary_entry
     return snapshot
+
+
+def _candidate_runtime_fingerprint(candidate: LinkCandidate, role: str) -> str:
+    side_plan = _side_plan(candidate, role)
+    payload = {
+        "role": role,
+        "adapter": candidate.adapter,
+        "transport": candidate.transport,
+        "runtime_config": _runtime_file_snapshot(side_plan.get("runtime_config_path", "")),
+        "services": [
+            {
+                "service_name": service.get("service_name", ""),
+                "kind": service.get("kind", ""),
+                "staged_unit": _runtime_file_snapshot(service.get("unit_path", "")),
+            }
+            for service in side_plan.get("services", [])
+        ],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _candidate_runtime_config_status(*, candidate: LinkCandidate, role: str, active_state: dict[str, Any]) -> dict[str, Any]:
+    side_plan = _side_plan(candidate, role)
+    expected_fingerprint = _candidate_runtime_fingerprint(candidate, role)
+    active_fingerprint = str(active_state.get("runtime_fingerprint") or "")
+    reasons: list[str] = []
+    runtime_config_snapshot = _runtime_file_snapshot(side_plan.get("runtime_config_path", ""))
+    if not runtime_config_snapshot["exists"]:
+        reasons.append("desired runtime config is missing")
+    for service in side_plan.get("services", []):
+        staged_unit = _runtime_file_snapshot(service.get("unit_path", ""))
+        target_unit_path = str((SYSTEMD_TARGET_DIR / str(service.get("service_name", ""))).resolve())
+        installed_unit = _runtime_file_snapshot(target_unit_path)
+        if not installed_unit["exists"]:
+            reasons.append(f"managed unit '{service.get('service_name', '')}' is not installed")
+            continue
+        if staged_unit["hash"] != installed_unit["hash"]:
+            reasons.append(f"managed unit '{service.get('service_name', '')}' differs from the desired staged unit")
+        if service.get("kind") == "adapter":
+            installed_runtime_path = _installed_runtime_config_path(target_unit_path)
+            installed_runtime_snapshot = _runtime_file_snapshot(installed_runtime_path)
+            if not installed_runtime_snapshot["exists"]:
+                reasons.append(f"installed runtime config for '{service.get('service_name', '')}' is missing")
+            elif installed_runtime_snapshot["hash"] != runtime_config_snapshot["hash"]:
+                reasons.append(f"installed runtime config for '{service.get('service_name', '')}' differs from the desired rendered config")
+    if active_fingerprint and active_fingerprint != expected_fingerprint:
+        reasons.append("active managed runtime was started from an older rendered configuration")
+    status = "current" if not reasons else "drifted"
+    return {
+        "status": status,
+        "expected_fingerprint": expected_fingerprint,
+        "active_fingerprint": active_fingerprint,
+        "runtime_config_path": side_plan.get("runtime_config_path", ""),
+        "reasons": sorted(set(filter(None, reasons))),
+    }
+
+
+def _runtime_file_snapshot(path_text: str) -> dict[str, Any]:
+    path_value = str(path_text or "")
+    if not path_value:
+        return {"path": "", "exists": False, "hash": "", "size": 0}
+    path = Path(path_value)
+    if not path.exists() or path.is_dir():
+        return {"path": str(path), "exists": False, "hash": "", "size": 0}
+    content = path.read_bytes()
+    return {
+        "path": str(path),
+        "exists": True,
+        "hash": hashlib.sha256(content).hexdigest(),
+        "size": len(content),
+    }
+
+
+def _installed_runtime_config_path(unit_path_text: str) -> str:
+    snapshot = _runtime_file_snapshot(unit_path_text)
+    if not snapshot["exists"]:
+        return ""
+    lines = Path(unit_path_text).read_text(encoding="utf-8").splitlines()
+    for line in lines:
+        if not line.startswith("ExecStart="):
+            continue
+        command = line.partition("=")[2].strip()
+        if not command:
+            return ""
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return ""
+        if len(argv) < 2:
+            return ""
+        return str(argv[-1])
+    return ""
 
 
 def _candidate_runtime_blocker(candidate: LinkCandidate, runtime_status: dict[str, Any]) -> str:
