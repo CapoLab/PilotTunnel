@@ -1,14 +1,16 @@
 import unittest
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from unittest.mock import patch
 from pathlib import Path
 
-from pilottunnel.probe import build_benchmark_message, parse_benchmark_message, probe_roundtrip, run_echo_responder
-from pilottunnel.candidates import _candidate_runtime_config_status, _candidate_runtime_fingerprint, benchmark_readiness
-from pilottunnel.config import LinkCandidate
+from pilottunnel.probe import _encode_frame, _recv_frame, build_benchmark_message, parse_benchmark_message, probe_roundtrip, run_echo_responder
+from pilottunnel.candidates import _benchmark_probe_secret, _candidate_runtime_config_status, _candidate_runtime_fingerprint, benchmark_readiness
+from pilottunnel.config import LinkCandidate, LinkProfile
 
 
 class BenchmarkProbeProtocolTests(unittest.TestCase):
@@ -43,8 +45,93 @@ class BenchmarkProbeProtocolTests(unittest.TestCase):
             time.sleep(0.05)
             result = probe_roundtrip(host="127.0.0.1", port=port, timeout=1.0, secret=b"test-secret")
             self.assertTrue(result.ok)
+            raw = probe_roundtrip(host="127.0.0.1", port=port, timeout=0.2)
+            self.assertFalse(raw.ok)
             rejected = probe_roundtrip(host="127.0.0.1", port=port, timeout=0.2, secret=b"wrong-secret")
             self.assertFalse(rejected.ok)
+
+    def test_cli_responder_accepts_production_derived_secret(self) -> None:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        link = LinkProfile(
+            id="ptlink-test-001",
+            label="link-test-001",
+            iran_address="controller.example.invalid",
+            kharej_address="worker.example.invalid",
+            tunnel_port=42001,
+            config_port=42002,
+            pairing_secret="shared-test-pairing-secret",
+        )
+        secret = _benchmark_probe_secret(link, "rathole")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret_file = Path(temp_dir) / "benchmark-probe.secret"
+            secret_file.write_bytes(secret)
+            if sys.platform != "win32":
+                secret_file.chmod(0o600)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "pilottunnel.probe",
+                    "responder",
+                    "--bind-host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--accept-timeout",
+                    "0.05",
+                    "--secret-file",
+                    str(secret_file),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                result = None
+                for _ in range(20):
+                    result = probe_roundtrip(host="127.0.0.1", port=port, timeout=0.25, secret=secret)
+                    if result.ok:
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(result)
+                self.assertTrue(result.ok, msg=result.error if result else "no probe result")
+                self.assertTrue(result.exact_match)
+                self.assertLess(result.roundtrip_latency_ms or float("inf"), 250.0)
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                if process.stderr is not None:
+                    process.stderr.close()
+
+    def test_secret_file_responder_accepts_fragmented_authenticated_frame(self) -> None:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        secret = b"fragmented-secret"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret_file = Path(temp_dir) / "probe.secret"
+            secret_file.write_bytes(secret)
+            thread = threading.Thread(
+                target=run_echo_responder,
+                kwargs={"bind_host": "127.0.0.1", "port": port, "accept_timeout": 0.05, "secret_file": str(secret_file)},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.05)
+            message = build_benchmark_message(action="probe", payload={"nonce": "fragmented"}, secret=secret)
+            frame = _encode_frame(message, 8192)
+            with socket.create_connection(("127.0.0.1", port), timeout=1.0) as conn:
+                conn.settimeout(1.0)
+                for byte in frame:
+                    conn.sendall(bytes([byte]))
+                response = _recv_frame(conn, 8192)
+            self.assertEqual(response, message)
+            self.assertEqual(parse_benchmark_message(message=response, secret=secret)[0], "probe")
 
     def test_rathole_readiness_requires_a_runnable_two_sided_path(self) -> None:
         candidate = LinkCandidate(

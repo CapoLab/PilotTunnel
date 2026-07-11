@@ -1480,10 +1480,12 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_smoke_test_uses_real_service_port(self) -> None:
         self._create_controller_link()
         probe_calls: list[int] = []
+        probe_secrets: list[bytes | None] = []
         tcp_calls: list[int] = []
 
-        def fake_roundtrip(*, host: str, port: int, timeout: float):
+        def fake_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
             probe_calls.append(port)
+            probe_secrets.append(secret)
 
             class Result:
                 def to_dict(self_inner):
@@ -1586,6 +1588,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(tcp_calls[0], self.main_port)
         self.assertGreaterEqual(len(probe_calls), 1)
         self.assertTrue(all(port != self.main_port for port in probe_calls))
+        self.assertTrue(all(secret for secret in probe_secrets))
         self.assertIsNone(payload["result"]["average_roundtrip_latency_ms"])
         self.assertEqual(payload["persisted_state"], "test_passed")
         self.assertEqual(payload["runtime_systemd_state"], "active")

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import secrets
 import socket
+import struct
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -115,10 +116,10 @@ def probe_roundtrip(*, host: str, port: int, timeout: float = DEFAULT_PROBE_TIME
         with socket.create_connection((host, port), timeout=timeout) as conn:
             connect_latency_ms = round((time.perf_counter() - started) * 1000, 3)
             conn.settimeout(timeout)
-            conn.sendall(expected)
+            conn.sendall(_encode_frame(expected, DEFAULT_MAX_PAYLOAD_BYTES) if secret else expected)
             if not secret:
                 conn.shutdown(socket.SHUT_WR)
-            received = _recv_all(conn, DEFAULT_MAX_PAYLOAD_BYTES)
+            received = _recv_frame(conn, DEFAULT_MAX_PAYLOAD_BYTES) if secret else _recv_all(conn, DEFAULT_MAX_PAYLOAD_BYTES)
             roundtrip_latency_ms = round((time.perf_counter() - started) * 1000, 3)
             exact_match = received == expected
             if not exact_match:
@@ -168,7 +169,7 @@ def probe_roundtrip(*, host: str, port: int, timeout: float = DEFAULT_PROBE_TIME
             bytes_received=0,
             exact_match=False,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return ProbeAttemptResult(
             ok=False,
             host=host,
@@ -221,7 +222,10 @@ def _handle_connection(conn: socket.socket, io_timeout: float, max_payload_bytes
         conn.settimeout(io_timeout)
         # Benchmark frames are bounded single messages. Reading one frame avoids
         # waiting for a peer half-close before sending the authenticated reply.
-        data = conn.recv(max_payload_bytes) if secret else _recv_all(conn, max_payload_bytes)
+        try:
+            data = _recv_frame(conn, max_payload_bytes) if secret else _recv_all(conn, max_payload_bytes)
+        except (OSError, ValueError):
+            return
         if not data:
             return
         if len(data) > max_payload_bytes:
@@ -231,7 +235,7 @@ def _handle_connection(conn: socket.socket, io_timeout: float, max_payload_bytes
                 parse_benchmark_message(message=data, secret=secret)
                 # These actions only acknowledge benchmark data flow; they never
                 # select or execute host commands.
-                conn.sendall(data)
+                conn.sendall(_encode_frame(data, max_payload_bytes))
             else:
                 conn.sendall(data)
         except (OSError, ValueError):
@@ -249,6 +253,32 @@ def _recv_all(conn: socket.socket, max_payload_bytes: int) -> bytes:
         if total > max_payload_bytes:
             return b""
         chunks.append(chunk)
+
+
+def _encode_frame(payload: bytes, max_payload_bytes: int) -> bytes:
+    if not payload or len(payload) > max_payload_bytes:
+        raise ValueError("Benchmark probe frame exceeds the payload limit")
+    return struct.pack("!I", len(payload)) + payload
+
+
+def _recv_frame(conn: socket.socket, max_payload_bytes: int) -> bytes:
+    header = _recv_exact(conn, 4)
+    size = struct.unpack("!I", header)[0]
+    if size < 1 or size > max_payload_bytes:
+        raise ValueError("Invalid benchmark probe frame length")
+    return _recv_exact(conn, size)
+
+
+def _recv_exact(conn: socket.socket, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = conn.recv(remaining)
+        if not chunk:
+            raise ValueError("Benchmark probe frame ended before completion")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _validate_endpoint(host: str, port: int) -> None:
