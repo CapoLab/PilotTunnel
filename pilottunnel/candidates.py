@@ -76,6 +76,7 @@ CANDIDATE_STATES = {
 }
 SYSTEMD_TARGET_DIR = Path("/etc/systemd/system")
 PROBE_MARKER = "pilotunnel-probe"
+BENCHMARK_PROBE_AUTH_VERSION = "hmac-frame-v1"
 BORE_CONTROL_PORT = 7835
 SUPPORTED_CANDIDATE_LAYERS = {"auto", "layer4"}
 
@@ -1567,7 +1568,8 @@ def _derived_secrets(link: LinkProfile, adapter_name: str) -> dict[str, str]:
 
 
 def _benchmark_probe_secret(link: LinkProfile, adapter_name: str) -> bytes:
-    return _derive_hmac(link.pairing_secret, link.id, adapter_name, "benchmark-probe").encode("ascii")
+    purpose = f"benchmark-probe:{BENCHMARK_PROBE_AUTH_VERSION}"
+    return _derive_hmac(link.pairing_secret, link.id, adapter_name, purpose).encode("ascii")
 
 
 def _derive_hmac(pairing_secret: str, link_id: str, adapter_name: str, purpose: str) -> str:
@@ -1627,6 +1629,7 @@ def _candidate_runtime_fingerprint(candidate: LinkCandidate, role: str) -> str:
         "role": role,
         "adapter": candidate.adapter,
         "transport": candidate.transport,
+        "benchmark_probe_auth_version": BENCHMARK_PROBE_AUTH_VERSION if candidate.adapter == "rathole" else "",
         "runtime_config": _runtime_file_snapshot(side_plan.get("runtime_config_path", "")),
         "services": [
             {
