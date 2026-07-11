@@ -11,7 +11,7 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pilottunnel import cli
+from pilottunnel import candidates, cli
 from pilottunnel.config import DEFAULT_AUX_TEST_PORT, DEFAULT_PROBE_PORT, load_config
 
 
@@ -1238,6 +1238,30 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(probe_service["secret_file"])
         if os.name != "nt":
             self.assertEqual(Path(probe_service["secret_file"]).stat().st_mode & 0o777, 0o600)
+
+    def test_worker_probe_unit_install_replaces_legacy_execstart_with_secret_file(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        target_dir = Path(self.temp_dir.name) / "systemd-final"
+        target_dir.mkdir()
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.SYSTEMD_TARGET_DIR", target_dir):
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+            self.assertEqual(code, 0, msg=output)
+            payload = json.loads(output)
+            rathole = next(item for item in payload["candidates"] if item["adapter"] == "rathole")
+            probe = next(item for item in rathole["topology"]["sides"]["worker"]["services"] if item["kind"] == "probe")
+            installed = target_dir / probe["service_name"]
+            installed.write_text("# Managed-by: PilotTunnel\n[Service]\nExecStart=python3 -m pilottunnel.probe responder\n", encoding="utf-8")
+            result = candidates._install_candidate_service_units(services=[probe], summary_name="probe-install.json")
+        self.assertTrue(result["ok"])
+        unit_text = installed.read_text(encoding="utf-8")
+        expected_secret = Path(probe["secret_file"])
+        self.assertIn("--secret-file", unit_text)
+        self.assertIn(str(expected_secret), unit_text)
+        self.assertIn("candidate-runtime", str(expected_secret))
+        self.assertIn("rathole-probe", str(expected_secret))
+        self.assertTrue(expected_secret.is_file())
+        if os.name != "nt":
+            self.assertEqual(expected_secret.stat().st_mode & 0o777, 0o600)
 
     def test_worker_candidate_prepare_renders_probe_unit_with_current_probe_port(self) -> None:
         self._create_worker_link_from_pairing_code()
