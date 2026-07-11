@@ -250,10 +250,23 @@ def start_candidate(
     link_label: str | None = None,
     requested_platform: str | None = None,
 ) -> dict[str, Any]:
-    del requested_platform
     role = _require_role(config)
     link = _target_link(config, link_label)
     candidate = _candidate_for(link, adapter_name)
+    if candidate.adapter == "rathole":
+        # Re-render the local staged plan before reconciliation. A stored link
+        # may predate authenticated probe support, so its old unit cannot be
+        # trusted as the desired runtime definition.
+        prepare_all_candidates(
+            config=config,
+            state=state,
+            paths=paths,
+            requested_platform=requested_platform,
+            link_label=link.label,
+            layer="layer4",
+        )
+        link = _target_link(config, link.label)
+        candidate = _candidate_for(link, adapter_name)
     side_plan = _side_plan(candidate, role)
     if not candidate.runnable or not side_plan["services"]:
         return _failure(

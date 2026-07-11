@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -1326,6 +1327,51 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(any("pilotunnel-probe" in name for name in install_names))
         self.assertEqual(set(start_calls), install_names)
         self.assertEqual(payload["systemd_status"]["ok"], True)
+
+    def test_worker_start_replaces_legacy_probe_unit_without_secret_file(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        target_dir = Path(self.temp_dir.name) / "legacy-systemd"
+        target_dir.mkdir()
+        calls: list[str] = []
+
+        def fake_status(*, service_dir: Path, service_name: str | None, audit_path: Path):
+            return {"ok": True, "services": [{"service_name": service_name, "active_state": "active", "sub_state": "running"}], "warnings": [], "errors": []}
+
+        def fake_install(*, services, summary_name):
+            calls.append("install")
+            rendered = []
+            for service in services:
+                target = target_dir / service["service_name"]
+                target.write_text(Path(service["unit_path"]).read_text(encoding="utf-8"), encoding="utf-8")
+                rendered.append({"service_name": service["service_name"], "target_unit_path": str(target), "backup_path": "", "kind": service["kind"]})
+            return {"ok": True, "summary_file": str(target_dir / summary_name), "services": rendered}
+
+        def fake_stop(**kwargs):
+            calls.append("stop")
+            return {"ok": True}
+
+        def fake_reload(**kwargs):
+            calls.append("reload")
+            return {"ok": True}
+
+        def fake_start(**kwargs):
+            calls.append("start")
+            return {"ok": True}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.SYSTEMD_TARGET_DIR", target_dir), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop), patch("pilottunnel.candidates.apply_reload", side_effect=fake_reload), patch("pilottunnel.candidates.apply_start", side_effect=fake_start):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            config = load_config(self.config)
+            candidate = next(item for item in config.links[0].candidates if item.adapter == "rathole")
+            probe = next(item for item in candidate.topology["sides"]["worker"]["services"] if item["kind"] == "probe")
+            legacy = Path(probe["unit_path"]).read_text(encoding="utf-8")
+            legacy = re.sub(r" --secret-file \S+", "", legacy)
+            (target_dir / probe["service_name"]).write_text(legacy, encoding="utf-8")
+            self.run_cli("candidate", "start", "--adapter", "rathole", "--link", "link-001", "--json")
+        self.assertIn("stop", calls)
+        self.assertIn("install", calls)
+        self.assertIn("reload", calls)
+        self.assertIn("start", calls)
+        self.assertIn("--secret-file", (target_dir / probe["service_name"]).read_text(encoding="utf-8"))
 
     def test_candidate_start_reconciles_reinstalls_and_restarts_when_runtime_config_drifted(self) -> None:
         self._create_controller_link()
