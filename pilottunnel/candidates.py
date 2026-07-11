@@ -79,6 +79,36 @@ PROBE_MARKER = "pilotunnel-probe"
 BORE_CONTROL_PORT = 7835
 SUPPORTED_CANDIDATE_LAYERS = {"auto", "layer4"}
 
+# A candidate can render and start locally without providing a safe way to
+# benchmark both sides. Keep that distinction explicit for all adapters.
+BENCHMARK_REQUIREMENTS = (
+    "real_service_path",
+    "private_probe_path",
+    "authenticated_probe_protocol",
+    "local_lifecycle",
+)
+
+
+def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
+    """Return the strict benchmark contract without treating local plans as proof."""
+    topology = candidate.topology or {}
+    adapter = candidate.adapter
+    missing: list[str] = []
+    if topology.get("category") != "two_sided_tunnel":
+        missing.append("Candidate is not a two-sided tunnel")
+    if adapter != "rathole":
+        missing.append("Adapter does not render a private tunneled probe service")
+    if not candidate.runnable:
+        missing.append("Candidate is not runnable on this server")
+    return {
+        "benchmark_capable": not missing,
+        "missing_requirements": missing,
+        "probe_path": (candidate.probe or {}).get("path", ""),
+        "real_service_path": topology.get("real_service_path", ""),
+        "authentication_status": "authenticated_hmac_probe" if adapter == "rathole" and candidate.runnable else "missing_hmac_probe_protocol",
+        "required_contract": list(BENCHMARK_REQUIREMENTS),
+    }
+
 
 def prepare_all_candidates(
     *,
@@ -762,7 +792,8 @@ def smoke_test_candidate(
         real_pass = bool(attempt_results) and failure_count == 0 and success_count == len(attempt_results)
     probe_result = None
     if probe_port >= 1:
-        probe_result = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
+        probe_secret = _benchmark_probe_secret(link, candidate.adapter) if candidate.adapter == "rathole" else None
+        probe_result = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout, secret=probe_secret).to_dict()
     probe_pass = bool(probe_result and probe_result.get("ok"))
     final_pass = real_pass if selected_mode == "real_service" else probe_pass
     _mark_candidate(link, candidate.adapter, "test_passed" if final_pass else "test_failed")
@@ -1373,6 +1404,14 @@ def _render_probe_service(
     service_dir = _role_service_dir(paths, link, f"{adapter_name}-probe", "worker")
     service_name = f"pilottunnel-{link.label}-{adapter_name}-{PROBE_MARKER}-worker.service"
     repo_root = _candidate_repo_root()
+    secret_file = ""
+    if adapter_name == "rathole":
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        secret_path = runtime_dir / "benchmark-probe.secret"
+        secret_path.write_bytes(_benchmark_probe_secret(link, adapter_name))
+        if os.name != "nt":
+            secret_path.chmod(0o600)
+        secret_file = str(secret_path)
     argv = [
         sys.executable,
         "-m",
@@ -1383,6 +1422,8 @@ def _render_probe_service(
         "--port",
         str(probe["port"]),
     ]
+    if secret_file:
+        argv.extend(["--secret-file", secret_file])
     unit = render_unit_file(
         unit_name=service_name,
         description=f"PilotTunnel {link.label} {adapter_name} worker probe",
@@ -1398,6 +1439,7 @@ def _render_probe_service(
         "service_dir": str(service_dir),
         "runtime_dir": str(runtime_dir),
         "unit_path": unit.path,
+        "secret_file": secret_file,
     }
 
 
@@ -1509,6 +1551,10 @@ def _derived_secrets(link: LinkProfile, adapter_name: str) -> dict[str, str]:
         "auth_user": f"pt-{link.id[-6:]}",
         "auth_password": _derive_hmac(link.pairing_secret, link.id, adapter_name, "auth-password")[:32],
     }
+
+
+def _benchmark_probe_secret(link: LinkProfile, adapter_name: str) -> bytes:
+    return _derive_hmac(link.pairing_secret, link.id, adapter_name, "benchmark-probe").encode("ascii")
 
 
 def _derive_hmac(pairing_secret: str, link_id: str, adapter_name: str, purpose: str) -> str:
@@ -1761,7 +1807,7 @@ def _validate_link(link: LinkProfile) -> None:
 
 
 def _candidate_payload(candidate: LinkCandidate) -> dict[str, Any]:
-    return {
+    payload = {
         "adapter": candidate.adapter,
         "transport": candidate.transport,
         "layer": candidate.layer,
@@ -1801,6 +1847,8 @@ def _candidate_payload(candidate: LinkCandidate) -> dict[str, Any]:
         "history_count": len(candidate.history),
         "notes": candidate.notes,
     }
+    payload["benchmark"] = benchmark_readiness(candidate)
+    return payload
 
 
 def _side_plan(candidate: LinkCandidate, role: str) -> dict[str, Any]:

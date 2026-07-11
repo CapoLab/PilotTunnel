@@ -1542,7 +1542,7 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_real_service_smoke_test_passes_even_if_probe_fails(self) -> None:
         self._create_controller_link()
 
-        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
             class Result:
                 def to_dict(self_inner):
                     return {
@@ -1623,7 +1623,7 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_probe_mode_fails_when_probe_path_is_unavailable(self) -> None:
         self._create_controller_link()
 
-        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
             class Result:
                 def to_dict(self_inner):
                     return {
@@ -1685,7 +1685,7 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_probe_mode_passes_when_probe_service_mapping_exists(self) -> None:
         self._create_controller_link()
 
-        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
             class Result:
                 def to_dict(self_inner):
                     return {
