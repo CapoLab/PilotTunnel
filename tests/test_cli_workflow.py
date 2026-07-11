@@ -12,10 +12,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pilottunnel import candidates, cli
+from pilottunnel.adapters.frp import FrpAdapter
 from pilottunnel.config import DEFAULT_AUX_TEST_PORT, DEFAULT_PROBE_PORT, load_config
 
 
 class CliWorkflowTests(unittest.TestCase):
+    def test_frp_declares_runtime_component_per_side(self) -> None:
+        adapter = FrpAdapter()
+        self.assertEqual(adapter.runtime_service_specs("controller"), ({"name": "frps", "component": "frps"}, {"name": "frpc-visitor", "component": "frpc"}))
+        self.assertEqual(adapter.runtime_service_specs("worker"), ({"name": "frpc", "component": "frpc"},))
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         base = Path(self.temp_dir.name)
@@ -1235,6 +1241,188 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn('Environment="PYTHONPATH=', probe_unit)
         self.assertIn("Description=PilotTunnel link-001 rathole worker probe", probe_unit)
         self.assertNotIn("--secret-file", probe_unit)
+
+    def test_frp_prepare_renders_private_visitor_and_worker_probe_proxy(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        frp = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "frp")
+        controller_services = frp["topology"]["sides"]["controller"]["services"]
+        self.assertEqual(len(controller_services), 2)
+        visitor = next(item for item in controller_services if "frpc-visitor" in item["service_name"])
+        visitor_unit = Path(visitor["unit_path"]).read_text(encoding="utf-8")
+        self.assertIn("frpc-visitor", visitor_unit)
+        visitor_config = Path(frp["controller_runtime_config_path"]).read_text(encoding="utf-8")
+        self.assertIn('bindAddr = "127.0.0.1"', visitor_config)
+        self.assertIn(f"bindPort = {frp['probe']['port']}", visitor_config)
+        self.assertIn('type = "stcp"', visitor_config)
+        self.assertNotIn('bindAddr = "0.0.0.0"', visitor_config)
+
+    def test_frp_worker_config_contains_main_tcp_and_private_stcp_probe(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        frp = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "frp")
+        worker_services = frp["topology"]["sides"]["worker"]["services"]
+        self.assertEqual(len(worker_services), 2)
+        worker_config = Path(frp["worker_runtime_config_path"]).read_text(encoding="utf-8")
+        self.assertIn('type = "tcp"', worker_config)
+        self.assertIn('type = "stcp"', worker_config)
+        self.assertIn('localIP = "127.0.0.1"', worker_config)
+        self.assertIn(f"localPort = {frp['probe']['port']}", worker_config)
+        self.assertIn('secretKey = "', worker_config)
+
+    def test_frp_controller_and_worker_service_sets_are_local(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        frp = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "frp")
+        controller = frp["topology"]["sides"]["controller"]["services"]
+        self.assertEqual(len(controller), 2)
+        self.assertTrue(any("frps" in item["service_name"] for item in controller))
+        self.assertTrue(any("frpc-visitor" in item["service_name"] for item in controller))
+        self.assertTrue(frp["benchmark"]["benchmark_capable"])
+
+    def test_frp_local_lifecycle_contracts(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        frp = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "frp")
+        controller = frp["topology"]["sides"]["controller"]["services"]
+        self.assertEqual([item["kind"] for item in controller], ["adapter", "adapter"])
+        self.assertEqual(len(controller), 2)
+
+    def test_frp_controller_start_rolls_back_when_visitor_start_fails(self) -> None:
+        self._create_controller_link()
+        start_calls: list[str] = []
+        stop_calls: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"]} for item in services]}
+
+        def fake_status(**kwargs):
+            return {"ok": False, "services": [], "warnings": [], "errors": ["missing"]}
+
+        def fake_start(*, service_name=None, **kwargs):
+            start_calls.append(service_name)
+            return {"ok": "frpc-visitor" not in (service_name or ""), "service_name": service_name, "errors": ["visitor failed"]}
+
+        def fake_stop(*, service_name=None, **kwargs):
+            stop_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, _output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(start_calls), 2)
+        self.assertEqual(len(stop_calls), 1)
+        self.assertIn("frps", stop_calls[0])
+
+    def test_frp_controller_start_and_stop_manage_only_local_services(self) -> None:
+        self._create_controller_link()
+        installed_services: list[str] = []
+        start_calls: list[str] = []
+        stop_calls: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            installed_services[:] = [item["service_name"] for item in services]
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"], "service_dir": item["service_dir"], "runtime_dir": item["runtime_dir"]} for item in services]}
+
+        def fake_status(*, service_name=None, **kwargs):
+            services = [{"service_name": service_name, "active_state": "active", "sub_state": "running"}] if service_name in installed_services else []
+            return {"ok": True, "services": services, "warnings": [], "errors": []}
+
+        def fake_start(*, service_name=None, **kwargs):
+            start_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        def fake_stop(*, service_name=None, **kwargs):
+            stop_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            start_code, start_output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+            stop_code, stop_output = self.run_cli("candidate", "stop", "--link", "link-001", "--json")
+
+        self.assertEqual(start_code, 0, msg=start_output)
+        self.assertEqual(stop_code, 0, msg=stop_output)
+        self.assertEqual(len(start_calls), 2)
+        self.assertIn("frps", start_calls[0])
+        self.assertIn("frpc-visitor", start_calls[1])
+        self.assertEqual(stop_calls, list(reversed(start_calls)))
+        for service_name in start_calls + stop_calls:
+            self.assertNotIn("pilotunnel-probe", service_name)
+
+    def test_frp_worker_start_rolls_back_when_frpc_start_fails(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        start_calls: list[str] = []
+        stop_calls: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"]} for item in services]}
+
+        def fake_status(**kwargs):
+            return {"ok": False, "services": [], "warnings": [], "errors": ["missing"]}
+
+        def fake_start(*, service_name=None, **kwargs):
+            start_calls.append(service_name)
+            return {"ok": "frpc" not in (service_name or ""), "service_name": service_name, "errors": ["frpc failed"]}
+
+        def fake_stop(*, service_name=None, **kwargs):
+            stop_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, _output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(start_calls), 2)
+        self.assertEqual(len(stop_calls), 1)
+        self.assertIn("pilotunnel-probe", stop_calls[0])
+        self.assertNotIn("frpc", stop_calls[0])
+
+    def test_frp_worker_start_and_stop_manage_only_local_services(self) -> None:
+        self._create_worker_link_from_pairing_code()
+        installed_services: list[str] = []
+        start_calls: list[str] = []
+        stop_calls: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            installed_services[:] = [item["service_name"] for item in services]
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"], "service_dir": item["service_dir"], "runtime_dir": item["runtime_dir"]} for item in services]}
+
+        def fake_status(*, service_name=None, **kwargs):
+            services = [{"service_name": service_name, "active_state": "active", "sub_state": "running"}] if service_name in installed_services else []
+            return {"ok": True, "services": services, "warnings": [], "errors": []}
+
+        def fake_start(*, service_name=None, **kwargs):
+            start_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        def fake_stop(*, service_name=None, **kwargs):
+            stop_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            start_code, start_output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+            stop_code, stop_output = self.run_cli("candidate", "stop", "--link", "link-001", "--json")
+
+        self.assertEqual(start_code, 0, msg=start_output)
+        self.assertEqual(stop_code, 0, msg=stop_output)
+        self.assertEqual(len(start_calls), 2)
+        self.assertIn("pilotunnel-probe", start_calls[0])
+        self.assertIn("frpc", start_calls[1])
+        self.assertEqual(stop_calls, list(reversed(start_calls)))
+        for service_name in start_calls + stop_calls:
+            self.assertNotIn("frps", service_name)
+            self.assertNotIn("frpc-visitor", service_name)
 
     def test_worker_probe_unit_install_replaces_legacy_execstart_with_simple_responder(self) -> None:
         self._create_worker_link_from_pairing_code()

@@ -96,7 +96,7 @@ def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
     missing: list[str] = []
     if topology.get("category") != "two_sided_tunnel":
         missing.append("Candidate is not a two-sided tunnel")
-    if adapter != "rathole":
+    if adapter not in {"rathole", "frp"}:
         missing.append("Adapter does not render a private tunneled probe service")
     if not candidate.runnable:
         missing.append("Candidate is not runnable on this server")
@@ -105,7 +105,7 @@ def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
         "missing_requirements": missing,
         "probe_path": (candidate.probe or {}).get("path", ""),
         "real_service_path": topology.get("real_service_path", ""),
-        "authentication_status": "rathole_transport_auth" if adapter == "rathole" and candidate.runnable else "not_available",
+        "authentication_status": "rathole_transport_auth" if adapter in {"rathole", "frp"} and candidate.runnable else "not_available",
         "required_contract": list(BENCHMARK_REQUIREMENTS),
     }
 
@@ -1120,20 +1120,17 @@ def _stage_side(
                 runnable = False
                 owner = occupied[0].get("owner") or "owner unavailable"
                 blockers.append(f"Bore fixed control port {BORE_CONTROL_PORT} is already in use on this controller ({owner})")
-        try:
-            binary_resolution = resolve_binary_reference(
-                adapter=adapter_name,
-                component=_runtime_component_for_side(adapter_name, side_name),
-                config=config,
-                state=state,
-                requested_platform=requested_platform,
-            )
-        except (KeyError, ValueError) as exc:
-            binary_resolution = {"ok": False, "message": str(exc), "path": ""}
-        if not binary_resolution.get("ok"):
-            runnable = False
-            blockers.append(binary_resolution.get("message", f"Binary resolution failed for adapter '{adapter_name}'"))
-        else:
+        specs = getattr(adapter, "runtime_service_specs", lambda _role: ({"name": "primary", "component": _runtime_component_for_side(adapter_name, side_name)},))(side_name)
+        for spec in specs:
+            context.remote_stub["frp_runtime_role"] = spec.get("name", "")
+            try:
+                binary_resolution = resolve_binary_reference(adapter=adapter_name, component=spec.get("component"), config=config, state=state, requested_platform=requested_platform)
+            except (KeyError, ValueError) as exc:
+                binary_resolution = {"ok": False, "message": str(exc), "path": ""}
+            if not binary_resolution.get("ok"):
+                runnable = False
+                blockers.append(binary_resolution.get("message", f"Binary resolution failed for adapter '{adapter_name}'"))
+                continue
             executable = binary_resolution["path"]
             try:
                 runtime = adapter.render_runtime_plan(context, Path(runtime_dir), executable)
@@ -1145,8 +1142,9 @@ def _stage_side(
                 runtime_config_path = runtime["config_path"]
                 command_summary = _redacted_command_summary(runtime.get("argv", []))
                 environment_summary = redact_secrets(runtime.get("environment", {}))
+                service_name = adapter.service_name(context) if spec.get("name") in {"", "primary"} else f"{adapter.service_name(context)[:-8]}-{spec['name']}.service"
                 unit = render_unit_file(
-                    unit_name=adapter.service_name(context),
+                    unit_name=service_name,
                     description=f"PilotTunnel {link.label} {adapter_name} {side_name} {transport}",
                     command=shlex.join(runtime.get("argv", [])),
                     output_dir=Path(service_dir),
@@ -1155,11 +1153,11 @@ def _stage_side(
                 )
                 unit_path = unit.path
                 primary_unit_path = unit.path
-                primary_service_name = adapter.service_name(context)
+                primary_service_name = primary_service_name or service_name
                 services.append(
                     {
                         "kind": "adapter",
-                        "service_name": adapter.service_name(context),
+                        "service_name": service_name,
                         "service_dir": service_dir,
                         "runtime_dir": runtime_dir,
                         "unit_path": unit.path,
@@ -1347,7 +1345,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
     else:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
-    if adapter_name == "rathole":
+    if adapter_name in {"rathole", "frp"}:
         controller_listens.append(f"127.0.0.1:{probe_port}")
     return {
         "adapter": adapter_name,
@@ -1370,7 +1368,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
             "controller": {
                 "process_role": controller_role,
                 "adapter_enabled": True,
-                "owned_ports": [effective_transport_port, controller_user_facing_port] + ([probe_port] if adapter_name == "rathole" else []),
+                "owned_ports": [effective_transport_port, controller_user_facing_port] + ([probe_port] if adapter_name in {"rathole", "frp"} else []),
                 "dependency_ports": [worker_service_port],
                 "listens_on": controller_listens,
                 "connects_to": [],
