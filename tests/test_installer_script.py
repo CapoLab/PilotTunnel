@@ -532,6 +532,66 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue((install_dir / "bin" / "pilottunnel-test").exists())
             self.assertTrue(os.access(install_dir / "bin" / "pilottunnel-test", os.X_OK))
 
+    def test_install_script_test_mode_installs_and_invokes_candidate_runner(self) -> None:
+        with self.snapshot_repo() as repo_url, tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"rathole\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"runtime_config_status\": \"current\", \"message\": \"started\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"runtime_config_status\": \"current\", \"result\": {\"probe_status\": \"passed\", \"real_service_status\": \"passed\"}}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                repo_url,
+                "--without-binaries",
+                "--test",
+                "--link",
+                "link-001",
+                "--adapter",
+                "rathole",
+                "--attempts",
+                "4",
+                "--timeout",
+                "6",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertTrue((install_dir / "bin" / "pilottunnel-test").exists())
+            payload = json.loads(result.stdout[result.stdout.rfind("{"):])
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["role"], "controller")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            runner_calls = "\n".join(commands)
+            self.assertIn(f"--config {self.to_bash_path(install_dir / 'state' / 'config.json')}", runner_calls)
+            self.assertIn("candidate prepare-all --link link-001 --json", runner_calls)
+            self.assertIn("candidate start --adapter rathole --link link-001 --json", runner_calls)
+            self.assertIn("candidate smoke-test --adapter rathole --link link-001 --mode probe --attempts 4 --timeout 6 --json", runner_calls)
+            self.assertIn("candidate smoke-test --adapter rathole --link link-001 --mode real_service --attempts 4 --timeout 6 --json", runner_calls)
+
     def test_pilottunnel_test_uses_opt_pilottunnel_layout_paths(self) -> None:
         self.assertIn('DEFAULT_BASE_DIR="/opt/pilottunnel"', self.test_runner_text)
         self.assertIn('REPO_DIR="/opt/pilottunnel/repo"', self.test_runner_text)

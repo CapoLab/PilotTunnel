@@ -24,6 +24,12 @@ INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 DRY_RUN=0
 NO_MENU=0
 DEBUG=0
+TEST_MODE=0
+TEST_LINK=""
+TEST_ADAPTER=""
+TEST_ATTEMPTS="3"
+TEST_TIMEOUT_SECONDS="5"
+TEST_JSON=0
 MANIFEST_URL=""
 MANIFEST_FILE=""
 ALLOW_PROVIDER_HOST="$DEFAULT_PROVIDER_HOSTS"
@@ -53,11 +59,18 @@ PilotTunnel safety-first multi-layer tunnel bootstrap helper
 Usage:
   bash ${SCRIPT_NAME}
   bash ${SCRIPT_NAME} --no-menu --role <controller|worker>
+  bash ${SCRIPT_NAME} --test --link <LINK> --adapter <ADAPTER>
   bash ${SCRIPT_NAME} --debug
   bash ${SCRIPT_NAME} --dry-run
 
 Options:
   --no-menu              Prepare PilotTunnel without launching the terminal menu.
+  --test                 Run the installed candidate test flow and imply --no-menu.
+  --link <LINK>          Candidate link label required by --test.
+  --adapter <ADAPTER>    Candidate adapter required by --test.
+  --attempts <N>         Candidate smoke-test attempts for --test. Defaults to 3.
+  --timeout <SECONDS>    Candidate smoke-test timeout for --test. Defaults to 5.
+  --json                 Request JSON output from the --test candidate runner.
   --role <ROLE>           Initialize controller or worker in non-interactive mode.
   --debug                Show detailed installer output for troubleshooting.
   --layer <LAYER>         Optional. Defaults to layer4.
@@ -75,13 +88,14 @@ Options:
   --help                  Show this help text.
 
 Safety:
-  - No service start, stop, restart, enable, or disable is performed.
-  - No daemon reload is performed.
+  - Default installation performs no service start, stop, restart, enable, or disable.
+  - Default installation performs no daemon reload.
   - No firewall, route, or interface changes are performed.
-  - No tunnel adapter binaries are executed.
+  - Default installation does not execute tunnel adapter binaries.
   - Basic installation needs no typed confirmation.
   - Public install flow is presented as multi-layer and opens a terminal menu.
   - The current runnable workflow defaults to layer4 in v0.1.
+  - --test intentionally runs the controlled candidate test flow after installation.
 EOF
 }
 
@@ -178,6 +192,12 @@ parse_args() {
       --ref) [ $# -ge 2 ] || fail "--ref requires a value"; REF="$2"; shift 2 ;;
       --install-dir) [ $# -ge 2 ] || fail "--install-dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
       --no-menu) NO_MENU=1; shift ;;
+      --test) TEST_MODE=1; NO_MENU=1; shift ;;
+      --link) [ $# -ge 2 ] || fail "--link requires a value"; TEST_LINK="$2"; shift 2 ;;
+      --adapter) [ $# -ge 2 ] || fail "--adapter requires a value"; TEST_ADAPTER="$2"; shift 2 ;;
+      --attempts) [ $# -ge 2 ] || fail "--attempts requires a value"; TEST_ATTEMPTS="$2"; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || fail "--timeout requires a value"; TEST_TIMEOUT_SECONDS="$2"; shift 2 ;;
+      --json) TEST_JSON=1; shift ;;
       --debug) DEBUG=1; shift ;;
       --with-binaries) WITH_BINARIES=1; shift ;;
       --without-binaries|--no-binaries) WITH_BINARIES=0; shift ;;
@@ -204,6 +224,11 @@ apply_defaults_and_validate() {
     [ "$ROLE" = "controller" ] || [ "$ROLE" = "worker" ] || fail "--role must be controller or worker"
   fi
   validate_layer
+
+  if [ "$TEST_MODE" -eq 1 ]; then
+    [ -n "$TEST_LINK" ] || fail "--test requires --link"
+    [ -n "$TEST_ADAPTER" ] || fail "--test requires --adapter"
+  fi
 
   if [ "$WITH_BINARIES" -eq 1 ] && [ -z "$MANIFEST_URL" ] && [ -z "$MANIFEST_FILE" ]; then
     MANIFEST_URL="$(default_manifest_url)"
@@ -864,6 +889,20 @@ install_test_launcher() {
   chmod 0755 "$test_target"
 }
 
+run_candidate_test_if_requested() {
+  [ "$TEST_MODE" -eq 1 ] || return 0
+  info "[5/5] Running controlled candidate test"
+  test_args=(
+    --base-dir "$BASE_DIR"
+    --link "$TEST_LINK"
+    --adapter "$TEST_ADAPTER"
+    --attempts "$TEST_ATTEMPTS"
+    --timeout "$TEST_TIMEOUT_SECONDS"
+  )
+  [ "$TEST_JSON" -eq 1 ] && test_args+=(--json)
+  "${BIN_DIR}/pilottunnel-test" "${test_args[@]}"
+}
+
 launch_menu_if_requested() {
   info "[5/5] Opening PilotTunnel menu"
   if [ "$NO_MENU" -eq 1 ]; then
@@ -909,6 +948,10 @@ main() {
   install_menu_launcher
   install_test_launcher
   initialize_role_if_requested
+  if [ "$TEST_MODE" -eq 1 ]; then
+    run_candidate_test_if_requested
+    return
+  fi
   info "Safety: no services started, no firewall/routes changed"
   launch_menu_if_requested
 }
