@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import socket
 import subprocess
 import tempfile
@@ -1232,6 +1233,10 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=", probe_unit)
         self.assertIn('Environment="PYTHONPATH=', probe_unit)
         self.assertIn("Description=PilotTunnel link-001 rathole worker probe", probe_unit)
+        self.assertIn("--secret-file", probe_unit)
+        self.assertTrue(probe_service["secret_file"])
+        if os.name != "nt":
+            self.assertEqual(Path(probe_service["secret_file"]).stat().st_mode & 0o777, 0o600)
 
     def test_worker_candidate_prepare_renders_probe_unit_with_current_probe_port(self) -> None:
         self._create_worker_link_from_pairing_code()

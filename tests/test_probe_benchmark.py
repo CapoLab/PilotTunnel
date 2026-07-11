@@ -3,10 +3,11 @@ import socket
 import tempfile
 import threading
 import time
+from unittest.mock import patch
 from pathlib import Path
 
 from pilottunnel.probe import build_benchmark_message, parse_benchmark_message, probe_roundtrip, run_echo_responder
-from pilottunnel.candidates import benchmark_readiness
+from pilottunnel.candidates import _candidate_runtime_config_status, _candidate_runtime_fingerprint, benchmark_readiness
 from pilottunnel.config import LinkCandidate
 
 
@@ -56,3 +57,25 @@ class BenchmarkProbeProtocolTests(unittest.TestCase):
         readiness = benchmark_readiness(candidate)
         self.assertTrue(readiness["benchmark_capable"])
         self.assertEqual(readiness["authentication_status"], "authenticated_hmac_probe")
+
+    def test_legacy_rathole_probe_unit_without_secret_file_is_drifted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = root / "rathole.toml"
+            staged = root / "probe.service"
+            target_dir = root / "systemd"
+            target_dir.mkdir()
+            runtime.write_text("[client]\n", encoding="utf-8")
+            staged.write_text("ExecStart=python -m pilottunnel.probe responder --secret-file /safe/secret\n", encoding="utf-8")
+            service_name = "pilottunnel-link-rathole-pilotunnel-probe-worker.service"
+            (target_dir / service_name).write_text("ExecStart=python -m pilottunnel.probe responder\n", encoding="utf-8")
+            candidate = LinkCandidate(
+                adapter="rathole",
+                transport="tcp",
+                topology={"sides": {"worker": {"runtime_config_path": str(runtime), "services": [{"kind": "probe", "service_name": service_name, "unit_path": str(staged)}]}}},
+            )
+            active = {"runtime_fingerprint": _candidate_runtime_fingerprint(candidate, "worker")}
+            with patch("pilottunnel.candidates.SYSTEMD_TARGET_DIR", target_dir):
+                status = _candidate_runtime_config_status(candidate=candidate, role="worker", active_state=active)
+            self.assertEqual(status["status"], "drifted")
+            self.assertIn("missing the required benchmark secret file", " ".join(status["reasons"]))

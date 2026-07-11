@@ -1644,6 +1644,10 @@ def _candidate_runtime_config_status(*, candidate: LinkCandidate, role: str, act
             continue
         if staged_unit["hash"] != installed_unit["hash"]:
             reasons.append(f"managed unit '{service.get('service_name', '')}' differs from the desired staged unit")
+        if candidate.adapter == "rathole" and service.get("kind") == "probe":
+            installed_content = Path(target_unit_path).read_text(encoding="utf-8", errors="replace")
+            if "--secret-file" not in installed_content:
+                reasons.append("installed Rathole probe unit is missing the required benchmark secret file")
         if service.get("kind") == "adapter":
             installed_runtime_path = _installed_runtime_config_path(target_unit_path)
             installed_runtime_snapshot = _runtime_file_snapshot(installed_runtime_path)
