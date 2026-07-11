@@ -164,6 +164,36 @@ raise SystemExit(0)
 PY
 }
 
+selected_candidate_prepare_status() {
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$ADAPTER_NAME" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+adapter = sys.argv[2]
+try:
+    payload = json.loads(text)
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+
+for candidate in payload.get("candidates") or []:
+    if not isinstance(candidate, dict) or candidate.get("adapter") != adapter:
+        continue
+    if candidate.get("runnable") is True:
+        raise SystemExit(0)
+    details = [*list(candidate.get("blockers") or []), *list(candidate.get("warnings") or [])]
+    if any("Probe/test port" in str(detail) for detail in details):
+        raise SystemExit(2)
+    raise SystemExit(1)
+
+raise SystemExit(1)
+PY
+}
+
 json_query() {
   "$PYTHON_BIN" - "$LAST_STDOUT" "$1" <<'PY'
 from pathlib import Path
@@ -279,16 +309,21 @@ manual_daemon_reload() {
 
 prepare_all_with_worker_retry() {
   run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
-  if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+  selected_status=1
+  if selected_candidate_prepare_status; then
+    selected_status=0
+  else
+    selected_status=$?
+  fi
+  if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok && [ "$selected_status" -eq 0 ]; then
     return 0
   fi
-  failure_text="$(capture_combined_text)"
-  if printf '%s' "$failure_text" | grep -Fq "Probe/test port"; then
+  if [ "$selected_status" -eq 2 ]; then
     run_pt_capture candidate stop --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
     if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
       cleanup_capture
       run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
-      if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+      if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok && selected_candidate_prepare_status; then
         return 0
       fi
     fi
