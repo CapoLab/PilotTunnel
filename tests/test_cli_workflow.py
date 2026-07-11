@@ -1234,12 +1234,9 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=", probe_unit)
         self.assertIn('Environment="PYTHONPATH=', probe_unit)
         self.assertIn("Description=PilotTunnel link-001 rathole worker probe", probe_unit)
-        self.assertIn("--secret-file", probe_unit)
-        self.assertTrue(probe_service["secret_file"])
-        if os.name != "nt":
-            self.assertEqual(Path(probe_service["secret_file"]).stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("--secret-file", probe_unit)
 
-    def test_worker_probe_unit_install_replaces_legacy_execstart_with_secret_file(self) -> None:
+    def test_worker_probe_unit_install_replaces_legacy_execstart_with_simple_responder(self) -> None:
         self._create_worker_link_from_pairing_code()
         target_dir = Path(self.temp_dir.name) / "systemd-final"
         target_dir.mkdir()
@@ -1254,14 +1251,9 @@ class CliWorkflowTests(unittest.TestCase):
             result = candidates._install_candidate_service_units(services=[probe], summary_name="probe-install.json")
         self.assertTrue(result["ok"])
         unit_text = installed.read_text(encoding="utf-8")
-        expected_secret = Path(probe["secret_file"])
-        self.assertIn("--secret-file", unit_text)
-        self.assertIn(str(expected_secret), unit_text)
-        self.assertIn("candidate-runtime", str(expected_secret))
-        self.assertIn("rathole-probe", str(expected_secret))
-        self.assertTrue(expected_secret.is_file())
-        if os.name != "nt":
-            self.assertEqual(expected_secret.stat().st_mode & 0o777, 0o600)
+        self.assertIn("-m pilottunnel.probe responder", unit_text)
+        self.assertIn("--bind-host 127.0.0.1", unit_text)
+        self.assertNotIn("--secret-file", unit_text)
 
     def test_worker_candidate_prepare_renders_probe_unit_with_current_probe_port(self) -> None:
         self._create_worker_link_from_pairing_code()
@@ -1352,7 +1344,7 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(set(start_calls), install_names)
         self.assertEqual(payload["systemd_status"]["ok"], True)
 
-    def test_worker_start_replaces_legacy_probe_unit_without_secret_file(self) -> None:
+    def test_worker_start_replaces_legacy_probe_unit_with_secret_file(self) -> None:
         self._create_worker_link_from_pairing_code()
         target_dir = Path(self.temp_dir.name) / "legacy-systemd"
         target_dir.mkdir()
@@ -1388,14 +1380,14 @@ class CliWorkflowTests(unittest.TestCase):
             candidate = next(item for item in config.links[0].candidates if item.adapter == "rathole")
             probe = next(item for item in candidate.topology["sides"]["worker"]["services"] if item["kind"] == "probe")
             legacy = Path(probe["unit_path"]).read_text(encoding="utf-8")
-            legacy = re.sub(r" --secret-file \S+", "", legacy)
+            legacy = legacy.replace(" pilottunnel.probe responder", " pilottunnel.probe responder --secret-file /old/benchmark-probe.secret")
             (target_dir / probe["service_name"]).write_text(legacy, encoding="utf-8")
             self.run_cli("candidate", "start", "--adapter", "rathole", "--link", "link-001", "--json")
         self.assertIn("stop", calls)
         self.assertIn("install", calls)
         self.assertIn("reload", calls)
         self.assertIn("start", calls)
-        self.assertIn("--secret-file", (target_dir / probe["service_name"]).read_text(encoding="utf-8"))
+        self.assertNotIn("--secret-file", (target_dir / probe["service_name"]).read_text(encoding="utf-8"))
 
     def test_candidate_start_reconciles_reinstalls_and_restarts_when_runtime_config_drifted(self) -> None:
         self._create_controller_link()
@@ -1504,12 +1496,10 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_smoke_test_uses_real_service_port(self) -> None:
         self._create_controller_link()
         probe_calls: list[int] = []
-        probe_secrets: list[bytes | None] = []
         tcp_calls: list[int] = []
 
-        def fake_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
+        def fake_roundtrip(*, host: str, port: int, timeout: float):
             probe_calls.append(port)
-            probe_secrets.append(secret)
 
             class Result:
                 def to_dict(self_inner):
@@ -1612,7 +1602,6 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(tcp_calls[0], self.main_port)
         self.assertGreaterEqual(len(probe_calls), 1)
         self.assertTrue(all(port != self.main_port for port in probe_calls))
-        self.assertTrue(all(secret for secret in probe_secrets))
         self.assertIsNone(payload["result"]["average_roundtrip_latency_ms"])
         self.assertEqual(payload["persisted_state"], "test_passed")
         self.assertEqual(payload["runtime_systemd_state"], "active")
@@ -1620,7 +1609,7 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_real_service_smoke_test_passes_even_if_probe_fails(self) -> None:
         self._create_controller_link()
 
-        def fake_probe_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
             class Result:
                 def to_dict(self_inner):
                     return {
@@ -1701,7 +1690,7 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_probe_mode_fails_when_probe_path_is_unavailable(self) -> None:
         self._create_controller_link()
 
-        def fake_probe_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
             class Result:
                 def to_dict(self_inner):
                     return {
@@ -1763,7 +1752,7 @@ class CliWorkflowTests(unittest.TestCase):
     def test_candidate_probe_mode_passes_when_probe_service_mapping_exists(self) -> None:
         self._create_controller_link()
 
-        def fake_probe_roundtrip(*, host: str, port: int, timeout: float, secret: bytes | None = None):
+        def fake_probe_roundtrip(*, host: str, port: int, timeout: float):
             class Result:
                 def to_dict(self_inner):
                     return {

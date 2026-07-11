@@ -76,7 +76,6 @@ CANDIDATE_STATES = {
 }
 SYSTEMD_TARGET_DIR = Path("/etc/systemd/system")
 PROBE_MARKER = "pilotunnel-probe"
-BENCHMARK_PROBE_AUTH_VERSION = "hmac-frame-v1"
 BORE_CONTROL_PORT = 7835
 SUPPORTED_CANDIDATE_LAYERS = {"auto", "layer4"}
 
@@ -106,7 +105,7 @@ def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
         "missing_requirements": missing,
         "probe_path": (candidate.probe or {}).get("path", ""),
         "real_service_path": topology.get("real_service_path", ""),
-        "authentication_status": "authenticated_hmac_probe" if adapter == "rathole" and candidate.runnable else "missing_hmac_probe_protocol",
+        "authentication_status": "rathole_transport_auth" if adapter == "rathole" and candidate.runnable else "not_available",
         "required_contract": list(BENCHMARK_REQUIREMENTS),
     }
 
@@ -806,8 +805,7 @@ def smoke_test_candidate(
         real_pass = bool(attempt_results) and failure_count == 0 and success_count == len(attempt_results)
     probe_result = None
     if probe_port >= 1:
-        probe_secret = _benchmark_probe_secret(link, candidate.adapter) if candidate.adapter == "rathole" else None
-        probe_result = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout, secret=probe_secret).to_dict()
+        probe_result = probe_roundtrip(host="127.0.0.1", port=probe_port, timeout=timeout).to_dict()
     probe_pass = bool(probe_result and probe_result.get("ok"))
     final_pass = real_pass if selected_mode == "real_service" else probe_pass
     _mark_candidate(link, candidate.adapter, "test_passed" if final_pass else "test_failed")
@@ -1418,14 +1416,6 @@ def _render_probe_service(
     service_dir = _role_service_dir(paths, link, f"{adapter_name}-probe", "worker")
     service_name = f"pilottunnel-{link.label}-{adapter_name}-{PROBE_MARKER}-worker.service"
     repo_root = _candidate_repo_root()
-    secret_file = ""
-    if adapter_name == "rathole":
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        secret_path = runtime_dir / "benchmark-probe.secret"
-        secret_path.write_bytes(_benchmark_probe_secret(link, adapter_name))
-        if os.name != "nt":
-            secret_path.chmod(0o600)
-        secret_file = str(secret_path)
     argv = [
         sys.executable,
         "-m",
@@ -1436,8 +1426,6 @@ def _render_probe_service(
         "--port",
         str(probe["port"]),
     ]
-    if secret_file:
-        argv.extend(["--secret-file", secret_file])
     unit = render_unit_file(
         unit_name=service_name,
         description=f"PilotTunnel {link.label} {adapter_name} worker probe",
@@ -1453,7 +1441,6 @@ def _render_probe_service(
         "service_dir": str(service_dir),
         "runtime_dir": str(runtime_dir),
         "unit_path": unit.path,
-        "secret_file": secret_file,
     }
 
 
@@ -1567,11 +1554,6 @@ def _derived_secrets(link: LinkProfile, adapter_name: str) -> dict[str, str]:
     }
 
 
-def _benchmark_probe_secret(link: LinkProfile, adapter_name: str) -> bytes:
-    purpose = f"benchmark-probe:{BENCHMARK_PROBE_AUTH_VERSION}"
-    return _derive_hmac(link.pairing_secret, link.id, adapter_name, purpose).encode("ascii")
-
-
 def _derive_hmac(pairing_secret: str, link_id: str, adapter_name: str, purpose: str) -> str:
     payload = f"{link_id}:{adapter_name}:{purpose}".encode("utf-8")
     return hmac.new(pairing_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
@@ -1629,7 +1611,6 @@ def _candidate_runtime_fingerprint(candidate: LinkCandidate, role: str) -> str:
         "role": role,
         "adapter": candidate.adapter,
         "transport": candidate.transport,
-        "benchmark_probe_auth_version": BENCHMARK_PROBE_AUTH_VERSION if candidate.adapter == "rathole" else "",
         "runtime_config": _runtime_file_snapshot(side_plan.get("runtime_config_path", "")),
         "services": [
             {
@@ -1660,10 +1641,6 @@ def _candidate_runtime_config_status(*, candidate: LinkCandidate, role: str, act
             continue
         if staged_unit["hash"] != installed_unit["hash"]:
             reasons.append(f"managed unit '{service.get('service_name', '')}' differs from the desired staged unit")
-        if candidate.adapter == "rathole" and service.get("kind") == "probe":
-            installed_content = Path(target_unit_path).read_text(encoding="utf-8", errors="replace")
-            if "--secret-file" not in installed_content:
-                reasons.append("installed Rathole probe unit is missing the required benchmark secret file")
         if service.get("kind") == "adapter":
             installed_runtime_path = _installed_runtime_config_path(target_unit_path)
             installed_runtime_snapshot = _runtime_file_snapshot(installed_runtime_path)

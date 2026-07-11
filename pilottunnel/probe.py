@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import hmac
-import json
-from pathlib import Path
 import secrets
 import socket
 import struct
@@ -18,40 +14,6 @@ from datetime import datetime, timezone
 DEFAULT_PROBE_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_PAYLOAD_BYTES = 8192
 PROBE_MAGIC = b"PTPROBE1:"
-BENCHMARK_MAGIC = b"PTBENCH1:"
-BENCHMARK_ACTIONS = frozenset({"probe", "report", "finalize"})
-
-
-def build_benchmark_message(*, action: str, payload: dict, secret: bytes) -> bytes:
-    """Create a narrow authenticated benchmark message, never a command channel."""
-    if action not in BENCHMARK_ACTIONS:
-        raise ValueError("Unsupported benchmark probe action")
-    if not secret:
-        raise ValueError("Benchmark probe secret is required")
-    body = json.dumps({"action": action, "payload": payload}, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    signature = hmac.new(secret, body, hashlib.sha256).hexdigest().encode("ascii")
-    return BENCHMARK_MAGIC + signature + b":" + body
-
-
-def parse_benchmark_message(*, message: bytes, secret: bytes) -> tuple[str, dict]:
-    """Validate a bounded benchmark-only request without executing anything."""
-    if not secret or not message.startswith(BENCHMARK_MAGIC):
-        raise ValueError("Invalid benchmark probe message")
-    try:
-        signature, body = message[len(BENCHMARK_MAGIC):].split(b":", 1)
-        expected = hmac.new(secret, body, hashlib.sha256).hexdigest().encode("ascii")
-        decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("Malformed benchmark probe message") from exc
-    if not hmac.compare_digest(signature, expected):
-        raise ValueError("Benchmark probe authentication failed")
-    action = decoded.get("action")
-    payload = decoded.get("payload")
-    if action not in BENCHMARK_ACTIONS or not isinstance(payload, dict):
-        raise ValueError("Invalid benchmark probe action")
-    return action, payload
-
-
 @dataclass
 class ProbeAttemptResult:
     ok: bool
@@ -77,7 +39,6 @@ def run_echo_responder(
     accept_timeout: float = 1.0,
     io_timeout: float = 5.0,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
-    secret_file: str | None = None,
 ) -> None:
     _validate_endpoint(bind_host, port)
     if accept_timeout <= 0 or io_timeout <= 0:
@@ -85,7 +46,6 @@ def run_echo_responder(
     if max_payload_bytes < len(PROBE_MAGIC) + 1:
         raise ValueError("Probe responder max payload must be large enough for a nonce")
 
-    secret = _load_secret_file(secret_file) if secret_file else b""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((bind_host, port))
@@ -98,28 +58,26 @@ def run_echo_responder(
                 continue
             thread = threading.Thread(
                 target=_handle_connection,
-                args=(conn, io_timeout, max_payload_bytes, secret),
+                args=(conn, io_timeout, max_payload_bytes),
                 daemon=True,
             )
             thread.start()
 
 
-def probe_roundtrip(*, host: str, port: int, timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS, secret: bytes | None = None) -> ProbeAttemptResult:
+def probe_roundtrip(*, host: str, port: int, timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS) -> ProbeAttemptResult:
     _validate_endpoint(host, port)
     if timeout <= 0:
         raise ValueError("timeout must be greater than 0")
     nonce = PROBE_MAGIC + secrets.token_bytes(32)
-    expected = build_benchmark_message(action="probe", payload={"nonce": nonce.hex()}, secret=secret) if secret else nonce
+    expected = nonce
     started = time.perf_counter()
     connect_latency_ms: float | None = None
     try:
         with socket.create_connection((host, port), timeout=timeout) as conn:
             connect_latency_ms = round((time.perf_counter() - started) * 1000, 3)
             conn.settimeout(timeout)
-            conn.sendall(_encode_frame(expected, DEFAULT_MAX_PAYLOAD_BYTES) if secret else expected)
-            if not secret:
-                conn.shutdown(socket.SHUT_WR)
-            received = _recv_frame(conn, DEFAULT_MAX_PAYLOAD_BYTES) if secret else _recv_all(conn, DEFAULT_MAX_PAYLOAD_BYTES)
+            conn.sendall(_encode_probe_frame(expected, DEFAULT_MAX_PAYLOAD_BYTES))
+            received = _recv_probe_frame(conn, DEFAULT_MAX_PAYLOAD_BYTES)
             roundtrip_latency_ms = round((time.perf_counter() - started) * 1000, 3)
             exact_match = received == expected
             if not exact_match:
@@ -195,7 +153,6 @@ def build_parser() -> argparse.ArgumentParser:
     responder.add_argument("--accept-timeout", type=float, default=1.0)
     responder.add_argument("--io-timeout", type=float, default=5.0)
     responder.add_argument("--max-payload-bytes", type=int, default=DEFAULT_MAX_PAYLOAD_BYTES)
-    responder.add_argument("--secret-file")
 
     return parser
 
@@ -210,20 +167,17 @@ def main(argv: list[str] | None = None) -> int:
             accept_timeout=args.accept_timeout,
             io_timeout=args.io_timeout,
             max_payload_bytes=args.max_payload_bytes,
-            secret_file=args.secret_file,
         )
         return 0
     parser.error("Unhandled command")
     return 2
 
 
-def _handle_connection(conn: socket.socket, io_timeout: float, max_payload_bytes: int, secret: bytes) -> None:
+def _handle_connection(conn: socket.socket, io_timeout: float, max_payload_bytes: int) -> None:
     with conn:
         conn.settimeout(io_timeout)
-        # Benchmark frames are bounded single messages. Reading one frame avoids
-        # waiting for a peer half-close before sending the authenticated reply.
         try:
-            data = _recv_frame(conn, max_payload_bytes) if secret else _recv_all(conn, max_payload_bytes)
+            data = _recv_probe_frame(conn, max_payload_bytes)
         except (OSError, ValueError):
             return
         if not data:
@@ -231,13 +185,7 @@ def _handle_connection(conn: socket.socket, io_timeout: float, max_payload_bytes
         if len(data) > max_payload_bytes:
             return
         try:
-            if secret:
-                parse_benchmark_message(message=data, secret=secret)
-                # These actions only acknowledge benchmark data flow; they never
-                # select or execute host commands.
-                conn.sendall(_encode_frame(data, max_payload_bytes))
-            else:
-                conn.sendall(data)
+            conn.sendall(_encode_probe_frame(data, max_payload_bytes))
         except (OSError, ValueError):
             return
 
@@ -255,17 +203,17 @@ def _recv_all(conn: socket.socket, max_payload_bytes: int) -> bytes:
         chunks.append(chunk)
 
 
-def _encode_frame(payload: bytes, max_payload_bytes: int) -> bytes:
+def _encode_probe_frame(payload: bytes, max_payload_bytes: int) -> bytes:
     if not payload or len(payload) > max_payload_bytes:
-        raise ValueError("Benchmark probe frame exceeds the payload limit")
+        raise ValueError("Probe payload exceeds the limit")
     return struct.pack("!I", len(payload)) + payload
 
 
-def _recv_frame(conn: socket.socket, max_payload_bytes: int) -> bytes:
+def _recv_probe_frame(conn: socket.socket, max_payload_bytes: int) -> bytes:
     header = _recv_exact(conn, 4)
     size = struct.unpack("!I", header)[0]
     if size < 1 or size > max_payload_bytes:
-        raise ValueError("Invalid benchmark probe frame length")
+        raise ValueError("Invalid probe frame length")
     return _recv_exact(conn, size)
 
 
@@ -275,7 +223,7 @@ def _recv_exact(conn: socket.socket, size: int) -> bytes:
     while remaining:
         chunk = conn.recv(remaining)
         if not chunk:
-            raise ValueError("Benchmark probe frame ended before completion")
+            raise ValueError("Probe frame ended before completion")
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -286,16 +234,6 @@ def _validate_endpoint(host: str, port: int) -> None:
         raise ValueError("host must be a non-empty value")
     if port < 1 or port > 65535:
         raise ValueError("port must be between 1 and 65535")
-
-
-def _load_secret_file(secret_file: str) -> bytes:
-    path = Path(secret_file)
-    if not path.is_file() or path.is_symlink():
-        raise ValueError("Benchmark probe secret file is unavailable")
-    secret = path.read_bytes().strip()
-    if not secret:
-        raise ValueError("Benchmark probe secret file is empty")
-    return secret
 
 
 def _now_utc() -> str:
