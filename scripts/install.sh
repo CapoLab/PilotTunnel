@@ -530,6 +530,7 @@ validate_repo_source_dir() {
   [ -d "$candidate_dir" ] || return 1
   [ -f "${candidate_dir}/scripts/install.sh" ] || return 1
   [ -f "${candidate_dir}/scripts/pilottunnel-menu" ] || return 1
+  [ -f "${candidate_dir}/scripts/pilottunnel-test" ] || return 1
   [ -d "${candidate_dir}/pilottunnel" ] || return 1
 }
 
@@ -851,6 +852,18 @@ install_menu_launcher() {
   chmod 0755 "$menu_target"
 }
 
+install_test_launcher() {
+  test_source="${REPO_DIR}/scripts/pilottunnel-test"
+  [ -f "$test_source" ] || fail "Installed repository does not contain scripts/pilottunnel-test."
+  test_target="${BIN_DIR}/pilottunnel-test"
+  if [ -e "$test_target" ] && [ "$test_source" -ef "$test_target" ]; then
+    chmod 0755 "$test_source"
+    return
+  fi
+  cp "$test_source" "$test_target"
+  chmod 0755 "$test_target"
+}
+
 launch_menu_if_requested() {
   info "[5/5] Opening PilotTunnel menu"
   if [ "$NO_MENU" -eq 1 ]; then
@@ -894,6 +907,7 @@ main() {
   prepare_binaries
   info "[4/5] Running safe checks"
   install_menu_launcher
+  install_test_launcher
   initialize_role_if_requested
   info "Safety: no services started, no firewall/routes changed"
   launch_menu_if_requested

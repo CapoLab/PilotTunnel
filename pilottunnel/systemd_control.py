@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import shutil
@@ -17,7 +18,15 @@ from .service_plan import SERVICE_UNIT_MARKER
 RELOAD_CONFIRM_TOKEN = "SYSTEMD_DAEMON_RELOAD"
 START_CONFIRM_TOKEN = "START_PILOTTUNNEL_SERVICES"
 STOP_CONFIRM_TOKEN = "STOP_PILOTTUNNEL_SERVICES"
-DEFAULT_TIMEOUT_SECONDS = 2.0
+def _default_timeout_seconds() -> float:
+    raw_value = os.environ.get("PILOTTUNNEL_SYSTEMD_TIMEOUT_SECONDS", "10")
+    try:
+        return max(0.5, float(raw_value))
+    except ValueError:
+        return 10.0
+
+
+DEFAULT_TIMEOUT_SECONDS = _default_timeout_seconds()
 SHOW_PROPERTIES = "LoadState,ActiveState,SubState,FragmentPath"
 NEXT_ACTION_HINTS = [
     "start_not_implemented",

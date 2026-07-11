@@ -33,6 +33,8 @@ class InstallerScriptTests(unittest.TestCase):
         cls.script_text = cls.script_path.read_text(encoding="utf-8")
         cls.menu_path = Path("scripts") / "pilottunnel-menu"
         cls.menu_text = cls.menu_path.read_text(encoding="utf-8")
+        cls.test_runner_path = Path("scripts") / "pilottunnel-test"
+        cls.test_runner_text = cls.test_runner_path.read_text(encoding="utf-8")
 
     @staticmethod
     def find_bash() -> str | None:
@@ -116,6 +118,22 @@ class InstallerScriptTests(unittest.TestCase):
         return subprocess.run(
             [bash_bin, str(self.menu_path), "--base-dir", self.to_bash_path(base_dir)],
             input=input_text,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path.cwd(),
+            env=env,
+        )
+
+    def run_test_runner(self, base_dir: Path, *args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [bash_bin, str(self.test_runner_path), "--base-dir", self.to_bash_path(base_dir), *args],
             capture_output=True,
             text=True,
             check=False,
@@ -262,6 +280,27 @@ class InstallerScriptTests(unittest.TestCase):
             path = target_dir / executable
             path.write_text(wrapper, encoding="utf-8")
             path.chmod(0o755)
+
+    def write_fake_cli_python(self, target_dir: Path, *, body: str) -> None:
+        real_python = self.to_bash_path(sys.executable)
+        wrapper = (
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "if [ \"$#\" -ge 2 ] && [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pilottunnel.cli\" ]; then\n"
+            "  shift 2\n"
+            f"{body}\n"
+            "fi\n"
+            f"exec '{real_python}' \"$@\"\n"
+        )
+        for executable in ("python3", "python"):
+            path = target_dir / executable
+            path.write_text(wrapper, encoding="utf-8")
+            path.chmod(0o755)
+
+    def write_fake_systemctl(self, target_dir: Path, *, body: str) -> None:
+        path = target_dir / "systemctl"
+        path.write_text(f"#!/usr/bin/env bash\nset -eu\n{body}\n", encoding="utf-8")
+        path.chmod(0o755)
 
     def write_manifest_fixture(self, base_dir: Path) -> Path:
         manifest_path = base_dir / "state" / "provider-manifest.json"
@@ -452,6 +491,189 @@ class InstallerScriptTests(unittest.TestCase):
                 cwd=Path.cwd(),
             )
             self.assertEqual(execute_check.returncode, 0, msg=execute_check.stderr)
+
+    def test_pilottunnel_test_help_and_bash_syntax_are_valid(self) -> None:
+        bash_bin = self.find_bash()
+        if not bash_bin or not Path(bash_bin).exists():
+            self.skipTest("bash is not available")
+        syntax = subprocess.run(
+            [bash_bin, "-n", str(self.test_runner_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(syntax.returncode, 0, msg=syntax.stderr)
+        help_result = subprocess.run(
+            [bash_bin, str(self.test_runner_path), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(help_result.returncode, 0, msg=help_result.stderr)
+        self.assertIn("pilottunnel-test --link <LINK> --adapter <ADAPTER>", help_result.stdout)
+        self.assertIn("--start-only", help_result.stdout)
+        self.assertIn("--smoke-only", help_result.stdout)
+
+    def test_install_script_installs_pilottunnel_test_launcher(self) -> None:
+        with self.snapshot_repo() as repo_url, tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir)
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                repo_url,
+                "--without-binaries",
+                "--no-menu",
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertTrue((install_dir / "repo" / "scripts" / "pilottunnel-test").exists())
+            self.assertTrue((install_dir / "bin" / "pilottunnel-test").exists())
+            self.assertTrue(os.access(install_dir / "bin" / "pilottunnel-test", os.X_OK))
+
+    def test_pilottunnel_test_uses_opt_pilottunnel_layout_paths(self) -> None:
+        self.assertIn('DEFAULT_BASE_DIR="/opt/pilottunnel"', self.test_runner_text)
+        self.assertIn('REPO_DIR="/opt/pilottunnel/repo"', self.test_runner_text)
+        self.assertIn('CONFIG_FILE="/opt/pilottunnel/state/config.json"', self.test_runner_text)
+        self.assertIn('STATE_FILE="/opt/pilottunnel/state/state.json"', self.test_runner_text)
+        self.assertIn('REGISTRY_FILE="/opt/pilottunnel/state/registry.json"', self.test_runner_text)
+        self.assertIn('AUDIT_LOG="/opt/pilottunnel/state/audit.log"', self.test_runner_text)
+        self.assertIn('LOCK_DIR="/opt/pilottunnel/state/locks"', self.test_runner_text)
+        self.assertIn('WORK_DIR="/opt/pilottunnel/work"', self.test_runner_text)
+        self.assertIn('STAGING_ROOT="/opt/pilottunnel/staging"', self.test_runner_text)
+
+    def test_worker_test_runner_retries_after_probe_busy_with_candidate_stop(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            prepare_count = Path(temp_dir) / "prepare.count"
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"count_file='{self.to_bash_path(prepare_count)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"worker\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  count=0\n"
+                    "  [ -f \"$count_file\" ] && count=\"$(cat \"$count_file\")\"\n"
+                    "  count=$((count + 1))\n"
+                    "  printf '%s' \"$count\" > \"$count_file\"\n"
+                    "  if [ \"$count\" = \"1\" ]; then\n"
+                    "    printf '%s\\n' '{\"ok\": false, \"message\": \"probe busy\", \"blockers\": [\"Probe/test port 27777 is unavailable\"]}'\n"
+                    "    exit 1\n"
+                    "  fi\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"prepared\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"candidates\": [{\"adapter\": \"rathole\", \"runtime_systemd_state\": \"active\"}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"worker ready\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "rathole",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["role"], "worker")
+            self.assertEqual(payload["status"], "worker_ready")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(prepare_count.read_text(encoding="utf-8"), "2")
+            self.assertTrue(any("candidate stop" in line for line in commands))
+            self.assertTrue(any("candidate start" in line for line in commands))
+
+    def test_controller_test_runner_retries_after_daemon_reload_timeout(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            start_count = Path(temp_dir) / "start.count"
+            systemctl_log = Path(temp_dir) / "systemctl.log"
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"count_file='{self.to_bash_path(start_count)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"prepared\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start \"* ]]; then\n"
+                    "  count=0\n"
+                    "  [ -f \"$count_file\" ] && count=\"$(cat \"$count_file\")\"\n"
+                    "  count=$((count + 1))\n"
+                    "  printf '%s' \"$count\" > \"$count_file\"\n"
+                    "  if [ \"$count\" = \"1\" ]; then\n"
+                    "    printf '%s\\n' '{\"ok\": false, \"message\": \"Command timed out: systemctl daemon-reload\"}'\n"
+                    "    exit 1\n"
+                    "  fi\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"started\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]] && [[ \"$args\" == *\" --mode probe \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"result\": {\"probe_status\": \"passed\"}, \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]] && [[ \"$args\" == *\" --mode real_service \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"result\": {\"real_service_status\": \"passed\"}, \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            self.write_fake_systemctl(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(systemctl_log)}'\n"
+                    "exit 0"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "rathole",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["role"], "controller")
+            self.assertEqual(payload["probe_result"], "passed")
+            self.assertEqual(payload["real_result"], "passed")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(start_count.read_text(encoding="utf-8"), "2")
+            self.assertTrue(any("candidate smoke-test" in line and "--mode probe" in line for line in commands))
+            self.assertTrue(any("candidate smoke-test" in line and "--mode real_service" in line for line in commands))
+            self.assertIn("daemon-reload", systemctl_log.read_text(encoding="utf-8"))
 
     def test_public_install_does_not_require_role_or_basic_confirmation(self) -> None:
         bash_bin = self.find_bash()

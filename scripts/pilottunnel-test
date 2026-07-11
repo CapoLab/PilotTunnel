@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_BASE_DIR="/opt/pilottunnel"
+BASE_DIR="$DEFAULT_BASE_DIR"
+LINK_LABEL=""
+ADAPTER_NAME=""
+ATTEMPTS="3"
+TIMEOUT_SECONDS="5"
+JSON_OUTPUT=0
+START_ONLY=0
+SMOKE_ONLY=0
+PYTHON_BIN=""
+
+REPO_DIR="/opt/pilottunnel/repo"
+CONFIG_FILE="/opt/pilottunnel/state/config.json"
+STATE_FILE="/opt/pilottunnel/state/state.json"
+REGISTRY_FILE="/opt/pilottunnel/state/registry.json"
+AUDIT_LOG="/opt/pilottunnel/state/audit.log"
+LOCK_DIR="/opt/pilottunnel/state/locks"
+WORK_DIR="/opt/pilottunnel/work"
+STAGING_ROOT="/opt/pilottunnel/staging"
+
+LAST_STDOUT=""
+LAST_STDERR=""
+LAST_STATUS=0
+
+cleanup_capture() {
+  [ -n "${LAST_STDOUT:-}" ] && [ -f "$LAST_STDOUT" ] && rm -f "$LAST_STDOUT"
+  [ -n "${LAST_STDERR:-}" ] && [ -f "$LAST_STDERR" ] && rm -f "$LAST_STDERR"
+  LAST_STDOUT=""
+  LAST_STDERR=""
+  LAST_STATUS=0
+}
+
+trap cleanup_capture EXIT
+
+fail() {
+  printf '%s\n' "Error: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+PilotTunnel two-server candidate test runner
+
+Usage:
+  pilottunnel-test --link <LINK> --adapter <ADAPTER> [--attempts <N>] [--timeout <SECONDS>]
+
+Options:
+  --base-dir <DIR>   PilotTunnel installation root. Defaults to ${DEFAULT_BASE_DIR}.
+  --link <LINK>      Candidate link label, for example link-001.
+  --adapter <NAME>   Candidate adapter name, for example rathole.
+  --attempts <N>     Smoke-test attempt count. Defaults to 3.
+  --timeout <SEC>    Per-attempt timeout in seconds. Defaults to 5.
+  --json             Print the final summary as JSON.
+  --start-only       Prepare and start only. Skip smoke tests.
+  --smoke-only       Skip prepare/start and run smoke tests only.
+  --help             Show this help text.
+EOF
+}
+
+find_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "python3"
+  elif command -v python >/dev/null 2>&1; then
+    printf '%s\n' "python"
+  else
+    printf '%s\n' ""
+  fi
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base-dir) [ $# -ge 2 ] || fail "--base-dir requires a value"; BASE_DIR="$2"; shift 2 ;;
+      --link) [ $# -ge 2 ] || fail "--link requires a value"; LINK_LABEL="$2"; shift 2 ;;
+      --adapter) [ $# -ge 2 ] || fail "--adapter requires a value"; ADAPTER_NAME="$2"; shift 2 ;;
+      --attempts) [ $# -ge 2 ] || fail "--attempts requires a value"; ATTEMPTS="$2"; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || fail "--timeout requires a value"; TIMEOUT_SECONDS="$2"; shift 2 ;;
+      --json) JSON_OUTPUT=1; shift ;;
+      --start-only) START_ONLY=1; shift ;;
+      --smoke-only) SMOKE_ONLY=1; shift ;;
+      --help|-h) usage; exit 0 ;;
+      *) fail "Unknown argument: $1" ;;
+    esac
+  done
+}
+
+prepare_paths() {
+  case "$BASE_DIR" in
+    /*) ;;
+    *) BASE_DIR="$(cd "$BASE_DIR" 2>/dev/null && pwd -P)" || fail "Base directory does not exist: $BASE_DIR" ;;
+  esac
+  REPO_DIR="${BASE_DIR}/repo"
+  CONFIG_FILE="${BASE_DIR}/state/config.json"
+  STATE_FILE="${BASE_DIR}/state/state.json"
+  REGISTRY_FILE="${BASE_DIR}/state/registry.json"
+  AUDIT_LOG="${BASE_DIR}/state/audit.log"
+  LOCK_DIR="${BASE_DIR}/state/locks"
+  WORK_DIR="${BASE_DIR}/work"
+  STAGING_ROOT="${BASE_DIR}/staging"
+  [ -d "$REPO_DIR/pilottunnel" ] || fail "PilotTunnel repository is not installed under $REPO_DIR"
+}
+
+validate_args() {
+  [ -n "$LINK_LABEL" ] || fail "--link is required"
+  [ -n "$ADAPTER_NAME" ] || fail "--adapter is required"
+  case "$ATTEMPTS" in
+    ''|*[!0-9]*) fail "--attempts must be a positive integer" ;;
+  esac
+  [ "$ATTEMPTS" -ge 1 ] || fail "--attempts must be at least 1"
+  case "$TIMEOUT_SECONDS" in
+    ''|*[!0-9.]* ) fail "--timeout must be numeric" ;;
+  esac
+  if [ "$START_ONLY" -eq 1 ] && [ "$SMOKE_ONLY" -eq 1 ]; then
+    fail "--start-only and --smoke-only cannot be used together"
+  fi
+}
+
+pt() {
+  (
+    cd "$REPO_DIR" || exit 1
+    "$PYTHON_BIN" -m pilottunnel.cli \
+      --config "$CONFIG_FILE" \
+      --state "$STATE_FILE" \
+      --registry "$REGISTRY_FILE" \
+      --audit-log "$AUDIT_LOG" \
+      --lock-dir "$LOCK_DIR" \
+      --work-dir "$WORK_DIR" \
+      --staging-root "$STAGING_ROOT" \
+      "$@"
+  )
+}
+
+run_pt_capture() {
+  cleanup_capture
+  LAST_STDOUT="$(mktemp)"
+  LAST_STDERR="$(mktemp)"
+  if pt "$@" >"$LAST_STDOUT" 2>"$LAST_STDERR"; then
+    LAST_STATUS=0
+    return 0
+  fi
+  LAST_STATUS=$?
+  return "$LAST_STATUS"
+}
+
+last_payload_ok() {
+  "$PYTHON_BIN" - "$LAST_STDOUT" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+if not text:
+    raise SystemExit(0)
+try:
+    payload = json.loads(text)
+except Exception:
+    raise SystemExit(0)
+if isinstance(payload, dict) and payload.get("ok") is False:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+json_query() {
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$1" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") or "{}")
+expr = sys.argv[2]
+value = payload
+for part in expr.split("."):
+    if part == "":
+        continue
+    if isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+        break
+if isinstance(value, (dict, list)):
+    print(json.dumps(value))
+elif value is None:
+    print("")
+else:
+    print(str(value))
+PY
+}
+
+json_array_contains_substring() {
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$1" "$2" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") or "{}")
+field = sys.argv[2]
+needle = sys.argv[3]
+values = payload.get(field) or []
+if not isinstance(values, list):
+    raise SystemExit(1)
+raise SystemExit(0 if any(needle in str(item) for item in values) else 1)
+PY
+}
+
+capture_message() {
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$LAST_STDERR" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+stdout_text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+stderr_text = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace").strip()
+if stdout_text:
+    try:
+        payload = json.loads(stdout_text)
+    except Exception:
+        print(" ".join(stdout_text.split()))
+        raise SystemExit(0)
+    if isinstance(payload, dict):
+        message = payload.get("message") or payload.get("error") or ""
+        print(" ".join(str(message).split()))
+        raise SystemExit(0)
+if stderr_text:
+    print(" ".join(stderr_text.split()))
+PY
+}
+
+capture_combined_text() {
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$LAST_STDERR" <<'PY'
+from pathlib import Path
+import sys
+
+stdout_text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+stderr_text = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace").strip()
+combined = " ".join(part for part in (" ".join(stdout_text.split()), " ".join(stderr_text.split())) if part)
+print(combined)
+PY
+}
+
+load_role() {
+  run_pt_capture node status || fail "Unable to read node status"
+  role="$(json_query normalized_role)"
+  cleanup_capture
+  [ -n "$role" ] || fail "Node role is not initialized"
+  printf '%s\n' "$role"
+}
+
+candidate_runtime_active() {
+  if ! run_pt_capture candidate result --link "$LINK_LABEL" --json; then
+    cleanup_capture
+    return 1
+  fi
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$ADAPTER_NAME" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") or "{}")
+adapter = sys.argv[2]
+for item in payload.get("candidates") or []:
+    if item.get("adapter") != adapter:
+        continue
+    if item.get("runtime_systemd_state") == "active":
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+  rc=$?
+  cleanup_capture
+  return $rc
+}
+
+manual_daemon_reload() {
+  systemctl daemon-reload
+}
+
+prepare_all_with_worker_retry() {
+  run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
+  if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+    return 0
+  fi
+  failure_text="$(capture_combined_text)"
+  if printf '%s' "$failure_text" | grep -Fq "Probe/test port"; then
+    run_pt_capture candidate stop --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
+    if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+      cleanup_capture
+      run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
+      if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+start_candidate_with_controller_retry() {
+  run_pt_capture candidate start --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
+  if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+    return 0
+  fi
+  message="$(capture_combined_text)"
+  if printf '%s' "$message" | grep -Fq "Command timed out: systemctl daemon-reload"; then
+    if manual_daemon_reload; then
+      cleanup_capture
+      run_pt_capture candidate start --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
+      if [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; then
+        return 0
+      fi
+    fi
+  fi
+  return "$LAST_STATUS"
+}
+
+emit_summary() {
+  summary_json="$1"
+  if [ "$JSON_OUTPUT" -eq 1 ]; then
+    printf '%s\n' "$summary_json"
+    return
+  fi
+  "$PYTHON_BIN" - "$summary_json" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+print(f"ok: {str(payload.get('ok', False)).lower()}")
+print(f"role: {payload.get('role', '')}")
+print(f"link: {payload.get('link', '')}")
+print(f"adapter: {payload.get('adapter', '')}")
+print(f"runtime_config: {payload.get('runtime_config', '') or 'unknown'}")
+print(f"probe result: {payload.get('probe_result', '') or 'skipped'}")
+print(f"real result: {payload.get('real_result', '') or 'skipped'}")
+status = payload.get("status")
+if status:
+    print(f"status: {status}")
+message = payload.get("message")
+if message:
+    print(f"message: {message}")
+PY
+}
+
+worker_summary() {
+  runtime_config="$1"
+  message="$2"
+  "$PYTHON_BIN" - "$LINK_LABEL" "$ADAPTER_NAME" "$runtime_config" "$message" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "ok": True,
+    "role": "worker",
+    "link": sys.argv[1],
+    "adapter": sys.argv[2],
+    "status": "worker_ready",
+    "runtime_config": sys.argv[3] or "unknown",
+    "probe_result": "skipped",
+    "real_result": "skipped",
+    "message": sys.argv[4] or "worker ready"
+}, indent=2))
+PY
+}
+
+controller_summary() {
+  runtime_config="$1"
+  probe_result="$2"
+  real_result="$3"
+  message="$4"
+  "$PYTHON_BIN" - "$LINK_LABEL" "$ADAPTER_NAME" "$runtime_config" "$probe_result" "$real_result" "$message" <<'PY'
+import json
+import sys
+probe_result = sys.argv[4] or "skipped"
+real_result = sys.argv[5] or "skipped"
+ok = (probe_result == "passed" and real_result == "passed") or (probe_result == "skipped" and real_result == "skipped")
+print(json.dumps({
+    "ok": ok,
+    "role": "controller",
+    "link": sys.argv[1],
+    "adapter": sys.argv[2],
+    "status": "controller_test_complete" if ok else "controller_test_failed",
+    "runtime_config": sys.argv[3] or "unknown",
+    "probe_result": probe_result,
+    "real_result": real_result,
+    "message": sys.argv[6],
+}, indent=2))
+PY
+}
+
+run_worker_flow() {
+  if [ "$SMOKE_ONLY" -eq 1 ]; then
+    fail "Worker role does not support --smoke-only. Use the controller side for smoke tests."
+  fi
+  if ! prepare_all_with_worker_retry; then
+    message="$(capture_message)"
+    cleanup_capture
+    fail "${message:-candidate prepare-all failed on worker}"
+  fi
+  cleanup_capture
+  run_pt_capture candidate start --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
+  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+    message="$(capture_message)"
+    cleanup_capture
+    fail "${message:-candidate start failed on worker}"
+  fi
+  runtime_config="$(json_query runtime_config_status)"
+  message="$(capture_message)"
+  cleanup_capture
+  emit_summary "$(worker_summary "$runtime_config" "${message:-worker ready}")"
+}
+
+run_controller_flow() {
+  probe_result="skipped"
+  real_result="skipped"
+  runtime_config="unknown"
+  if [ "$SMOKE_ONLY" -eq 0 ]; then
+    run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      cleanup_capture
+      fail "${message:-candidate prepare-all failed on controller}"
+    fi
+    cleanup_capture
+    if ! start_candidate_with_controller_retry; then
+      message="$(capture_message)"
+      cleanup_capture
+      fail "${message:-candidate start failed on controller}"
+    fi
+    runtime_config="$(json_query runtime_config_status)"
+    cleanup_capture
+  fi
+  if [ "$START_ONLY" -eq 0 ]; then
+    run_pt_capture candidate smoke-test --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --mode probe --attempts "$ATTEMPTS" --timeout "$TIMEOUT_SECONDS" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      probe_result="failed"
+      cleanup_capture
+      fail "${message:-probe smoke test failed}"
+    fi
+    probe_result="$(json_query result.probe_status)"
+    runtime_config="${runtime_config:-$(json_query runtime_config_status)}"
+    cleanup_capture
+    run_pt_capture candidate smoke-test --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --mode real_service --attempts "$ATTEMPTS" --timeout "$TIMEOUT_SECONDS" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      real_result="failed"
+      cleanup_capture
+      fail "${message:-real service smoke test failed}"
+    fi
+    real_result="$(json_query result.real_service_status)"
+    runtime_config="${runtime_config:-$(json_query runtime_config_status)}"
+    cleanup_capture
+  fi
+  emit_summary "$(controller_summary "$runtime_config" "$probe_result" "$real_result" "controller flow complete")"
+}
+
+main() {
+  parse_args "$@"
+  PYTHON_BIN="$(find_python)"
+  [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
+  prepare_paths
+  validate_args
+  role="$(load_role)"
+  case "$role" in
+    worker) run_worker_flow ;;
+    controller) run_controller_flow ;;
+    *) fail "Unsupported node role: $role" ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
