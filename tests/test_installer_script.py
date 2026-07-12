@@ -555,6 +555,10 @@ class InstallerScriptTests(unittest.TestCase):
                     "  printf '%s\\n' '{\"ok\": true, \"runtime_config_status\": \"current\", \"message\": \"started\"}'\n"
                     "  exit 0\n"
                     "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"rathole\", \"runtime_systemd_ok\": true, \"runtime_services\": [{\"service_name\": \"pilottunnel-link-001-rathole.service\", \"active_state\": \"active\", \"sub_state\": \"running\"}]}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
                     "if [[ \"$args\" == *\" candidate smoke-test \"* ]]; then\n"
                     "  printf '%s\\n' '{\"ok\": true, \"runtime_config_status\": \"current\", \"result\": {\"probe_status\": \"passed\", \"real_service_status\": \"passed\"}}'\n"
                     "  exit 0\n"
@@ -697,6 +701,10 @@ class InstallerScriptTests(unittest.TestCase):
                     "  printf '%s\\n' '{\"ok\": true, \"message\": \"started\", \"runtime_config_status\": \"current\"}'\n"
                     "  exit 0\n"
                     "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"rathole\", \"runtime_systemd_ok\": true, \"runtime_services\": [{\"service_name\": \"pilottunnel-link-001-rathole.service\", \"active_state\": \"active\", \"sub_state\": \"running\"}]}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
                     "if [[ \"$args\" == *\" candidate smoke-test \"* ]] && [[ \"$args\" == *\" --mode probe \"* ]]; then\n"
                     "  printf '%s\\n' '{\"ok\": true, \"result\": {\"probe_status\": \"passed\"}, \"runtime_config_status\": \"current\"}'\n"
                     "  exit 0\n"
@@ -734,6 +742,49 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue(any("candidate smoke-test" in line and "--mode probe" in line for line in commands))
             self.assertTrue(any("candidate smoke-test" in line and "--mode real_service" in line for line in commands))
             self.assertIn("daemon-reload", systemctl_log.read_text(encoding="utf-8"))
+
+    def test_controller_frp_runner_refuses_smoke_when_start_reports_missing_units(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"prepared\", \"candidates\": [{\"adapter\": \"frp\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"Candidate start verification failed because required service units are missing from systemd: pilottunnel-link-001-frp-tcp-controller-frps.service, pilottunnel-link-001-frp-tcp-controller-frpc-visitor.service\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"smoke should not run\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required service units are missing", result.stderr)
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("candidate start --adapter frp --link link-001 --json" in line for line in commands))
+            self.assertFalse(any("candidate smoke-test" in line for line in commands))
 
     def test_public_install_does_not_require_role_or_basic_confirmation(self) -> None:
         bash_bin = self.find_bash()

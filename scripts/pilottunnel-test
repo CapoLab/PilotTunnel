@@ -303,6 +303,32 @@ PY
   return $rc
 }
 
+candidate_local_services_active() {
+  run_pt_capture candidate result --link "$LINK_LABEL" --json || true
+  if [ "$LAST_STATUS" -ne 0 ] || ! last_payload_ok; then
+    return 1
+  fi
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$ADAPTER_NAME" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") or "{}")
+adapter = sys.argv[2]
+for item in payload.get("candidates") or []:
+    if item.get("adapter") != adapter:
+        continue
+    services = item.get("runtime_services") or []
+    if item.get("runtime_systemd_ok") is not True or not services:
+        raise SystemExit(1)
+    for service in services:
+        if service.get("active_state") != "active" or service.get("sub_state") not in {"running", "exited", "listening"}:
+            raise SystemExit(1)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 manual_daemon_reload() {
   systemctl daemon-reload
 }
@@ -346,7 +372,7 @@ start_candidate_with_controller_retry() {
       fi
     fi
   fi
-  return "$LAST_STATUS"
+  return 1
 }
 
 emit_summary() {
@@ -464,6 +490,11 @@ run_controller_flow() {
     cleanup_capture
   fi
   if [ "$START_ONLY" -eq 0 ]; then
+    if ! candidate_local_services_active; then
+      cleanup_capture
+      fail "Candidate local services are not active; refusing to run smoke tests"
+    fi
+    cleanup_capture
     run_pt_capture candidate smoke-test --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --mode probe --attempts "$ATTEMPTS" --timeout "$TIMEOUT_SECONDS" --json || true
     if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
       message="$(capture_message)"
