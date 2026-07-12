@@ -1278,6 +1278,45 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertLess(stop_index, prepare_index)
             self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
 
+    def test_controller_test_runner_refuses_ambiguous_active_candidate_baseline(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"runtime_ambiguous\": true, \"active_adapter\": \"\", \"blockers\": [\"Multiple active PilotTunnel candidates detected locally: frp, rathole\"]}'\n"
+                    "  exit 1\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"prepare should not run\"}'\n"
+                    "  exit 1\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Multiple active PilotTunnel candidates", result.stderr)
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("candidate result" in line for line in commands))
+            self.assertFalse(any("candidate prepare-all" in line for line in commands))
+
     def test_controller_test_runner_restores_previous_candidate_after_success(self) -> None:
         with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
             fake_bin = Path(temp_dir) / "fake-bin"

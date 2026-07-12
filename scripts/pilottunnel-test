@@ -357,15 +357,37 @@ active_candidate_adapter() {
 
 active_candidate_adapter_for_link() {
   run_pt_capture candidate result --link "$1" --json || true
-  if [ "$LAST_STATUS" -ne 0 ] || ! last_payload_ok; then
+  if [ -z "${LAST_STDOUT:-}" ] || [ ! -f "$LAST_STDOUT" ]; then
     printf '%s\n' ""
     return 1
   fi
-  json_query active_adapter
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$LAST_STATUS" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") or "{}")
+except Exception:
+    print("")
+    raise SystemExit(1)
+if payload.get("runtime_ambiguous") is True:
+    blockers = payload.get("blockers") or []
+    message = blockers[0] if blockers else "Multiple active PilotTunnel candidates detected locally"
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+if sys.argv[2] != "0" or payload.get("ok") is False:
+    print("")
+    raise SystemExit(1)
+print(str(payload.get("active_adapter") or ""))
+PY
 }
 
 begin_benchmark_transaction() {
-  PREVIOUS_ADAPTER="$(active_candidate_adapter || true)"
+  if ! PREVIOUS_ADAPTER="$(active_candidate_adapter)"; then
+    cleanup_capture
+    return 1
+  fi
   cleanup_capture
   if [ -n "$PREVIOUS_ADAPTER" ] && [ "$PREVIOUS_ADAPTER" != "$ADAPTER_NAME" ]; then
     run_pt_capture candidate stop --link "$LINK_LABEL" --json || true

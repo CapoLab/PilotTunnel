@@ -636,26 +636,52 @@ def stop_candidate(
     active = state.active_link_candidates.get(link.id) or {}
     active_adapter = str(active.get("adapter") or "")
     if not active_adapter:
-        return {
-            "ok": False,
-            "action": "candidate-stop",
-            "message": "No active candidate is running on this server for the selected link",
-            "link_id": link.id,
-            "link_label": link.label,
-            "role": role,
-            "pairing_state": link.effective_pairing_state,
-            "probe_port": link.probe_port,
-            "aux_test_port": link.aux_test_port,
-            "reserved_test_range": list(link.reserved_test_range),
-            "active_adapter": "",
-            "candidates_summary": _candidate_summary_rows(link),
-            "real_systemd_touched": False,
-            "services_started": False,
-            "firewall_touched": False,
-            "routes_touched": False,
-        }
+        runtime_active = _active_runtime_candidates(link=link, role=role, paths=paths)
+        if len(runtime_active) == 1:
+            active_adapter = runtime_active[0][0].adapter
+        elif len(runtime_active) > 1:
+            adapters = [candidate.adapter for candidate, _runtime in runtime_active]
+            return {
+                "ok": False,
+                "action": "candidate-stop",
+                "message": "Multiple active PilotTunnel candidates were detected; stop refused until the ambiguous local runtime is resolved",
+                "link_id": link.id,
+                "link_label": link.label,
+                "role": role,
+                "pairing_state": link.effective_pairing_state,
+                "probe_port": link.probe_port,
+                "aux_test_port": link.aux_test_port,
+                "reserved_test_range": list(link.reserved_test_range),
+                "active_adapter": "",
+                "runtime_ambiguous": True,
+                "runtime_conflicts": adapters,
+                "candidates_summary": _candidate_summary_rows(link),
+                "real_systemd_touched": False,
+                "services_started": False,
+                "firewall_touched": False,
+                "routes_touched": False,
+            }
+        else:
+            return {
+                "ok": False,
+                "action": "candidate-stop",
+                "message": "No active candidate is running on this server for the selected link",
+                "link_id": link.id,
+                "link_label": link.label,
+                "role": role,
+                "pairing_state": link.effective_pairing_state,
+                "probe_port": link.probe_port,
+                "aux_test_port": link.aux_test_port,
+                "reserved_test_range": list(link.reserved_test_range),
+                "active_adapter": "",
+                "candidates_summary": _candidate_summary_rows(link),
+                "real_systemd_touched": False,
+                "services_started": False,
+                "firewall_touched": False,
+                "routes_touched": False,
+            }
     candidate = _candidate_for(link, active_adapter)
-    services = list(active.get("services") or [])
+    services = _active_services_for_candidate(candidate=candidate, role=role, active_state=active)
     stop_results: list[dict[str, Any]] = []
     errors: list[str] = []
     for service in reversed(services):
@@ -690,12 +716,11 @@ def stop_candidate(
             "routes_touched": False,
         }
 
+    cleanup_warnings: list[str] = []
     runtime_dirs = {service.get("runtime_dir", "") for service in services if service.get("runtime_dir")}
     service_dirs = {service.get("service_dir", "") for service in services if service.get("service_dir")}
-    for runtime_dir in runtime_dirs:
-        _safe_remove_tree(Path(runtime_dir), paths.work_dir)
-    for service_dir in service_dirs:
-        _safe_remove_tree(Path(service_dir), paths.work_dir)
+    cleanup_warnings.extend(_safe_remove_candidate_paths(runtime_dirs, paths.work_dir))
+    cleanup_warnings.extend(_safe_remove_candidate_paths(service_dirs, paths.work_dir))
 
     _mark_candidate(link, candidate.adapter, "stopped")
     state.active_link_candidates.pop(link.id, None)
@@ -714,6 +739,7 @@ def stop_candidate(
         "candidates_summary": _candidate_summary_rows(link),
         "candidate": _candidate_payload(candidate),
         "stop": stop_results,
+        "warnings": cleanup_warnings,
         "next_instruction": _stop_next_instruction(role),
         "real_systemd_touched": True,
         "services_started": False,
@@ -899,6 +925,7 @@ def candidate_results(
     role = _require_role(config)
     link = _target_link(config, link_label)
     candidate_payloads: list[dict[str, Any]] = []
+    runtime_active_adapters: list[str] = []
     for candidate in link.candidates:
         payload = _candidate_payload(candidate)
         runtime = _candidate_runtime_systemd_status(audit_path=paths.audit_path, candidate=candidate, role=role, allow_missing=True)
@@ -913,9 +940,22 @@ def candidate_results(
         payload["runtime_services"] = runtime.get("services", [])
         payload["runtime_config_status"] = runtime_config["status"]
         payload["runtime_config_details"] = runtime_config
+        if runtime["state"] == "active":
+            runtime_active_adapters.append(candidate.adapter)
         candidate_payloads.append(payload)
+    unique_runtime_active = sorted(set(runtime_active_adapters))
+    runtime_ambiguous = len(unique_runtime_active) > 1
+    blockers = []
+    if runtime_ambiguous:
+        blockers.append(
+            "Multiple active PilotTunnel candidates detected locally: "
+            + ", ".join(unique_runtime_active)
+            + ". Stop the conflicting managed units before benchmarking."
+        )
+    persisted_active = _active_candidate_adapter(link)
+    active_adapter = unique_runtime_active[0] if len(unique_runtime_active) == 1 else ("" if runtime_ambiguous else persisted_active)
     return {
-        "ok": True,
+        "ok": not runtime_ambiguous,
         "action": "candidate-results",
         "link_id": link.id,
         "link_label": link.label,
@@ -924,7 +964,11 @@ def candidate_results(
         "probe_port": link.probe_port,
         "aux_test_port": link.aux_test_port,
         "reserved_test_range": list(link.reserved_test_range),
-        "active_adapter": _active_candidate_adapter(link),
+        "active_adapter": active_adapter,
+        "persisted_active_adapter": persisted_active,
+        "runtime_active_adapters": unique_runtime_active,
+        "runtime_ambiguous": runtime_ambiguous,
+        "blockers": blockers,
         "pairing_state_note": _pairing_state_note(link),
         "candidates": candidate_payloads,
         "candidates_summary": _candidate_summary_rows(link),
@@ -1603,6 +1647,22 @@ def _candidate_runtime_systemd_status(*, audit_path: Path, candidate: LinkCandid
     return snapshot
 
 
+def _active_runtime_candidates(*, link: LinkProfile, role: str, paths: SwitchPaths) -> list[tuple[LinkCandidate, dict[str, Any]]]:
+    active: list[tuple[LinkCandidate, dict[str, Any]]] = []
+    for candidate in link.candidates:
+        runtime = _candidate_runtime_systemd_status(audit_path=paths.audit_path, candidate=candidate, role=role, allow_missing=True)
+        if runtime["state"] == "active":
+            active.append((candidate, runtime))
+    return active
+
+
+def _active_services_for_candidate(*, candidate: LinkCandidate, role: str, active_state: dict[str, Any]) -> list[dict[str, Any]]:
+    services = list(active_state.get("services") or [])
+    if services:
+        return services
+    return list(_side_plan(candidate, role).get("services") or [])
+
+
 def _candidate_runtime_fingerprint(candidate: LinkCandidate, role: str) -> str:
     side_plan = _side_plan(candidate, role)
     payload = {
@@ -2079,6 +2139,16 @@ def _safe_remove_tree(path: Path, base: Path) -> None:
         current = current.parent
     if resolved.exists():
         shutil.rmtree(resolved)
+
+
+def _safe_remove_candidate_paths(paths: set[str], base: Path) -> list[str]:
+    warnings: list[str] = []
+    for path_text in sorted(filter(None, paths)):
+        try:
+            _safe_remove_tree(Path(path_text), base)
+        except ValueError as exc:
+            warnings.append(f"Skipped stale candidate cleanup for '{path_text}': {exc}")
+    return warnings
 
 
 def _empty_side_payload(side_name: str, side_template: dict[str, Any]) -> dict[str, Any]:
