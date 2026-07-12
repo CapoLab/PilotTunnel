@@ -10,6 +10,8 @@ TIMEOUT_SECONDS="5"
 JSON_OUTPUT=0
 START_ONLY=0
 SMOKE_ONLY=0
+RESTORE_PENDING=0
+RESTORE_AFTER_SECONDS="${PILOTTUNNEL_TEST_RESTORE_SECONDS:-120}"
 PYTHON_BIN=""
 
 REPO_DIR="/opt/pilottunnel/repo"
@@ -20,10 +22,17 @@ AUDIT_LOG="/opt/pilottunnel/state/audit.log"
 LOCK_DIR="/opt/pilottunnel/state/locks"
 WORK_DIR="/opt/pilottunnel/work"
 STAGING_ROOT="/opt/pilottunnel/staging"
+RESTORE_TRANSACTION_FILE="/opt/pilottunnel/state/benchmark-restore.json"
+BIN_DIR="/opt/pilottunnel/bin"
+SYSTEMD_UNIT_DIR="${PILOTTUNNEL_TEST_SYSTEMD_DIR:-/etc/systemd/system}"
+RESTORE_SERVICE_NAME=""
+RESTORE_TIMER_NAME=""
 
 LAST_STDOUT=""
 LAST_STDERR=""
 LAST_STATUS=0
+PREVIOUS_ADAPTER=""
+TARGET_STARTED=0
 
 cleanup_capture() {
   [ -n "${LAST_STDOUT:-}" ] && [ -f "$LAST_STDOUT" ] && rm -f "$LAST_STDOUT"
@@ -56,6 +65,9 @@ Options:
   --json             Print the final summary as JSON.
   --start-only       Prepare and start only. Skip smoke tests.
   --smoke-only       Skip prepare/start and run smoke tests only.
+  --restore-pending  Restore an expired local benchmark transaction and exit.
+  --restore-after <SEC>
+                     Worker start-only restore deadline. Defaults to ${RESTORE_AFTER_SECONDS}.
   --help             Show this help text.
 EOF
 }
@@ -81,6 +93,8 @@ parse_args() {
       --json) JSON_OUTPUT=1; shift ;;
       --start-only) START_ONLY=1; shift ;;
       --smoke-only) SMOKE_ONLY=1; shift ;;
+      --restore-pending) RESTORE_PENDING=1; shift ;;
+      --restore-after) [ $# -ge 2 ] || fail "--restore-after requires a value"; RESTORE_AFTER_SECONDS="$2"; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "Unknown argument: $1" ;;
     esac
@@ -100,10 +114,18 @@ prepare_paths() {
   LOCK_DIR="${BASE_DIR}/state/locks"
   WORK_DIR="${BASE_DIR}/work"
   STAGING_ROOT="${BASE_DIR}/staging"
+  RESTORE_TRANSACTION_FILE="${BASE_DIR}/state/benchmark-restore.json"
+  BIN_DIR="${BASE_DIR}/bin"
   [ -d "$REPO_DIR/pilottunnel" ] || fail "PilotTunnel repository is not installed under $REPO_DIR"
 }
 
 validate_args() {
+  case "$RESTORE_AFTER_SECONDS" in
+    ''|*[!0-9]*) fail "--restore-after must be a non-negative integer" ;;
+  esac
+  if [ "$RESTORE_PENDING" -eq 1 ]; then
+    return 0
+  fi
   [ -n "$LINK_LABEL" ] || fail "--link is required"
   [ -n "$ADAPTER_NAME" ] || fail "--adapter is required"
   case "$ATTEMPTS" in
@@ -329,6 +351,331 @@ raise SystemExit(1)
 PY
 }
 
+active_candidate_adapter() {
+  active_candidate_adapter_for_link "$LINK_LABEL"
+}
+
+active_candidate_adapter_for_link() {
+  run_pt_capture candidate result --link "$1" --json || true
+  if [ "$LAST_STATUS" -ne 0 ] || ! last_payload_ok; then
+    printf '%s\n' ""
+    return 1
+  fi
+  json_query active_adapter
+}
+
+begin_benchmark_transaction() {
+  PREVIOUS_ADAPTER="$(active_candidate_adapter || true)"
+  cleanup_capture
+  if [ -n "$PREVIOUS_ADAPTER" ] && [ "$PREVIOUS_ADAPTER" != "$ADAPTER_NAME" ]; then
+    run_pt_capture candidate stop --link "$LINK_LABEL" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      return 1
+    fi
+    cleanup_capture
+  fi
+  return 0
+}
+
+restore_previous_candidate() {
+  if [ -z "$PREVIOUS_ADAPTER" ] || [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
+    return 0
+  fi
+  run_pt_capture candidate stop --link "$LINK_LABEL" --json || true
+  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+    return 1
+  fi
+  cleanup_capture
+  run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
+  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+    return 1
+  fi
+  cleanup_capture
+  run_pt_capture candidate start --adapter "$PREVIOUS_ADAPTER" --link "$LINK_LABEL" --json || true
+  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+    return 1
+  fi
+  cleanup_capture
+  TARGET_STARTED=0
+  return 0
+}
+
+restore_unit_scope() {
+  "$PYTHON_BIN" - "$BASE_DIR" "$1" <<'PY'
+import hashlib
+import re
+import sys
+base_dir = sys.argv[1]
+link = sys.argv[2]
+safe_link = re.sub(r"[^A-Za-z0-9_-]+", "-", link).strip("-").lower() or "link"
+safe_link = safe_link[:32]
+digest = hashlib.sha256(f"{base_dir}\0{link}".encode("utf-8")).hexdigest()[:12]
+print(f"{safe_link}-{digest}")
+PY
+}
+
+set_restore_unit_names() {
+  scope="$(restore_unit_scope "$1")"
+  RESTORE_SERVICE_NAME="pilottunnel-benchmark-restore-${scope}.service"
+  RESTORE_TIMER_NAME="pilottunnel-benchmark-restore-${scope}.timer"
+}
+
+systemd_quote_arg() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import sys
+value = sys.argv[1]
+escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+print(f'"{escaped}"')
+PY
+}
+
+deadline_calendar_utc() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+from datetime import datetime, timezone
+import sys
+epoch = int(sys.argv[1])
+print(datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
+PY
+}
+
+write_restore_transaction() {
+  if [ -z "$PREVIOUS_ADAPTER" ] || [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
+    return 0
+  fi
+  set_restore_unit_names "$LINK_LABEL"
+  mkdir -p "$(dirname "$RESTORE_TRANSACTION_FILE")"
+  "$PYTHON_BIN" - "$RESTORE_TRANSACTION_FILE" "$LINK_LABEL" "$PREVIOUS_ADAPTER" "$ADAPTER_NAME" "$RESTORE_AFTER_SECONDS" "$RESTORE_SERVICE_NAME" "$RESTORE_TIMER_NAME" "$BASE_DIR" <<'PY'
+from pathlib import Path
+from datetime import datetime, timezone
+import json
+import sys
+import time
+
+path = Path(sys.argv[1])
+deadline_after = int(sys.argv[5])
+service_name = sys.argv[6]
+timer_name = sys.argv[7]
+base_dir = sys.argv[8]
+if path.exists():
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"Existing benchmark restore transaction is malformed: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if existing.get("status") == "pending":
+        print("A benchmark restore transaction is already pending", file=sys.stderr)
+        raise SystemExit(2)
+now = int(time.time())
+deadline = now + deadline_after
+payload = {
+    "status": "pending",
+    "link": sys.argv[2],
+    "previous_adapter": sys.argv[3],
+    "target_adapter": sys.argv[4],
+    "base_dir": base_dir,
+    "service_name": service_name,
+    "timer_name": timer_name,
+    "created_at_epoch": now,
+    "deadline_epoch": deadline,
+    "deadline_utc": datetime.fromtimestamp(deadline, tz=timezone.utc).isoformat(),
+}
+tmp = path.with_suffix(path.suffix + ".tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
+PY
+}
+
+mark_restore_transaction_complete() {
+  "$PYTHON_BIN" - "$RESTORE_TRANSACTION_FILE" <<'PY'
+from pathlib import Path
+import json
+import sys
+import time
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(0)
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    payload = {}
+payload["status"] = "complete"
+payload["completed_at_epoch"] = int(time.time())
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+restore_transaction_field() {
+  "$PYTHON_BIN" - "$RESTORE_TRANSACTION_FILE" "$1" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+field = sys.argv[2]
+if not path.exists():
+    print("")
+    raise SystemExit(0)
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"Malformed benchmark restore transaction: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+print(payload.get(field, ""))
+PY
+}
+
+restore_transaction_expired() {
+  "$PYTHON_BIN" - "$RESTORE_TRANSACTION_FILE" <<'PY'
+from pathlib import Path
+import json
+import sys
+import time
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"Malformed benchmark restore transaction: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+if payload.get("status") != "pending":
+    raise SystemExit(1)
+try:
+    deadline = int(payload.get("deadline_epoch"))
+except Exception:
+    print("Pending restore transaction has an invalid deadline", file=sys.stderr)
+    raise SystemExit(2)
+raise SystemExit(0 if deadline <= int(time.time()) else 1)
+PY
+}
+
+schedule_restore_deadline() {
+  if [ -z "$PREVIOUS_ADAPTER" ] || [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
+    return 0
+  fi
+  set_restore_unit_names "$LINK_LABEL"
+  deadline_epoch="$(restore_transaction_field deadline_epoch)" || return 1
+  deadline_calendar="$(deadline_calendar_utc "$deadline_epoch")" || return 1
+  mkdir -p "$SYSTEMD_UNIT_DIR" || return 1
+  runner_path="${BIN_DIR}/pilottunnel-test"
+  quoted_runner="$(systemd_quote_arg "$runner_path")" || return 1
+  quoted_base="$(systemd_quote_arg "$BASE_DIR")" || return 1
+  quoted_transaction="$(systemd_quote_arg "$RESTORE_TRANSACTION_FILE")" || return 1
+  service_path="${SYSTEMD_UNIT_DIR}/${RESTORE_SERVICE_NAME}"
+  timer_path="${SYSTEMD_UNIT_DIR}/${RESTORE_TIMER_NAME}"
+  service_tmp="${service_path}.tmp"
+  timer_tmp="${timer_path}.tmp"
+  cat >"$service_tmp" <<EOF
+[Unit]
+Description=PilotTunnel benchmark restore guard
+Documentation=https://github.com/CapoLab/PilotTunnel
+ConditionPathExists=${quoted_transaction}
+
+[Service]
+Type=oneshot
+ExecStart=${quoted_runner} --base-dir ${quoted_base} --restore-pending
+EOF
+  mv "$service_tmp" "$service_path" || return 1
+  cat >"$timer_tmp" <<EOF
+[Unit]
+Description=PilotTunnel benchmark restore deadline timer
+Documentation=https://github.com/CapoLab/PilotTunnel
+
+[Timer]
+OnCalendar=${deadline_calendar}
+AccuracySec=1s
+Persistent=true
+Unit=${RESTORE_SERVICE_NAME}
+
+[Install]
+WantedBy=timers.target
+EOF
+  mv "$timer_tmp" "$timer_path" || return 1
+  systemctl daemon-reload || return 1
+  systemctl enable --now "$RESTORE_TIMER_NAME" || return 1
+}
+
+disable_restore_deadline() {
+  service_name="$1"
+  timer_name="$2"
+  [ -n "$service_name" ] || return 0
+  [ -n "$timer_name" ] || return 0
+  systemctl disable --now "$timer_name" || return 1
+  rm -f "${SYSTEMD_UNIT_DIR}/${timer_name}" "${SYSTEMD_UNIT_DIR}/${service_name}" || return 1
+  systemctl daemon-reload || return 1
+}
+
+complete_restore_transaction() {
+  service_name="$(restore_transaction_field service_name)" || return 1
+  timer_name="$(restore_transaction_field timer_name)" || return 1
+  disable_restore_deadline "$service_name" "$timer_name" || return 1
+  mark_restore_transaction_complete || return 1
+}
+
+restore_pending_transaction() {
+  if [ ! -f "$RESTORE_TRANSACTION_FILE" ]; then
+    printf '%s\n' "No pending PilotTunnel benchmark restore transaction."
+    return 0
+  fi
+  if ! status="$(restore_transaction_field status)"; then
+    fail "Pending benchmark restore transaction is malformed or unreadable"
+  fi
+  if [ "$status" != "pending" ]; then
+    printf '%s\n' "No pending PilotTunnel benchmark restore transaction."
+    return 0
+  fi
+  if restore_transaction_expired; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      fail "Pending benchmark restore transaction is malformed or unreadable"
+    fi
+    printf '%s\n' "PilotTunnel benchmark restore transaction is not expired yet."
+    return 0
+  fi
+  tx_link="$(restore_transaction_field link)" || fail "Pending benchmark restore transaction is malformed or unreadable"
+  tx_previous="$(restore_transaction_field previous_adapter)" || fail "Pending benchmark restore transaction is malformed or unreadable"
+  tx_target="$(restore_transaction_field target_adapter)" || fail "Pending benchmark restore transaction is malformed or unreadable"
+  [ -n "$tx_link" ] || fail "Pending restore transaction is missing link"
+  [ -n "$tx_target" ] || fail "Pending restore transaction is missing temporary candidate"
+  [ -n "$tx_previous" ] || fail "Pending restore transaction is missing previous candidate"
+  current_adapter="$(active_candidate_adapter_for_link "$tx_link" || true)"
+  cleanup_capture
+  if [ "$current_adapter" = "$tx_previous" ]; then
+    complete_restore_transaction || fail "Previous candidate is active, but restore timer cleanup failed"
+    printf '%s\n' "PilotTunnel benchmark restore transaction was already restored locally for link ${tx_link}."
+    return 0
+  fi
+  if [ "$current_adapter" = "$tx_target" ]; then
+    run_pt_capture candidate stop --link "$tx_link" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      cleanup_capture
+      fail "${message:-failed to stop temporary candidate during pending restore}"
+    fi
+    cleanup_capture
+  fi
+  run_pt_capture candidate prepare-all --link "$tx_link" --json || true
+  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+    message="$(capture_message)"
+    cleanup_capture
+    fail "${message:-failed to prepare previous candidate during pending restore}"
+  fi
+  cleanup_capture
+  run_pt_capture candidate start --adapter "$tx_previous" --link "$tx_link" --json || true
+  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+    message="$(capture_message)"
+    cleanup_capture
+    fail "${message:-failed to restore previous candidate during pending restore}"
+  fi
+  cleanup_capture
+  complete_restore_transaction || fail "Previous candidate was restored, but restore timer cleanup failed"
+  printf '%s\n' "PilotTunnel benchmark restore completed locally for link ${tx_link}: stopped ${tx_target}, restored ${tx_previous}."
+}
+
 manual_daemon_reload() {
   systemctl daemon-reload
 }
@@ -451,9 +798,15 @@ run_worker_flow() {
   if [ "$SMOKE_ONLY" -eq 1 ]; then
     fail "Worker role does not support --smoke-only. Use the controller side for smoke tests."
   fi
+  if ! begin_benchmark_transaction; then
+    message="$(capture_message)"
+    cleanup_capture
+    fail "${message:-failed to stop the currently active local candidate before worker benchmark start}"
+  fi
   if ! prepare_all_with_worker_retry; then
     message="$(capture_message)"
     cleanup_capture
+    restore_previous_candidate || true
     fail "${message:-candidate prepare-all failed on worker}"
   fi
   cleanup_capture
@@ -461,7 +814,26 @@ run_worker_flow() {
   if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
     message="$(capture_message)"
     cleanup_capture
+    restore_previous_candidate || true
     fail "${message:-candidate start failed on worker}"
+  fi
+  TARGET_STARTED=1
+  if [ "$START_ONLY" -eq 1 ]; then
+    if ! write_restore_transaction; then
+      cleanup_capture
+      if restore_previous_candidate; then
+        fail "Failed to persist durable local restore transaction; restored the previous local candidate"
+      fi
+      fail "Failed to persist durable local restore transaction, and restoring the previous local candidate also failed"
+    fi
+    if ! schedule_restore_deadline; then
+      cleanup_capture
+      if restore_previous_candidate; then
+        mark_restore_transaction_complete || fail "Failed to schedule durable local restore deadline; previous candidate was restored but transaction completion failed"
+        fail "Failed to schedule durable local restore deadline; restored the previous local candidate"
+      fi
+      fail "Failed to schedule durable local restore deadline, and restoring the previous local candidate also failed"
+    fi
   fi
   runtime_config="$(json_query runtime_config_status)"
   message="$(capture_message)"
@@ -474,24 +846,33 @@ run_controller_flow() {
   real_result="skipped"
   runtime_config="unknown"
   if [ "$SMOKE_ONLY" -eq 0 ]; then
+    if ! begin_benchmark_transaction; then
+      message="$(capture_message)"
+      cleanup_capture
+      fail "${message:-failed to stop the currently active local candidate before controller benchmark start}"
+    fi
     run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
     if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
       message="$(capture_message)"
       cleanup_capture
+      restore_previous_candidate || true
       fail "${message:-candidate prepare-all failed on controller}"
     fi
     cleanup_capture
     if ! start_candidate_with_controller_retry; then
       message="$(capture_message)"
       cleanup_capture
+      restore_previous_candidate || true
       fail "${message:-candidate start failed on controller}"
     fi
+    TARGET_STARTED=1
     runtime_config="$(json_query runtime_config_status)"
     cleanup_capture
   fi
   if [ "$START_ONLY" -eq 0 ]; then
     if ! candidate_local_services_active; then
       cleanup_capture
+      restore_previous_candidate || true
       fail "Candidate local services are not active; refusing to run smoke tests"
     fi
     cleanup_capture
@@ -500,6 +881,7 @@ run_controller_flow() {
       message="$(capture_message)"
       probe_result="failed"
       cleanup_capture
+      restore_previous_candidate || true
       fail "${message:-probe smoke test failed}"
     fi
     probe_result="$(json_query result.probe_status)"
@@ -510,12 +892,14 @@ run_controller_flow() {
       message="$(capture_message)"
       real_result="failed"
       cleanup_capture
+      restore_previous_candidate || true
       fail "${message:-real service smoke test failed}"
     fi
     real_result="$(json_query result.real_service_status)"
     runtime_config="${runtime_config:-$(json_query runtime_config_status)}"
     cleanup_capture
   fi
+  restore_previous_candidate || true
   emit_summary "$(controller_summary "$runtime_config" "$probe_result" "$real_result" "controller flow complete")"
 }
 
@@ -525,6 +909,10 @@ main() {
   [ -n "$PYTHON_BIN" ] || fail "Python is required but was not found."
   prepare_paths
   validate_args
+  if [ "$RESTORE_PENDING" -eq 1 ]; then
+    restore_pending_transaction
+    exit 0
+  fi
   role="$(load_role)"
   case "$role" in
     worker) run_worker_flow ;;

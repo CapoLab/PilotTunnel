@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -668,6 +669,360 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue(any("candidate stop" in line for line in commands))
             self.assertTrue(any("candidate start" in line for line in commands))
 
+    def write_fake_worker_restore_cli(self, fake_bin: Path, command_log: Path, active_file: Path) -> None:
+        self.write_fake_cli_python(
+            fake_bin,
+            body=(
+                f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                f"active_file='{self.to_bash_path(active_file)}'\n"
+                "args=\" $* \"\n"
+                "active=\"\"\n"
+                "[ -f \"$active_file\" ] && active=\"$(cat \"$active_file\")\"\n"
+                "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                "  printf '%s\\n' '{\"normalized_role\": \"worker\", \"initialized\": true}'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                "  printf '%s\\n' \"{\\\"ok\\\": true, \\\"active_adapter\\\": \\\"$active\\\", \\\"candidates\\\": [{\\\"adapter\\\": \\\"$active\\\", \\\"runtime_systemd_ok\\\": true, \\\"runtime_services\\\": [{\\\"service_name\\\": \\\"pilottunnel-link-001-${active}.service\\\", \\\"active_state\\\": \\\"active\\\", \\\"sub_state\\\": \\\"running\\\"}]}]}\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                "  printf '%s' '' > \"$active_file\"\n"
+                "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                "  if [ \"$active\" = \"rathole\" ]; then\n"
+                "    printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": false, \"blockers\": [\"Probe/test port is unavailable\"], \"warnings\": []}]}'\n"
+                "    exit 0\n"
+                "  fi\n"
+                "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": true, \"blockers\": [], \"warnings\": []}, {\"adapter\": \"rathole\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"$args\" == *\" candidate start --adapter frp \"* ]]; then\n"
+                "  printf '%s' 'frp' > \"$active_file\"\n"
+                "  printf '%s\\n' '{\"ok\": true, \"message\": \"frp worker ready\", \"runtime_config_status\": \"current\"}'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"$args\" == *\" candidate start --adapter rathole \"* ]]; then\n"
+                "  printf '%s' 'rathole' > \"$active_file\"\n"
+                "  printf '%s\\n' '{\"ok\": true, \"message\": \"rathole restored\", \"runtime_config_status\": \"current\"}'\n"
+                "  exit 0\n"
+                "fi\n"
+            ),
+        )
+
+    def test_worker_start_only_schedules_expired_restore_and_restores_previous_candidate(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            systemctl_log = Path(temp_dir) / "systemctl.log"
+            systemd_dir = Path(temp_dir) / "systemd"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            self.write_fake_systemctl(
+                fake_bin,
+                body=(f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(systemctl_log)}'\nexit 0"),
+            )
+            env = {
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(systemd_dir),
+            }
+            start_result = self.run_test_runner(base_dir, "--link", "link-001", "--adapter", "frp", "--start-only", "--restore-after", "0", "--json", extra_env=env)
+            self.assertEqual(start_result.returncode, 0, msg=start_result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "frp")
+            transaction = json.loads((base_dir / "state" / "benchmark-restore.json").read_text(encoding="utf-8"))
+            self.assertEqual(transaction["previous_adapter"], "rathole")
+            self.assertEqual(transaction["target_adapter"], "frp")
+            service_path = next(systemd_dir.glob("pilottunnel-benchmark-restore-*.service"))
+            timer_path = next(systemd_dir.glob("pilottunnel-benchmark-restore-*.timer"))
+            service_text = service_path.read_text(encoding="utf-8")
+            timer_text = timer_path.read_text(encoding="utf-8")
+            self.assertEqual(transaction["service_name"], service_path.name)
+            self.assertEqual(transaction["timer_name"], timer_path.name)
+            self.assertIn('ExecStart="', service_text)
+            self.assertIn('/bin/pilottunnel-test" --base-dir "', service_text.replace("\\", "/"))
+            self.assertIn('" --restore-pending', service_text)
+            self.assertIn(f"Unit={service_path.name}", timer_text)
+            self.assertIn("OnCalendar=", timer_text)
+            self.assertIn("Persistent=true", timer_text)
+            systemctl_text = systemctl_log.read_text(encoding="utf-8")
+            self.assertIn("daemon-reload", systemctl_text)
+            self.assertIn(f"enable --now {timer_path.name}", systemctl_text)
+            restore_result = self.run_test_runner(base_dir, "--restore-pending", extra_env=env)
+            self.assertEqual(restore_result.returncode, 0, msg=restore_result.stderr)
+            self.assertIn("restored rathole", restore_result.stdout)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            self.assertFalse(service_path.exists())
+            self.assertFalse(timer_path.exists())
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            stop_index = next(index for index, line in enumerate(commands) if "candidate stop" in line)
+            prepare_index = next(index for index, line in enumerate(commands) if "candidate prepare-all" in line)
+            self.assertLess(stop_index, prepare_index)
+            self.assertFalse(any("candidate stop --adapter" in line for line in commands))
+
+    def test_worker_restore_pending_restores_interrupted_transaction_and_is_idempotent(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("frp", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            transaction_path = base_dir / "state" / "benchmark-restore.json"
+            transaction_path.write_text(
+                json.dumps(
+                    {
+                        "status": "pending",
+                        "link": "link-001",
+                        "previous_adapter": "rathole",
+                        "target_adapter": "frp",
+                        "service_name": "pilottunnel-benchmark-restore-link-001-test.service",
+                        "timer_name": "pilottunnel-benchmark-restore-link-001-test.timer",
+                        "created_at_epoch": int(time.time()) - 180,
+                        "deadline_epoch": int(time.time()) - 60,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.write_fake_systemctl(fake_bin, body="exit 0")
+            env = {
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(Path(temp_dir) / "systemd"),
+            }
+            first = self.run_test_runner(base_dir, "--restore-pending", extra_env=env)
+            self.assertEqual(first.returncode, 0, msg=first.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            second = self.run_test_runner(base_dir, "--restore-pending", extra_env=env)
+            self.assertEqual(second.returncode, 0, msg=second.stderr)
+            self.assertIn("No pending", second.stdout)
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(sum(1 for line in commands if "candidate start --adapter rathole" in line), 1)
+
+    def test_worker_restore_pending_surfaces_stop_failure_without_completing_transaction(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("frp", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"active_file='{self.to_bash_path(active_file)}'\n"
+                    "args=\" $* \"\n"
+                    "active=\"$(cat \"$active_file\")\"\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' \"{\\\"ok\\\": true, \\\"active_adapter\\\": \\\"$active\\\", \\\"candidates\\\": [{\\\"adapter\\\": \\\"$active\\\", \\\"runtime_systemd_ok\\\": true, \\\"runtime_services\\\": [{\\\"service_name\\\": \\\"pilottunnel-link-001-${active}.service\\\", \\\"active_state\\\": \\\"active\\\", \\\"sub_state\\\": \\\"running\\\"}]}]}\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"stop failed\"}'\n"
+                    "  exit 1\n"
+                    "fi\n"
+                ),
+            )
+            transaction_path = base_dir / "state" / "benchmark-restore.json"
+            transaction_path.write_text(
+                json.dumps(
+                    {
+                        "status": "pending",
+                        "link": "link-001",
+                        "previous_adapter": "rathole",
+                        "target_adapter": "frp",
+                        "service_name": "pilottunnel-benchmark-restore-link-001-test.service",
+                        "timer_name": "pilottunnel-benchmark-restore-link-001-test.timer",
+                        "created_at_epoch": int(time.time()) - 180,
+                        "deadline_epoch": int(time.time()) - 60,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--restore-pending",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("stop failed", result.stderr)
+            self.assertEqual(json.loads(transaction_path.read_text(encoding="utf-8"))["status"], "pending")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any("candidate start --adapter rathole" in line for line in commands))
+
+    def test_worker_restore_pending_marks_complete_when_previous_candidate_is_already_active(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            transaction_path = base_dir / "state" / "benchmark-restore.json"
+            transaction_path.write_text(
+                json.dumps(
+                    {
+                        "status": "pending",
+                        "link": "link-001",
+                        "previous_adapter": "rathole",
+                        "target_adapter": "frp",
+                        "service_name": "pilottunnel-benchmark-restore-link-001-test.service",
+                        "timer_name": "pilottunnel-benchmark-restore-link-001-test.timer",
+                        "created_at_epoch": int(time.time()) - 180,
+                        "deadline_epoch": int(time.time()) - 60,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.write_fake_systemctl(fake_bin, body="exit 0")
+            result = self.run_test_runner(
+                base_dir,
+                "--restore-pending",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(Path(temp_dir) / "systemd"),
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("already restored", result.stdout)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+            self.assertEqual(transaction["status"], "complete")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any("candidate stop" in line for line in commands))
+
+    def test_worker_restore_pending_surfaces_corrupt_transaction(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            (base_dir / "state" / "benchmark-restore.json").write_text("{not-json", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\nexit 0",
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--restore-pending",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("malformed", result.stderr.lower())
+            self.assertFalse(command_log.exists())
+
+    def test_worker_restore_pending_waits_before_deadline(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            self.write_fake_systemctl(fake_bin, body="exit 0")
+            env = {
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(Path(temp_dir) / "systemd"),
+            }
+            start_result = self.run_test_runner(base_dir, "--link", "link-001", "--adapter", "frp", "--start-only", "--restore-after", "120", "--json", extra_env=env)
+            self.assertEqual(start_result.returncode, 0, msg=start_result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "frp")
+            restore_result = self.run_test_runner(base_dir, "--restore-pending", extra_env=env)
+            self.assertEqual(restore_result.returncode, 0, msg=restore_result.stderr)
+            self.assertIn("not expired yet", restore_result.stdout)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "frp")
+
+    def test_worker_start_only_with_target_already_active_does_not_create_restore_transaction(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("frp", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--start-only",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertFalse((base_dir / "state" / "benchmark-restore.json").exists())
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "frp")
+
+    def test_worker_start_only_restores_previous_candidate_when_scheduler_creation_fails(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            self.write_fake_systemctl(fake_bin, body="exit 1")
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--start-only",
+                "--json",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(Path(temp_dir) / "systemd"),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Failed to schedule durable local restore deadline", result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("candidate start --adapter frp" in line for line in commands))
+            self.assertTrue(any("candidate stop --link link-001 --json" in line for line in commands))
+            self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
+
+    def test_worker_start_only_restores_previous_candidate_when_transaction_write_fails(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_worker_restore_cli(fake_bin, command_log, active_file)
+            (base_dir / "state" / "benchmark-restore.json").write_text(
+                json.dumps(
+                    {
+                        "status": "pending",
+                        "link": "other-link",
+                        "previous_adapter": "rathole",
+                        "target_adapter": "frp",
+                        "created_at_epoch": int(time.time()),
+                        "deadline_epoch": int(time.time()) + 120,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--start-only",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("persist durable local restore transaction", result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("candidate start --adapter frp" in line for line in commands))
+            self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
+
     def test_controller_test_runner_retries_after_daemon_reload_timeout(self) -> None:
         with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
             fake_bin = Path(temp_dir) / "fake-bin"
@@ -785,6 +1140,148 @@ class InstallerScriptTests(unittest.TestCase):
             commands = command_log.read_text(encoding="utf-8").splitlines()
             self.assertTrue(any("candidate start --adapter frp --link link-001 --json" in line for line in commands))
             self.assertFalse(any("candidate smoke-test" in line for line in commands))
+
+    def test_controller_test_runner_handoffs_active_candidate_and_restores_on_probe_failure(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"active_file='{self.to_bash_path(active_file)}'\n"
+                    "args=\" $* \"\n"
+                    "active=\"\"\n"
+                    "[ -f \"$active_file\" ] && active=\"$(cat \"$active_file\")\"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  if [ \"$active\" = \"frp\" ]; then\n"
+                    "    printf '%s\\n' '{\"ok\": true, \"active_adapter\": \"frp\", \"candidates\": [{\"adapter\": \"frp\", \"runtime_systemd_ok\": true, \"runtime_services\": [{\"service_name\": \"pilottunnel-link-001-frp-tcp-controller-frps.service\", \"active_state\": \"active\", \"sub_state\": \"running\"}, {\"service_name\": \"pilottunnel-link-001-frp-tcp-controller-frpc-visitor.service\", \"active_state\": \"active\", \"sub_state\": \"running\"}]}]}'\n"
+                    "  else\n"
+                    "    printf '%s\\n' '{\"ok\": true, \"active_adapter\": \"rathole\", \"candidates\": [{\"adapter\": \"rathole\", \"runtime_systemd_ok\": true, \"runtime_services\": [{\"service_name\": \"pilottunnel-link-001-rathole.service\", \"active_state\": \"active\", \"sub_state\": \"running\"}]}]}'\n"
+                    "  fi\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  printf '%s' '' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  if [ \"$active\" = \"rathole\" ]; then\n"
+                    "    printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": false, \"blockers\": [\"Probe/test port is unavailable\"], \"warnings\": []}]}'\n"
+                    "    exit 0\n"
+                    "  fi\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": true, \"blockers\": [], \"warnings\": []}, {\"adapter\": \"rathole\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter frp \"* ]]; then\n"
+                    "  printf '%s' 'frp' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"frp started\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter rathole \"* ]]; then\n"
+                    "  printf '%s' 'rathole' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"rathole restored\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]] && [[ \"$args\" == *\" --mode probe \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"probe failed\"}'\n"
+                    "  exit 1\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("probe failed", result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            stop_index = next(index for index, line in enumerate(commands) if "candidate stop" in line)
+            prepare_index = next(index for index, line in enumerate(commands) if "candidate prepare-all" in line)
+            self.assertLess(stop_index, prepare_index)
+            self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
+
+    def test_controller_test_runner_restores_previous_candidate_after_success(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"active_file='{self.to_bash_path(active_file)}'\n"
+                    "args=\" $* \"\n"
+                    "active=\"\"\n"
+                    "[ -f \"$active_file\" ] && active=\"$(cat \"$active_file\")\"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' \"{\\\"ok\\\": true, \\\"active_adapter\\\": \\\"$active\\\", \\\"candidates\\\": [{\\\"adapter\\\": \\\"$active\\\", \\\"runtime_systemd_ok\\\": true, \\\"runtime_services\\\": [{\\\"service_name\\\": \\\"pilottunnel-link-001-${active}.service\\\", \\\"active_state\\\": \\\"active\\\", \\\"sub_state\\\": \\\"running\\\"}]}]}\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  printf '%s' '' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": true, \"blockers\": [], \"warnings\": []}, {\"adapter\": \"rathole\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter frp \"* ]]; then\n"
+                    "  printf '%s' 'frp' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"frp started\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter rathole \"* ]]; then\n"
+                    "  printf '%s' 'rathole' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"rathole restored\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]] && [[ \"$args\" == *\" --mode probe \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"result\": {\"probe_status\": \"passed\"}, \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]] && [[ \"$args\" == *\" --mode real_service \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"result\": {\"real_service_status\": \"passed\"}, \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("candidate smoke-test" in line and "--mode probe" in line for line in commands))
+            self.assertTrue(any("candidate smoke-test" in line and "--mode real_service" in line for line in commands))
+            self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
 
     def test_public_install_does_not_require_role_or_basic_confirmation(self) -> None:
         bash_bin = self.find_bash()
