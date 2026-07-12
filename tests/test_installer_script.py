@@ -533,6 +533,69 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue((install_dir / "bin" / "pilottunnel-test").exists())
             self.assertTrue(os.access(install_dir / "bin" / "pilottunnel-test", os.X_OK))
 
+    def test_install_script_role_rerun_with_same_existing_role_is_idempotent(self) -> None:
+        with self.snapshot_repo() as repo_url, tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir)
+            for name in ("state", "work", "staging"):
+                (install_dir / name).mkdir(parents=True, exist_ok=True)
+            self.write_config_fixture(install_dir, role="worker", display_name="worker-node")
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                repo_url,
+                "--without-binaries",
+                "--no-menu",
+                "--role",
+                "worker",
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Node role is already initialized as 'worker'.", result.stdout)
+            self.assertTrue((install_dir / "bin" / "pilottunnel-test").exists())
+            self.assertTrue(os.access(install_dir / "bin" / "pilottunnel-test", os.X_OK))
+            config_data = json.loads((install_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["node"]["normalized_role"], "worker")
+
+    def test_install_script_role_rerun_with_different_existing_role_fails_without_overwrite(self) -> None:
+        with self.snapshot_repo() as repo_url, tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir)
+            for name in ("state", "work", "staging"):
+                (install_dir / name).mkdir(parents=True, exist_ok=True)
+            self.write_config_fixture(install_dir, role="worker", display_name="worker-node")
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                repo_url,
+                "--without-binaries",
+                "--no-menu",
+                "--role",
+                "controller",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Node is already initialized as 'worker'", result.stderr)
+            config_data = json.loads((install_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["node"]["normalized_role"], "worker")
+
+    def test_install_script_role_initializes_when_uninitialized(self) -> None:
+        with self.snapshot_repo() as repo_url, tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir)
+            result = self.run_installer(
+                "--install-dir",
+                self.to_bash_path(install_dir),
+                "--repo-url",
+                repo_url,
+                "--without-binaries",
+                "--no-menu",
+                "--role",
+                "worker",
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("Node role initialized: worker", result.stdout)
+            config_data = json.loads((install_dir / "state" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config_data["node"]["normalized_role"], "worker")
+            self.assertTrue((install_dir / "bin" / "pilottunnel-test").exists())
+
     def test_install_script_test_mode_installs_and_invokes_candidate_runner(self) -> None:
         with self.snapshot_repo() as repo_url, tempfile.TemporaryDirectory() as temp_dir:
             install_dir = Path(temp_dir) / "install"

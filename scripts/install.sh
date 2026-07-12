@@ -828,6 +828,23 @@ PY
 }
 
 configured_role() {
+  if run_pt_capture node status; then
+    "$PYTHON_BIN" - "$LAST_STDOUT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError, TypeError):
+    raise SystemExit(0)
+if payload.get("initialized"):
+    print(payload.get("normalized_role") or payload.get("node_role") or "")
+PY
+    cleanup_capture
+    return 0
+  fi
+  cleanup_capture
   [ -f "$CONFIG_FILE" ] || return 0
   "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
 import json
@@ -838,8 +855,9 @@ try:
 except (OSError, ValueError):
     raise SystemExit(0)
 node = payload.get("node") or {}
-if node.get("initialized"):
-    print(node.get("normalized_role") or node.get("node_role") or "")
+role = node.get("normalized_role") or node.get("node_role") or ""
+if role:
+    print(role)
 PY
 }
 
