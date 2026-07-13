@@ -1204,6 +1204,42 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue(any("candidate start --adapter frp --link link-001 --json" in line for line in commands))
             self.assertFalse(any("candidate smoke-test" in line for line in commands))
 
+    def test_controller_start_only_is_rejected_before_candidate_changes(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"candidate command should not run\"}'\n"
+                    "  exit 1\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--start-only",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--start-only is only supported on the Worker side", result.stderr)
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("node status" in line for line in commands))
+            self.assertFalse(any(" candidate " in line for line in commands))
+
     def test_controller_runner_restores_rathole_when_frp_start_fails(self) -> None:
         with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
             fake_bin = Path(temp_dir) / "fake-bin"

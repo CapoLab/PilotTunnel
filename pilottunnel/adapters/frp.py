@@ -52,6 +52,7 @@ class FrpAdapter(DryRunAdapter):
         if context.role == "controller" and runtime_role != "frpc-visitor":
             return "\n".join(
                 [
+                    'bindAddr = "0.0.0.0"',
                     f"bindPort = {transport_port}",
                     "transport.tcpMux = false",
                     "auth.method = \"token\"",

@@ -1250,10 +1250,19 @@ class CliWorkflowTests(unittest.TestCase):
         frp = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "frp")
         controller_services = frp["topology"]["sides"]["controller"]["services"]
         self.assertEqual(len(controller_services), 2)
+        frps = next(item for item in controller_services if "frps" in item["service_name"])
+        frps_unit = Path(frps["unit_path"]).read_text(encoding="utf-8")
+        self.assertIn("frp-frps.toml", frps_unit)
+        frps_config = next(Path(frp["controller_runtime_dir"]).rglob("frp-frps.toml")).read_text(encoding="utf-8")
+        self.assertIn('bindAddr = "0.0.0.0"', frps_config)
+        self.assertIn(f"bindPort = {self.control_port}", frps_config)
         visitor = next(item for item in controller_services if "frpc-visitor" in item["service_name"])
         visitor_unit = Path(visitor["unit_path"]).read_text(encoding="utf-8")
         self.assertIn("frpc-visitor", visitor_unit)
+        self.assertIn("frp-frpc-visitor.toml", visitor_unit)
         visitor_config = Path(frp["controller_runtime_config_path"]).read_text(encoding="utf-8")
+        self.assertIn('serverAddr = "127.0.0.1"', visitor_config)
+        self.assertIn(f"serverPort = {self.control_port}", visitor_config)
         self.assertIn('bindAddr = "127.0.0.1"', visitor_config)
         self.assertIn(f"bindPort = {frp['probe']['port']}", visitor_config)
         self.assertIn('type = "stcp"', visitor_config)
@@ -1398,6 +1407,39 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertLess(frps_start, transport_ready)
         self.assertLess(transport_ready, visitor_start)
         self.assertLess(visitor_start, probe_ready)
+
+    def test_frp_controller_start_does_not_start_visitor_when_frps_listener_is_refused(self) -> None:
+        self._create_controller_link()
+        installed_services: list[str] = []
+        start_calls: list[str] = []
+        stop_calls: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            installed_services[:] = [item["service_name"] for item in services]
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"], "service_dir": item["service_dir"], "runtime_dir": item["runtime_dir"]} for item in services]}
+
+        def fake_status(*, service_name=None, **kwargs):
+            services = [{"service_name": service_name, "active_state": "active", "sub_state": "running"}] if service_name in installed_services else []
+            return {"ok": True, "services": services, "warnings": [], "errors": []}
+
+        def fake_start(*, service_name=None, **kwargs):
+            start_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        def fake_stop(*, service_name=None, **kwargs):
+            stop_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop), patch("pilottunnel.candidates._local_tcp_ready", return_value=False), patch("pilottunnel.candidates.SERVICE_READINESS_TIMEOUT_SECONDS", 0):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+        self.assertEqual(code, 1, msg=output)
+        payload = json.loads(output)
+        self.assertIn("frps transport listener", payload["message"])
+        self.assertEqual(len(start_calls), 1)
+        self.assertIn("frps", start_calls[0])
+        self.assertFalse(any("frpc-visitor" in item for item in start_calls))
+        self.assertEqual(stop_calls, start_calls)
 
     def test_frp_worker_start_rolls_back_when_frpc_start_fails(self) -> None:
         self._create_worker_link_from_pairing_code()

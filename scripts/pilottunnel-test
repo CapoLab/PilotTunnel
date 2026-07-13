@@ -874,6 +874,9 @@ run_worker_flow() {
 }
 
 run_controller_flow() {
+  if [ "$START_ONLY" -eq 1 ]; then
+    fail "--start-only is only supported on the Worker side. Run the controller without --start-only so it can perform smoke tests and restore locally."
+  fi
   probe_result="skipped"
   real_result="skipped"
   runtime_config="unknown"
