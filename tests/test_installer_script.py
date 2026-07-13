@@ -204,6 +204,22 @@ class InstallerScriptTests(unittest.TestCase):
         payload["checksum"] = hashlib.sha256(canonical).hexdigest()[:16]
         return base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
 
+    @staticmethod
+    def json_line_payloads(output: str) -> list[dict[str, object]]:
+        payloads: list[dict[str, object]] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            payloads.append(json.loads(line))
+        return payloads
+
+    def final_batch_report(self, output: str) -> dict[str, object]:
+        for payload in reversed(self.json_line_payloads(output)):
+            if payload.get("schema") == "pt-batch-report-v1":
+                return payload
+        self.fail(f"batch report was not present in output: {output}")
+
     def create_controller_pairing_code(self, base_dir: Path) -> str:
         init_result = self.run_base_cli(base_dir, "init", "--role", "controller")
         self.assertEqual(init_result.returncode, 0, msg=init_result.stderr or init_result.stdout)
@@ -875,7 +891,15 @@ class InstallerScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            payload = json.loads(result.stdout)
+            payloads = self.json_line_payloads(result.stdout)
+            ready = next(item for item in payloads if item.get("event") == "batch_worker_ready")
+            payload = self.final_batch_report(result.stdout)
+            self.assertEqual(ready["role"], "worker")
+            self.assertTrue(ready["batch_token"])
+            self.assertIn("coordinated_start_utc", ready)
+            self.assertEqual(ready["adapters"], ["frp", "bore"])
+            self.assertEqual(ready["slot_seconds"], 0)
+            self.assertTrue(str(ready["report_path"]).replace("\\", "/").endswith(f"/state/benchmark-batches/{payload['run_id']}-worker-report.json"))
             self.assertEqual(payload["role"], "worker")
             self.assertTrue(payload["worker_batch_token"])
             self.assertNotIn(secret_value, result.stdout)
@@ -887,6 +911,141 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue(any("candidate stop --link link-001 --json" in line for line in commands))
             self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
             self.assertIn("enable --now", systemctl_log.read_text(encoding="utf-8"))
+
+    def test_worker_batch_human_output_prints_token_before_schedule_wait(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    "args=\" $* \"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"worker\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"active_adapter\": \"rathole\", \"candidates\": [{\"adapter\": \"rathole\", \"runtime_systemd_ok\": true, \"runtime_services\": [{\"service_name\": \"pilottunnel-link-001-rathole.service\", \"active_state\": \"active\", \"sub_state\": \"running\"}]}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"bore\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": false, \"missing_requirements\": [\"Bore v0.6 cannot safely render a separate private loopback probe listener\"]}, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--batch-worker",
+                "--adapters",
+                "bore",
+                "--lead-seconds",
+                "1",
+                "--slot-seconds",
+                "0",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(Path(temp_dir) / "systemd"),
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6)
+            self.assertEqual(lines[0], "PilotTunnel Worker batch ready")
+            self.assertIn("Batch token:", result.stdout)
+            self.assertIn("Coordinated start UTC:", result.stdout)
+            self.assertIn("Adapter order: bore", result.stdout)
+            self.assertIn("Report:", result.stdout)
+            self.assertIn("Controller command:", result.stdout)
+            self.assertIn("Worker slot 0 for bore starts", result.stdout)
+            self.assertIn("bore: skipped_protocol_limited", result.stdout)
+
+    def test_worker_batch_records_all_adapter_statuses(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            systemd_dir = Path(temp_dir) / "systemd"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"active_file='{self.to_bash_path(active_file)}'\n"
+                    "args=\" $* \"\n"
+                    "active=\"\"\n"
+                    "[ -f \"$active_file\" ] && active=\"$(cat \"$active_file\")\"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"worker\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' \"{\\\"ok\\\": true, \\\"active_adapter\\\": \\\"$active\\\", \\\"candidates\\\": [{\\\"adapter\\\": \\\"$active\\\", \\\"runtime_systemd_ok\\\": true, \\\"runtime_services\\\": [{\\\"service_name\\\": \\\"pilottunnel-link-001-${active}.service\\\", \\\"active_state\\\": \\\"active\\\", \\\"sub_state\\\": \\\"running\\\"}]}]}\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  printf '%s' '' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"rathole\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": true, \"missing_requirements\": []}}, {\"adapter\": \"frp\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": true, \"missing_requirements\": []}}, {\"adapter\": \"backhaul\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": true, \"missing_requirements\": []}}, {\"adapter\": \"gost\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": true, \"missing_requirements\": []}}, {\"adapter\": \"chisel\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": true, \"missing_requirements\": []}}, {\"adapter\": \"bore\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": false, \"missing_requirements\": [\"Bore v0.6 cannot safely render a separate private loopback probe listener\"]}}, {\"adapter\": \"realm\", \"runnable\": true, \"benchmark\": {\"benchmark_capable\": false, \"missing_requirements\": [\"Adapter is a direct Layer-4 baseline\"]}}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter rathole \"* ]]; then\n"
+                    "  printf '%s' 'rathole' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"synthetic start failure\"}'\n"
+                    "  exit 1\n"
+                    "fi\n"
+                ),
+            )
+            self.write_fake_systemctl(fake_bin, body="exit 0")
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--batch-worker",
+                "--adapters",
+                "rathole,frp,backhaul,gost,chisel,realm,bore",
+                "--lead-seconds",
+                "0",
+                "--slot-seconds",
+                "0",
+                "--json",
+                extra_env={
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PILOTTUNNEL_TEST_SYSTEMD_DIR": self.to_bash_path(systemd_dir),
+                    "PILOTTUNNEL_TEST_SKIP_SLEEP": "1",
+                },
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            payload = self.final_batch_report(result.stdout)
+            statuses = {item["adapter"]: item["status"] for item in payload["results"]}
+            self.assertEqual(statuses["rathole"], "worker_window_open")
+            for adapter in ("frp", "backhaul", "gost", "chisel"):
+                self.assertEqual(statuses[adapter], "failed")
+            self.assertEqual(statuses["realm"], "baseline_only")
+            self.assertEqual(statuses["bore"], "skipped_protocol_limited")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            for adapter in ("rathole", "frp", "backhaul", "gost", "chisel"):
+                self.assertTrue(any(f"candidate start --adapter {adapter}" in line for line in commands), adapter)
+            self.assertFalse(any("candidate start --adapter bore" in line for line in commands))
+            self.assertFalse(any("candidate start --adapter realm" in line for line in commands))
 
     def test_controller_batch_runs_smoke_ranks_and_restores_baseline(self) -> None:
         with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
@@ -955,7 +1114,7 @@ class InstallerScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            payload = json.loads(result.stdout)
+            payload = self.final_batch_report(result.stdout)
             self.assertEqual(payload["role"], "controller")
             self.assertEqual(payload["recommendation"], "frp")
             self.assertEqual(payload["ranking"][0]["adapter"], "frp")
@@ -1032,7 +1191,7 @@ class InstallerScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            payload = json.loads(result.stdout)
+            payload = self.final_batch_report(result.stdout)
             statuses = {item["adapter"]: item["status"] for item in payload["results"]}
             for adapter in ("rathole", "frp", "backhaul", "gost", "chisel"):
                 self.assertEqual(statuses[adapter], "passed")

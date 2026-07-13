@@ -1049,6 +1049,55 @@ if remaining:
 PY
 }
 
+epoch_to_utc() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import datetime
+import sys
+print(datetime.datetime.fromtimestamp(int(float(sys.argv[1])), tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+emit_batch_progress() {
+  event="$1"
+  adapter="${2:-}"
+  message="${3:-}"
+  if [ "$JSON_OUTPUT" -eq 1 ]; then
+    "$PYTHON_BIN" - "$event" "$adapter" "$message" <<'PY'
+import datetime
+import json
+import sys
+print(json.dumps({
+    "event": sys.argv[1],
+    "adapter": sys.argv[2],
+    "message": sys.argv[3],
+    "time_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}, sort_keys=True), flush=True)
+PY
+  else
+    printf '%s %s\n' "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")]" "$message"
+  fi
+}
+
+wait_until_epoch_with_progress() {
+  target="$1"
+  label="$2"
+  adapter="${3:-}"
+  if [ "${PILOTTUNNEL_TEST_SKIP_SLEEP:-0}" = "1" ]; then
+    return 0
+  fi
+  while :; do
+    now="$(date +%s)"
+    remaining="$(( target - now ))"
+    [ "$remaining" -gt 0 ] || break
+    emit_batch_progress "batch_waiting" "$adapter" "$label in ${remaining}s"
+    if [ "$remaining" -gt 10 ]; then
+      sleep 10
+    else
+      sleep "$remaining"
+    fi
+  done
+}
+
 batch_report_path() {
   if [ -n "$BATCH_REPORT_FILE" ]; then
     printf '%s\n' "$BATCH_REPORT_FILE"
@@ -1141,7 +1190,12 @@ PY
 emit_batch_report() {
   report_path="$1"
   if [ "$JSON_OUTPUT" -eq 1 ]; then
-    cat "$report_path"
+    "$PYTHON_BIN" - "$report_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+print(json.dumps(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")), sort_keys=True), flush=True)
+PY
     return
   fi
   "$PYTHON_BIN" - "$report_path" <<'PY'
@@ -1162,6 +1216,62 @@ recommendation = payload.get("recommendation") or "none"
 print(f"recommendation: {recommendation}")
 print(f"baseline_restored: {str(payload.get('baseline_restored')).lower()}")
 PY
+}
+
+emit_worker_batch_start_notice() {
+  report_path="$1"
+  "$PYTHON_BIN" - "$BATCH_PLAN_FILE" "$report_path" "$BATCH_TOKEN" "$BASE_DIR" "$ATTEMPTS" "$TIMEOUT_SECONDS" "$JSON_OUTPUT" <<'PY'
+import datetime
+import json
+import sys
+from pathlib import Path
+
+plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+report_path = sys.argv[2]
+token = sys.argv[3]
+base_dir = sys.argv[4]
+attempts = sys.argv[5]
+timeout = sys.argv[6]
+json_output = sys.argv[7] == "1"
+first_slot = datetime.datetime.fromtimestamp(plan["first_slot_epoch"], tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+adapters = plan.get("adapters") or []
+controller_command = (
+    f"pilottunnel-test --base-dir {base_dir} --link {plan['link']} "
+    f"--batch-controller --batch-token {token} --attempts {attempts} --timeout {timeout}"
+)
+payload = {
+    "event": "batch_worker_ready",
+    "ok": True,
+    "role": "worker",
+    "link": plan["link"],
+    "run_id": plan["run_id"],
+    "batch_token": token,
+    "coordinated_start_utc": first_slot,
+    "adapters": adapters,
+    "slot_seconds": plan["slot_seconds"],
+    "lead_seconds": plan["lead_seconds"],
+    "report_path": report_path,
+    "controller_command": controller_command,
+}
+if json_output:
+    print(json.dumps(payload, sort_keys=True), flush=True)
+else:
+    print("PilotTunnel Worker batch ready", flush=True)
+    print("Batch token:", flush=True)
+    print(f"  {token}", flush=True)
+    print(f"Coordinated start UTC: {first_slot}", flush=True)
+    print(f"Adapter order: {', '.join(adapters)}", flush=True)
+    print(f"Slot seconds: {plan['slot_seconds']}", flush=True)
+    print(f"Report: {report_path}", flush=True)
+    print("Controller command:", flush=True)
+    print(f"  {controller_command}", flush=True)
+PY
+}
+
+batch_abort_handler() {
+  emit_batch_progress "batch_interrupted" "${ADAPTER_NAME:-}" "Batch interrupted; restoring local baseline if needed"
+  restore_previous_candidate >/dev/null 2>&1 || true
+  exit 130
 }
 
 batch_record_prepare_skip_if_needed() {
@@ -1330,9 +1440,11 @@ PY
 import json, sys
 print(json.loads(sys.argv[1])["plan_file"])
 PY
-)"
+  )"
   report_path="$(batch_report_path worker-report)"
   batch_init_report "$report_path" "worker" "$BATCH_TOKEN"
+  emit_worker_batch_start_notice "$report_path"
+  trap batch_abort_handler INT TERM
   slot_count="$(batch_slot_count)"
   index=0
   while [ "$index" -lt "$slot_count" ]; do
@@ -1341,7 +1453,9 @@ PY
     slot_deadline="$(batch_slot_field "$index" deadline_epoch)"
     RESTORE_AFTER_SECONDS="$(( slot_deadline - $(date +%s) ))"
     [ "$RESTORE_AFTER_SECONDS" -ge 0 ] || RESTORE_AFTER_SECONDS=0
-    sleep_until_epoch "$slot_start"
+    emit_batch_progress "batch_slot_scheduled" "$ADAPTER_NAME" "Worker slot ${index} for ${ADAPTER_NAME} starts at $(epoch_to_utc "$slot_start") and ends at $(epoch_to_utc "$slot_deadline")"
+    wait_until_epoch_with_progress "$slot_start" "Worker slot ${ADAPTER_NAME} starts" "$ADAPTER_NAME"
+    emit_batch_progress "batch_slot_starting" "$ADAPTER_NAME" "Worker starting slot for ${ADAPTER_NAME}"
     TARGET_STARTED=0
     PREVIOUS_ADAPTER=""
     if ! begin_benchmark_transaction; then
@@ -1354,6 +1468,7 @@ PY
     if ! prepare_all_with_worker_retry; then
       if batch_record_prepare_skip_if_needed "$report_path"; then
         cleanup_capture
+        emit_batch_progress "batch_slot_skipped" "$ADAPTER_NAME" "Worker skipped ${ADAPTER_NAME}; it is not benchmark-capable or runnable"
       else
         message="$(capture_message)"
         fail_with_restore_context "${message:-candidate prepare-all failed on worker batch}"
@@ -1365,6 +1480,7 @@ PY
     if batch_record_prepare_skip_if_needed "$report_path"; then
       cleanup_capture
       restore_previous_candidate || true
+      emit_batch_progress "batch_slot_skipped" "$ADAPTER_NAME" "Worker skipped ${ADAPTER_NAME}; it is not benchmark-capable or runnable"
       index=$((index + 1))
       continue
     fi
@@ -1375,6 +1491,7 @@ PY
       cleanup_capture
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-candidate start failed on worker batch}" "skipped" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Worker failed to start ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
@@ -1382,16 +1499,20 @@ PY
     if ! write_restore_transaction || ! schedule_restore_deadline; then
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "failed to schedule local restore deadline" "skipped" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Worker failed to schedule restore for ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
     cleanup_capture
     batch_append_result "$report_path" "$ADAPTER_NAME" "worker_window_open" "true" "worker target available until slot deadline" "skipped" "skipped"
-    sleep_until_epoch "$slot_deadline"
+    emit_batch_progress "batch_worker_window_open" "$ADAPTER_NAME" "Worker ${ADAPTER_NAME} is available until $(epoch_to_utc "$slot_deadline")"
+    wait_until_epoch_with_progress "$slot_deadline" "Worker slot ${ADAPTER_NAME} restore deadline" "$ADAPTER_NAME"
     restore_pending_transaction >/dev/null || fail "Worker batch restore failed for adapter ${ADAPTER_NAME}"
     batch_mark_restored "$report_path"
+    emit_batch_progress "batch_slot_restored" "$ADAPTER_NAME" "Worker restored local baseline after ${ADAPTER_NAME}"
     index=$((index + 1))
   done
+  trap - INT TERM
   emit_batch_report "$report_path"
 }
 
@@ -1407,18 +1528,22 @@ PY
 )"
   report_path="$(batch_report_path controller-report)"
   batch_init_report "$report_path" "controller" ""
+  trap batch_abort_handler INT TERM
   slot_count="$(batch_slot_count)"
   index=0
   while [ "$index" -lt "$slot_count" ]; do
     ADAPTER_NAME="$(batch_slot_field "$index" adapter)"
     slot_start="$(batch_slot_field "$index" start_epoch)"
-    sleep_until_epoch "$slot_start"
+    emit_batch_progress "batch_slot_scheduled" "$ADAPTER_NAME" "Controller slot ${index} for ${ADAPTER_NAME} starts at $(epoch_to_utc "$slot_start")"
+    wait_until_epoch_with_progress "$slot_start" "Controller slot ${ADAPTER_NAME} starts" "$ADAPTER_NAME"
+    emit_batch_progress "batch_slot_starting" "$ADAPTER_NAME" "Controller starting slot for ${ADAPTER_NAME}"
     TARGET_STARTED=0
     PREVIOUS_ADAPTER=""
     if ! begin_benchmark_transaction; then
       message="$(capture_message)"
       cleanup_capture
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-failed to snapshot/stop local baseline}" "skipped" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller failed to snapshot/stop baseline for ${ADAPTER_NAME}"
       index=$((index + 1))
       continue
     fi
@@ -1428,12 +1553,14 @@ PY
       cleanup_capture
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-candidate prepare-all failed on controller batch}" "skipped" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller prepare failed for ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
     if batch_record_prepare_skip_if_needed "$report_path"; then
       cleanup_capture
       restore_previous_candidate || true
+      emit_batch_progress "batch_slot_skipped" "$ADAPTER_NAME" "Controller skipped ${ADAPTER_NAME}; it is not benchmark-capable or runnable"
       index=$((index + 1))
       continue
     fi
@@ -1443,6 +1570,7 @@ PY
       cleanup_capture
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-candidate start failed on controller batch}" "skipped" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller start failed for ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
@@ -1451,6 +1579,7 @@ PY
       cleanup_capture
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "local services were not active before smoke tests" "skipped" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller local services were not active for ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
@@ -1461,6 +1590,7 @@ PY
       cleanup_capture
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-probe smoke test failed}" "failed" "skipped"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller probe smoke failed for ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
@@ -1472,6 +1602,7 @@ PY
       cleanup_capture
       restore_previous_candidate || true
       batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-real service smoke test failed}" "$probe_result" "failed"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller real-service smoke failed for ${ADAPTER_NAME}; local baseline restore attempted"
       index=$((index + 1))
       continue
     fi
@@ -1480,13 +1611,16 @@ PY
     if restore_previous_candidate; then
       batch_append_result "$report_path" "$ADAPTER_NAME" "passed" "true" "probe and real-service smoke tests passed; baseline restored" "$probe_result" "$real_result"
       batch_mark_restored "$report_path"
+      emit_batch_progress "batch_slot_passed" "$ADAPTER_NAME" "Controller passed ${ADAPTER_NAME} and restored local baseline"
     else
       message="$(capture_message)"
       cleanup_capture
       batch_append_result "$report_path" "$ADAPTER_NAME" "restore_failed" "false" "${message:-smoke passed but baseline restore failed}" "$probe_result" "$real_result"
+      emit_batch_progress "batch_slot_failed" "$ADAPTER_NAME" "Controller smoke passed for ${ADAPTER_NAME}, but local baseline restore failed"
     fi
     index=$((index + 1))
   done
+  trap - INT TERM
   batch_mark_restored "$report_path"
   emit_batch_report "$report_path"
 }
