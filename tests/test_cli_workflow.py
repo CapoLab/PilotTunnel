@@ -6,6 +6,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import tomllib
 import unittest
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
@@ -1268,6 +1269,52 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertIn('type = "stcp"', visitor_config)
         self.assertNotIn('bindAddr = "0.0.0.0"', visitor_config)
 
+    def test_frp_configs_share_token_auth_and_transport_handshake(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        frp = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "frp")
+        controller_runtime_dir = Path(frp["controller_runtime_dir"])
+        worker_runtime_dir = Path(frp["worker_runtime_dir"])
+        frps = tomllib.loads(next(controller_runtime_dir.rglob("frp-frps.toml")).read_text(encoding="utf-8"))
+        visitor = tomllib.loads(next(controller_runtime_dir.rglob("frp-frpc-visitor.toml")).read_text(encoding="utf-8"))
+        worker = tomllib.loads(next(worker_runtime_dir.rglob("frp-frpc.toml")).read_text(encoding="utf-8"))
+        tokens = {frps["auth"]["token"], visitor["auth"]["token"], worker["auth"]["token"]}
+        self.assertEqual(len(tokens), 1)
+        for rendered in (frps, visitor, worker):
+            self.assertEqual(rendered["auth"]["method"], "token")
+            self.assertFalse(rendered["transport"]["tcpMux"])
+        token = tokens.pop()
+        self.assertEqual(worker["proxies"][1]["secretKey"], token)
+        self.assertEqual(visitor["visitors"][0]["secretKey"], token)
+        self.assertEqual(visitor["visitors"][0]["bindAddr"], "127.0.0.1")
+        self.assertEqual(visitor["serverAddr"], "127.0.0.1")
+
+    def test_frp_auth_material_is_link_specific_and_not_in_command_summary(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            first_code, first_output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(first_code, 0, msg=first_output)
+        first_frp = next(item for item in json.loads(first_output)["candidates"] if item["adapter"] == "frp")
+        first_token = tomllib.loads(Path(first_frp["controller_runtime_config_path"]).read_text(encoding="utf-8"))["auth"]["token"]
+        first_summary = json.dumps(first_frp["topology"], sort_keys=True)
+        self.assertNotIn(first_token, first_summary)
+
+        base = json.loads(self.config.read_text(encoding="utf-8"))
+        link = json.loads(json.dumps(base["links"][0]))
+        link["id"] = "ptlink-second"
+        link["label"] = "link-002"
+        link["pairing_secret"] = "second-link-secret"
+        base["links"].append(link)
+        self.config.write_text(json.dumps(base), encoding="utf-8")
+        with self._prepare_candidate_binaries():
+            second_code, second_output = self.run_cli("candidate", "prepare-all", "--link", "link-002", "--json")
+        self.assertEqual(second_code, 0, msg=second_output)
+        second_frp = next(item for item in json.loads(second_output)["candidates"] if item["adapter"] == "frp")
+        second_token = tomllib.loads(Path(second_frp["controller_runtime_config_path"]).read_text(encoding="utf-8"))["auth"]["token"]
+        self.assertNotEqual(first_token, second_token)
+
     def test_frp_worker_config_contains_main_tcp_and_private_stcp_probe(self) -> None:
         self._create_worker_link_from_pairing_code()
         with self._prepare_candidate_binaries():
@@ -1441,6 +1488,43 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertFalse(any("frpc-visitor" in item for item in start_calls))
         self.assertEqual(stop_calls, start_calls)
 
+    def test_frp_controller_start_rejects_visitor_handshake_without_probe_listener(self) -> None:
+        self._create_controller_link()
+        installed_services: list[str] = []
+        start_calls: list[str] = []
+        stop_calls: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            installed_services[:] = [item["service_name"] for item in services]
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"], "service_dir": item["service_dir"], "runtime_dir": item["runtime_dir"]} for item in services]}
+
+        def fake_status(*, service_name=None, **kwargs):
+            services = [{"service_name": service_name, "active_state": "active", "sub_state": "running"}] if service_name in installed_services else []
+            return {"ok": True, "services": services, "warnings": [], "errors": []}
+
+        def fake_start(*, service_name=None, **kwargs):
+            start_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        def fake_stop(*, service_name=None, **kwargs):
+            stop_calls.append(service_name)
+            return {"ok": True, "service_name": service_name}
+
+        def fake_tcp_ready(host: str, port: int):
+            return port == self.control_port
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop), patch("pilottunnel.candidates._local_tcp_ready", side_effect=fake_tcp_ready), patch("pilottunnel.candidates.SERVICE_READINESS_TIMEOUT_SECONDS", 0):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+        self.assertEqual(code, 1, msg=output)
+        payload = json.loads(output)
+        self.assertIn("frpc visitor private probe listener", payload["message"])
+        self.assertEqual(len(start_calls), 2)
+        self.assertIn("frps", start_calls[0])
+        self.assertIn("frpc-visitor", start_calls[1])
+        self.assertEqual(stop_calls, list(reversed(start_calls)))
+        self.assertFalse(payload["services_started"])
+
     def test_frp_worker_start_rolls_back_when_frpc_start_fails(self) -> None:
         self._create_worker_link_from_pairing_code()
         start_calls: list[str] = []
@@ -1505,6 +1589,55 @@ class CliWorkflowTests(unittest.TestCase):
         for service_name in start_calls + stop_calls:
             self.assertNotIn("frps", service_name)
             self.assertNotIn("frpc-visitor", service_name)
+
+    def test_backhaul_gost_and_chisel_render_private_probe_paths(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        candidates_by_adapter = {item["adapter"]: item for item in payload["candidates"]}
+
+        backhaul = candidates_by_adapter["backhaul"]
+        backhaul_controller = Path(backhaul["controller_runtime_config_path"]).read_text(encoding="utf-8")
+        self.assertIn(f'"{self.main_port}=127.0.0.1:{self.main_port}"', backhaul_controller)
+        self.assertIn(f'"127.0.0.1:{DEFAULT_PROBE_PORT}=127.0.0.1:{DEFAULT_PROBE_PORT}"', backhaul_controller)
+        self.assertTrue(backhaul["benchmark"]["benchmark_capable"])
+        self.assertIn(DEFAULT_PROBE_PORT, backhaul["controller_owned_ports"])
+        self.assertIn(f"127.0.0.1:{DEFAULT_PROBE_PORT}", backhaul["topology"]["sides"]["controller"]["listens_on"])
+        backhaul_readiness = backhaul["topology"]["sides"]["controller"]["services"][0]["readiness"]
+        self.assertTrue(any(item["label"] == "backhaul private probe listener" for item in backhaul_readiness))
+
+        gost = candidates_by_adapter["gost"]
+        gost_controller = Path(gost["controller_runtime_config_path"]).read_text(encoding="utf-8")
+        gost_worker = Path(gost["worker_runtime_config_path"]).read_text(encoding="utf-8")
+        self.assertIn("- name: probe-visitor", gost_controller)
+        self.assertIn(f"  addr: 127.0.0.1:{DEFAULT_PROBE_PORT}", gost_controller)
+        self.assertIn("- name: probe", gost_worker)
+        self.assertIn(f"      addr: 127.0.0.1:{DEFAULT_PROBE_PORT}", gost_worker)
+        self.assertIn("filter:", gost_worker)
+        self.assertTrue(gost["benchmark"]["benchmark_capable"])
+        gost_readiness = gost["topology"]["sides"]["controller"]["services"][0]["readiness"]
+        self.assertTrue(any(item["label"] == "gost private probe listener" for item in gost_readiness))
+
+        chisel = candidates_by_adapter["chisel"]
+        chisel_controller = Path(chisel["controller_runtime_config_path"]).read_text(encoding="utf-8")
+        chisel_worker = Path(chisel["worker_runtime_config_path"]).read_text(encoding="utf-8")
+        self.assertIn(f"probe_remote = 127.0.0.1:{DEFAULT_PROBE_PORT}", chisel_controller)
+        self.assertIn(f"probe_reverse = 127.0.0.1:{DEFAULT_PROBE_PORT} -> 127.0.0.1:{DEFAULT_PROBE_PORT}", chisel_worker)
+        self.assertIn(f"R:127.0.0.1:{DEFAULT_PROBE_PORT}:127.0.0.1:{DEFAULT_PROBE_PORT}", " ".join(chisel["worker_command_summary"]))
+        self.assertTrue(chisel["benchmark"]["benchmark_capable"])
+        chisel_readiness = chisel["topology"]["sides"]["controller"]["services"][0]["readiness"]
+        self.assertTrue(any(item["label"] == "chisel private probe listener" for item in chisel_readiness))
+
+    def test_bore_reports_protocol_limited_private_probe_blocker(self) -> None:
+        self._create_controller_link()
+        with self._prepare_candidate_binaries():
+            code, output = self.run_cli("candidate", "prepare-all", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        bore = next(item for item in json.loads(output)["candidates"] if item["adapter"] == "bore")
+        self.assertFalse(bore["benchmark"]["benchmark_capable"])
+        self.assertIn("Bore v0.6 cannot safely render a separate private loopback probe listener", " ".join(bore["benchmark"]["missing_requirements"]))
 
     def test_worker_probe_unit_install_replaces_legacy_execstart_with_simple_responder(self) -> None:
         self._create_worker_link_from_pairing_code()

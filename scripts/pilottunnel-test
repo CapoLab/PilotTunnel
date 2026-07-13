@@ -11,6 +11,13 @@ JSON_OUTPUT=0
 START_ONLY=0
 SMOKE_ONLY=0
 RESTORE_PENDING=0
+BATCH_WORKER=0
+BATCH_CONTROLLER=0
+BATCH_TOKEN=""
+BATCH_ADAPTERS=""
+BATCH_SLOT_SECONDS="${PILOTTUNNEL_TEST_BATCH_SLOT_SECONDS:-120}"
+BATCH_LEAD_SECONDS="${PILOTTUNNEL_TEST_BATCH_LEAD_SECONDS:-30}"
+BATCH_REPORT_FILE=""
 RESTORE_AFTER_SECONDS="${PILOTTUNNEL_TEST_RESTORE_SECONDS:-120}"
 PYTHON_BIN=""
 
@@ -23,6 +30,7 @@ LOCK_DIR="/opt/pilottunnel/state/locks"
 WORK_DIR="/opt/pilottunnel/work"
 STAGING_ROOT="/opt/pilottunnel/staging"
 RESTORE_TRANSACTION_FILE="/opt/pilottunnel/state/benchmark-restore.json"
+BATCH_DIR="/opt/pilottunnel/state/benchmark-batches"
 BIN_DIR="/opt/pilottunnel/bin"
 SYSTEMD_UNIT_DIR="${PILOTTUNNEL_TEST_SYSTEMD_DIR:-/etc/systemd/system}"
 RESTORE_SERVICE_NAME=""
@@ -33,6 +41,7 @@ LAST_STDERR=""
 LAST_STATUS=0
 PREVIOUS_ADAPTER=""
 TARGET_STARTED=0
+BATCH_PLAN_FILE=""
 
 cleanup_capture() {
   [ -n "${LAST_STDOUT:-}" ] && [ -f "$LAST_STDOUT" ] && rm -f "$LAST_STDOUT"
@@ -68,6 +77,15 @@ Options:
   --restore-pending  Restore an expired local benchmark transaction and exit.
   --restore-after <SEC>
                      Worker start-only restore deadline. Defaults to ${RESTORE_AFTER_SECONDS}.
+  --batch-worker     Worker-only batch mode. Starts one local temporary candidate per schedule slot.
+  --batch-controller Controller-only batch mode. Follows a worker batch token and runs smoke tests.
+  --batch-token <TOKEN>
+                     Non-secret worker batch schedule token for controller mode.
+  --adapters <LIST>  Comma-separated adapter order. Defaults to all Layer-4 candidates.
+  --slot-seconds <N> Batch slot/window length. Defaults to ${BATCH_SLOT_SECONDS}.
+  --lead-seconds <N> Initial worker lead time before first slot. Defaults to ${BATCH_LEAD_SECONDS}.
+  --batch-report <PATH>
+                     Optional path for the batch JSON report.
   --help             Show this help text.
 EOF
 }
@@ -95,6 +113,13 @@ parse_args() {
       --smoke-only) SMOKE_ONLY=1; shift ;;
       --restore-pending) RESTORE_PENDING=1; shift ;;
       --restore-after) [ $# -ge 2 ] || fail "--restore-after requires a value"; RESTORE_AFTER_SECONDS="$2"; shift 2 ;;
+      --batch-worker) BATCH_WORKER=1; shift ;;
+      --batch-controller) BATCH_CONTROLLER=1; shift ;;
+      --batch-token) [ $# -ge 2 ] || fail "--batch-token requires a value"; BATCH_TOKEN="$2"; shift 2 ;;
+      --adapters) [ $# -ge 2 ] || fail "--adapters requires a value"; BATCH_ADAPTERS="$2"; shift 2 ;;
+      --slot-seconds) [ $# -ge 2 ] || fail "--slot-seconds requires a value"; BATCH_SLOT_SECONDS="$2"; shift 2 ;;
+      --lead-seconds) [ $# -ge 2 ] || fail "--lead-seconds requires a value"; BATCH_LEAD_SECONDS="$2"; shift 2 ;;
+      --batch-report) [ $# -ge 2 ] || fail "--batch-report requires a value"; BATCH_REPORT_FILE="$2"; shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) fail "Unknown argument: $1" ;;
     esac
@@ -115,6 +140,7 @@ prepare_paths() {
   WORK_DIR="${BASE_DIR}/work"
   STAGING_ROOT="${BASE_DIR}/staging"
   RESTORE_TRANSACTION_FILE="${BASE_DIR}/state/benchmark-restore.json"
+  BATCH_DIR="${BASE_DIR}/state/benchmark-batches"
   BIN_DIR="${BASE_DIR}/bin"
   [ -d "$REPO_DIR/pilottunnel" ] || fail "PilotTunnel repository is not installed under $REPO_DIR"
 }
@@ -123,7 +149,26 @@ validate_args() {
   case "$RESTORE_AFTER_SECONDS" in
     ''|*[!0-9]*) fail "--restore-after must be a non-negative integer" ;;
   esac
+  case "$BATCH_SLOT_SECONDS" in
+    ''|*[!0-9]*) fail "--slot-seconds must be a non-negative integer" ;;
+  esac
+  case "$BATCH_LEAD_SECONDS" in
+    ''|*[!0-9]*) fail "--lead-seconds must be a non-negative integer" ;;
+  esac
+  if [ "$BATCH_WORKER" -eq 1 ] && [ "$BATCH_CONTROLLER" -eq 1 ]; then
+    fail "--batch-worker and --batch-controller cannot be used together"
+  fi
   if [ "$RESTORE_PENDING" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$BATCH_WORKER" -eq 1 ] || [ "$BATCH_CONTROLLER" -eq 1 ]; then
+    [ -n "$LINK_LABEL" ] || fail "--link is required"
+    if [ "$BATCH_CONTROLLER" -eq 1 ] && [ -z "$BATCH_TOKEN" ]; then
+      fail "--batch-controller requires --batch-token from the Worker"
+    fi
+    if [ "$START_ONLY" -eq 1 ] || [ "$SMOKE_ONLY" -eq 1 ]; then
+      fail "Batch mode cannot be combined with --start-only or --smoke-only"
+    fi
     return 0
   fi
   [ -n "$LINK_LABEL" ] || fail "--link is required"
@@ -400,17 +445,23 @@ begin_benchmark_transaction() {
 }
 
 restore_previous_candidate() {
-  if [ -z "$PREVIOUS_ADAPTER" ] || [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
+  if [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
     return 0
   fi
-  run_pt_capture candidate stop --link "$LINK_LABEL" --json || true
-  if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
-    stop_message="$(capture_message)"
-    if ! printf '%s' "$stop_message" | grep -Fq "No active candidate is running"; then
-      return 1
+  if [ "$TARGET_STARTED" -eq 1 ] || [ -n "$PREVIOUS_ADAPTER" ]; then
+    run_pt_capture candidate stop --link "$LINK_LABEL" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      stop_message="$(capture_message)"
+      if ! printf '%s' "$stop_message" | grep -Fq "No active candidate is running"; then
+        return 1
+      fi
     fi
+    cleanup_capture
   fi
-  cleanup_capture
+  if [ -z "$PREVIOUS_ADAPTER" ]; then
+    TARGET_STARTED=0
+    return 0
+  fi
   run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
   if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
     return 1
@@ -475,7 +526,7 @@ PY
 }
 
 write_restore_transaction() {
-  if [ -z "$PREVIOUS_ADAPTER" ] || [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
+  if [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
     return 0
   fi
   set_restore_unit_names "$LINK_LABEL"
@@ -588,7 +639,7 @@ PY
 }
 
 schedule_restore_deadline() {
-  if [ -z "$PREVIOUS_ADAPTER" ] || [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
+  if [ "$PREVIOUS_ADAPTER" = "$ADAPTER_NAME" ]; then
     return 0
   fi
   set_restore_unit_names "$LINK_LABEL"
@@ -677,7 +728,6 @@ restore_pending_transaction() {
   tx_target="$(restore_transaction_field target_adapter)" || fail "Pending benchmark restore transaction is malformed or unreadable"
   [ -n "$tx_link" ] || fail "Pending restore transaction is missing link"
   [ -n "$tx_target" ] || fail "Pending restore transaction is missing temporary candidate"
-  [ -n "$tx_previous" ] || fail "Pending restore transaction is missing previous candidate"
   current_adapter="$(active_candidate_adapter_for_link "$tx_link" || true)"
   cleanup_capture
   if [ "$current_adapter" = "$tx_previous" ]; then
@@ -693,6 +743,11 @@ restore_pending_transaction() {
       fail "${message:-failed to stop temporary candidate during pending restore}"
     fi
     cleanup_capture
+  fi
+  if [ -z "$tx_previous" ]; then
+    complete_restore_transaction || fail "Temporary candidate was stopped, but restore timer cleanup failed"
+    printf '%s\n' "PilotTunnel benchmark restore completed locally for link ${tx_link}: stopped ${tx_target}, restored no previous candidate."
+    return 0
   fi
   run_pt_capture candidate prepare-all --link "$tx_link" --json || true
   if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
@@ -830,9 +885,338 @@ print(json.dumps({
 PY
 }
 
+batch_adapter_csv() {
+  if [ -n "$BATCH_ADAPTERS" ]; then
+    printf '%s\n' "$BATCH_ADAPTERS"
+  else
+    printf '%s\n' "rathole,frp,backhaul,gost,chisel,realm,bore"
+  fi
+}
+
+batch_prepare_paths() {
+  mkdir -p "$BATCH_DIR" || fail "Unable to create batch report directory: $BATCH_DIR"
+}
+
+batch_create_plan() {
+  batch_prepare_paths
+  adapters="$(batch_adapter_csv)"
+  "$PYTHON_BIN" - "$LINK_LABEL" "$adapters" "$BATCH_LEAD_SECONDS" "$BATCH_SLOT_SECONDS" "$BATCH_DIR" "$BASE_DIR" <<'PY'
+import base64
+import hashlib
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+link = sys.argv[1]
+adapters = [item.strip() for item in sys.argv[2].split(",") if item.strip()]
+lead = int(sys.argv[3])
+slot = int(sys.argv[4])
+batch_dir = Path(sys.argv[5])
+base_dir = sys.argv[6]
+allowed = {"rathole", "frp", "backhaul", "gost", "chisel", "realm", "bore"}
+unknown = [item for item in adapters if item not in allowed]
+if unknown:
+    print(f"Unsupported batch adapter(s): {', '.join(unknown)}", file=sys.stderr)
+    raise SystemExit(2)
+now = int(time.time())
+seed = f"{base_dir}\0{link}\0{','.join(adapters)}\0{now}".encode("utf-8")
+run_id = "ptbatch-" + hashlib.sha256(seed).hexdigest()[:16]
+first_slot = now + lead
+slots = []
+for index, adapter in enumerate(adapters):
+    start = first_slot + (index * slot)
+    slots.append({
+        "index": index,
+        "adapter": adapter,
+        "start_epoch": start,
+        "deadline_epoch": start + slot,
+    })
+payload = {
+    "schema": "pt-batch-v1",
+    "run_id": run_id,
+    "link": link,
+    "adapters": adapters,
+    "lead_seconds": lead,
+    "slot_seconds": slot,
+    "issued_at_epoch": now,
+    "first_slot_epoch": first_slot,
+    "slots": slots,
+}
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+payload["checksum"] = hashlib.sha256(canonical).hexdigest()[:16]
+token = base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+path = batch_dir / f"{run_id}-plan.json"
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(json.dumps({"token": token, "run_id": run_id, "plan_file": str(path), "plan": payload}, sort_keys=True))
+PY
+}
+
+batch_decode_token() {
+  "$PYTHON_BIN" - "$BATCH_TOKEN" "$LINK_LABEL" "$BATCH_DIR" <<'PY'
+import base64
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+token = sys.argv[1]
+expected_link = sys.argv[2]
+batch_dir = Path(sys.argv[3])
+try:
+    raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    payload = json.loads(raw.decode("utf-8"))
+except Exception as exc:
+    print(f"Invalid batch token: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+if payload.get("schema") != "pt-batch-v1":
+    print("Unsupported batch token schema", file=sys.stderr)
+    raise SystemExit(2)
+checksum = payload.get("checksum")
+body = dict(payload)
+body.pop("checksum", None)
+canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+if hashlib.sha256(canonical).hexdigest()[:16] != checksum:
+    print("Batch token checksum mismatch", file=sys.stderr)
+    raise SystemExit(2)
+if payload.get("link") != expected_link:
+    print("Batch token link does not match --link", file=sys.stderr)
+    raise SystemExit(2)
+batch_dir.mkdir(parents=True, exist_ok=True)
+path = batch_dir / f"{payload['run_id']}-controller-plan.json"
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(json.dumps({"run_id": payload["run_id"], "plan_file": str(path), "plan": payload}, sort_keys=True))
+PY
+}
+
+batch_plan_field() {
+  "$PYTHON_BIN" - "$BATCH_PLAN_FILE" "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = payload
+for part in sys.argv[2].split("."):
+    if not part:
+        continue
+    if isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+        break
+if isinstance(value, (dict, list)):
+    print(json.dumps(value))
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+batch_slot_count() {
+  "$PYTHON_BIN" - "$BATCH_PLAN_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+print(len(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("slots") or []))
+PY
+}
+
+batch_slot_field() {
+  "$PYTHON_BIN" - "$BATCH_PLAN_FILE" "$1" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+slot = payload["slots"][int(sys.argv[2])]
+print(slot.get(sys.argv[3], ""))
+PY
+}
+
+sleep_until_epoch() {
+  target="$1"
+  if [ "${PILOTTUNNEL_TEST_SKIP_SLEEP:-0}" = "1" ]; then
+    return 0
+  fi
+  "$PYTHON_BIN" - "$target" <<'PY'
+import sys
+import time
+target = int(float(sys.argv[1]))
+remaining = max(0, target - int(time.time()))
+if remaining:
+    time.sleep(remaining)
+PY
+}
+
+batch_report_path() {
+  if [ -n "$BATCH_REPORT_FILE" ]; then
+    printf '%s\n' "$BATCH_REPORT_FILE"
+    return
+  fi
+  run_id="$(batch_plan_field run_id)"
+  suffix="${1:-report}"
+  printf '%s\n' "${BATCH_DIR}/${run_id}-${suffix}.json"
+}
+
+batch_init_report() {
+  report_path="$1"
+  role="$2"
+  token="${3:-}"
+  "$PYTHON_BIN" - "$BATCH_PLAN_FILE" "$report_path" "$role" "$token" <<'PY'
+import json
+import sys
+from pathlib import Path
+plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+report = {
+    "ok": True,
+    "schema": "pt-batch-report-v1",
+    "role": sys.argv[3],
+    "run_id": plan["run_id"],
+    "link": plan["link"],
+    "adapters": plan["adapters"],
+    "slot_seconds": plan["slot_seconds"],
+    "lead_seconds": plan["lead_seconds"],
+    "worker_batch_token": sys.argv[4] if sys.argv[3] == "worker" else "",
+    "results": [],
+    "ranking": [],
+    "recommendation": "",
+    "baseline_restored": False,
+    "secrets_redacted": True,
+}
+path = Path(sys.argv[2])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+batch_append_result() {
+  report_path="$1"
+  adapter="$2"
+  status="$3"
+  ok="$4"
+  message="$5"
+  probe="$6"
+  real="$7"
+  "$PYTHON_BIN" - "$report_path" "$adapter" "$status" "$ok" "$message" "$probe" "$real" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+ok = sys.argv[4].lower() == "true"
+result = {
+    "adapter": sys.argv[2],
+    "status": sys.argv[3],
+    "ok": ok,
+    "message": sys.argv[5],
+    "probe_result": sys.argv[6],
+    "real_result": sys.argv[7],
+    "completed_at_epoch": int(time.time()),
+}
+payload.setdefault("results", []).append(result)
+non_failure_statuses = {"skipped", "skipped_protocol_limited", "baseline_only"}
+payload["ok"] = all(item.get("ok") is True or item.get("status") in non_failure_statuses for item in payload["results"])
+passed = [item["adapter"] for item in payload["results"] if item.get("ok") is True and item.get("probe_result") == "passed" and item.get("real_result") == "passed"]
+payload["ranking"] = [{"rank": index + 1, "adapter": adapter} for index, adapter in enumerate(passed)]
+payload["recommendation"] = passed[0] if passed else ""
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+batch_mark_restored() {
+  report_path="$1"
+  "$PYTHON_BIN" - "$report_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload["baseline_restored"] = True
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+emit_batch_report() {
+  report_path="$1"
+  if [ "$JSON_OUTPUT" -eq 1 ]; then
+    cat "$report_path"
+    return
+  fi
+  "$PYTHON_BIN" - "$report_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(f"PilotTunnel batch {payload.get('run_id')}")
+print(f"role: {payload.get('role')}")
+print(f"link: {payload.get('link')}")
+if payload.get("worker_batch_token"):
+    print("controller command:")
+    print(f"  pilottunnel-test --link {payload.get('link')} --batch-controller --batch-token {payload.get('worker_batch_token')}")
+print("results:")
+for item in payload.get("results") or []:
+    print(f"  {item.get('adapter')}: {item.get('status')} - {item.get('message')}")
+recommendation = payload.get("recommendation") or "none"
+print(f"recommendation: {recommendation}")
+print(f"baseline_restored: {str(payload.get('baseline_restored')).lower()}")
+PY
+}
+
+batch_record_prepare_skip_if_needed() {
+  report_path="$1"
+  "$PYTHON_BIN" - "$LAST_STDOUT" "$ADAPTER_NAME" "$report_path" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8") or "{}")
+adapter = sys.argv[2]
+report_path = Path(sys.argv[3])
+candidate = None
+for item in payload.get("candidates") or []:
+    if item.get("adapter") == adapter:
+        candidate = item
+        break
+if not candidate:
+    message = "candidate was not present in prepare-all output"
+    skipped = True
+else:
+    benchmark = candidate.get("benchmark") or {}
+    blockers = list(candidate.get("blockers") or []) + list(benchmark.get("missing_requirements") or [])
+    skipped = candidate.get("runnable") is not True or benchmark.get("benchmark_capable") is not True
+    message = "; ".join(str(item) for item in blockers) or "candidate is not benchmark-capable"
+if not skipped:
+    raise SystemExit(1)
+status = "skipped"
+if "Bore v0.6" in message:
+    status = "skipped_protocol_limited"
+elif "direct Layer-4 baseline" in message:
+    status = "baseline_only"
+report = json.loads(report_path.read_text(encoding="utf-8"))
+report.setdefault("results", []).append({
+    "adapter": adapter,
+    "status": status,
+    "ok": False,
+    "message": message,
+    "probe_result": "skipped",
+    "real_result": "skipped",
+    "completed_at_epoch": int(time.time()),
+})
+non_failure_statuses = {"skipped", "skipped_protocol_limited", "baseline_only"}
+report["ok"] = all(item.get("ok") is True or item.get("status") in non_failure_statuses for item in report["results"])
+report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+raise SystemExit(0)
+PY
+}
+
 run_worker_flow() {
   if [ "$SMOKE_ONLY" -eq 1 ]; then
     fail "Worker role does not support --smoke-only. Use the controller side for smoke tests."
+  fi
+  if [ "$START_ONLY" -ne 1 ]; then
+    fail "Worker benchmark setup requires --start-only. Run full smoke tests from the Controller side."
   fi
   if ! begin_benchmark_transaction; then
     message="$(capture_message)"
@@ -932,6 +1316,181 @@ run_controller_flow() {
   emit_summary "$(controller_summary "$runtime_config" "$probe_result" "$real_result" "controller flow complete")"
 }
 
+run_worker_batch_flow() {
+  if [ "$START_ONLY" -eq 1 ] || [ "$SMOKE_ONLY" -eq 1 ]; then
+    fail "Worker batch mode cannot be combined with --start-only or --smoke-only"
+  fi
+  plan_json="$(batch_create_plan)" || fail "Failed to create worker batch plan"
+  BATCH_TOKEN="$("$PYTHON_BIN" - "$plan_json" <<'PY'
+import json, sys
+print(json.loads(sys.argv[1])["token"])
+PY
+)"
+  BATCH_PLAN_FILE="$("$PYTHON_BIN" - "$plan_json" <<'PY'
+import json, sys
+print(json.loads(sys.argv[1])["plan_file"])
+PY
+)"
+  report_path="$(batch_report_path worker-report)"
+  batch_init_report "$report_path" "worker" "$BATCH_TOKEN"
+  slot_count="$(batch_slot_count)"
+  index=0
+  while [ "$index" -lt "$slot_count" ]; do
+    ADAPTER_NAME="$(batch_slot_field "$index" adapter)"
+    slot_start="$(batch_slot_field "$index" start_epoch)"
+    slot_deadline="$(batch_slot_field "$index" deadline_epoch)"
+    RESTORE_AFTER_SECONDS="$(( slot_deadline - $(date +%s) ))"
+    [ "$RESTORE_AFTER_SECONDS" -ge 0 ] || RESTORE_AFTER_SECONDS=0
+    sleep_until_epoch "$slot_start"
+    TARGET_STARTED=0
+    PREVIOUS_ADAPTER=""
+    if ! begin_benchmark_transaction; then
+      message="$(capture_message)"
+      cleanup_capture
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-failed to snapshot/stop local baseline}" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    if ! prepare_all_with_worker_retry; then
+      if batch_record_prepare_skip_if_needed "$report_path"; then
+        cleanup_capture
+      else
+        message="$(capture_message)"
+        fail_with_restore_context "${message:-candidate prepare-all failed on worker batch}"
+      fi
+      restore_previous_candidate || true
+      index=$((index + 1))
+      continue
+    fi
+    if batch_record_prepare_skip_if_needed "$report_path"; then
+      cleanup_capture
+      restore_previous_candidate || true
+      index=$((index + 1))
+      continue
+    fi
+    cleanup_capture
+    run_pt_capture candidate start --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      cleanup_capture
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-candidate start failed on worker batch}" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    TARGET_STARTED=1
+    if ! write_restore_transaction || ! schedule_restore_deadline; then
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "failed to schedule local restore deadline" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    cleanup_capture
+    batch_append_result "$report_path" "$ADAPTER_NAME" "worker_window_open" "true" "worker target available until slot deadline" "skipped" "skipped"
+    sleep_until_epoch "$slot_deadline"
+    restore_pending_transaction >/dev/null || fail "Worker batch restore failed for adapter ${ADAPTER_NAME}"
+    batch_mark_restored "$report_path"
+    index=$((index + 1))
+  done
+  emit_batch_report "$report_path"
+}
+
+run_controller_batch_flow() {
+  if [ "$START_ONLY" -eq 1 ] || [ "$SMOKE_ONLY" -eq 1 ]; then
+    fail "Controller batch mode cannot be combined with --start-only or --smoke-only"
+  fi
+  decoded="$(batch_decode_token)" || fail "Failed to decode worker batch token"
+  BATCH_PLAN_FILE="$("$PYTHON_BIN" - "$decoded" <<'PY'
+import json, sys
+print(json.loads(sys.argv[1])["plan_file"])
+PY
+)"
+  report_path="$(batch_report_path controller-report)"
+  batch_init_report "$report_path" "controller" ""
+  slot_count="$(batch_slot_count)"
+  index=0
+  while [ "$index" -lt "$slot_count" ]; do
+    ADAPTER_NAME="$(batch_slot_field "$index" adapter)"
+    slot_start="$(batch_slot_field "$index" start_epoch)"
+    sleep_until_epoch "$slot_start"
+    TARGET_STARTED=0
+    PREVIOUS_ADAPTER=""
+    if ! begin_benchmark_transaction; then
+      message="$(capture_message)"
+      cleanup_capture
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-failed to snapshot/stop local baseline}" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      cleanup_capture
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-candidate prepare-all failed on controller batch}" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    if batch_record_prepare_skip_if_needed "$report_path"; then
+      cleanup_capture
+      restore_previous_candidate || true
+      index=$((index + 1))
+      continue
+    fi
+    cleanup_capture
+    if ! start_candidate_with_controller_retry; then
+      message="$(capture_message)"
+      cleanup_capture
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-candidate start failed on controller batch}" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    TARGET_STARTED=1
+    if ! candidate_local_services_active; then
+      cleanup_capture
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "local services were not active before smoke tests" "skipped" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    cleanup_capture
+    run_pt_capture candidate smoke-test --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --mode probe --attempts "$ATTEMPTS" --timeout "$TIMEOUT_SECONDS" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      cleanup_capture
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-probe smoke test failed}" "failed" "skipped"
+      index=$((index + 1))
+      continue
+    fi
+    probe_result="$(json_query result.probe_status)"
+    cleanup_capture
+    run_pt_capture candidate smoke-test --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --mode real_service --attempts "$ATTEMPTS" --timeout "$TIMEOUT_SECONDS" --json || true
+    if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
+      message="$(capture_message)"
+      cleanup_capture
+      restore_previous_candidate || true
+      batch_append_result "$report_path" "$ADAPTER_NAME" "failed" "false" "${message:-real service smoke test failed}" "$probe_result" "failed"
+      index=$((index + 1))
+      continue
+    fi
+    real_result="$(json_query result.real_service_status)"
+    cleanup_capture
+    if restore_previous_candidate; then
+      batch_append_result "$report_path" "$ADAPTER_NAME" "passed" "true" "probe and real-service smoke tests passed; baseline restored" "$probe_result" "$real_result"
+      batch_mark_restored "$report_path"
+    else
+      message="$(capture_message)"
+      cleanup_capture
+      batch_append_result "$report_path" "$ADAPTER_NAME" "restore_failed" "false" "${message:-smoke passed but baseline restore failed}" "$probe_result" "$real_result"
+    fi
+    index=$((index + 1))
+  done
+  batch_mark_restored "$report_path"
+  emit_batch_report "$report_path"
+}
+
 main() {
   parse_args "$@"
   PYTHON_BIN="$(find_python)"
@@ -944,8 +1503,26 @@ main() {
   fi
   role="$(load_role)"
   case "$role" in
-    worker) run_worker_flow ;;
-    controller) run_controller_flow ;;
+    worker)
+      if [ "$BATCH_CONTROLLER" -eq 1 ]; then
+        fail "--batch-controller must run on the Controller side"
+      fi
+      if [ "$BATCH_WORKER" -eq 1 ]; then
+        run_worker_batch_flow
+      else
+        run_worker_flow
+      fi
+      ;;
+    controller)
+      if [ "$BATCH_WORKER" -eq 1 ]; then
+        fail "--batch-worker must run on the Worker side"
+      fi
+      if [ "$BATCH_CONTROLLER" -eq 1 ]; then
+        run_controller_batch_flow
+      else
+        run_controller_flow
+      fi
+      ;;
     *) fail "Unsupported node role: $role" ;;
   esac
 }

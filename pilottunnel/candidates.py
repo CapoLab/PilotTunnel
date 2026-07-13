@@ -90,6 +90,9 @@ BENCHMARK_REQUIREMENTS = (
     "authenticated_probe_protocol",
     "local_lifecycle",
 )
+PRIVATE_PROBE_TUNNEL_ADAPTERS = {"rathole", "frp", "backhaul", "gost", "chisel"}
+BATCH_BASELINE_ADAPTERS = {"realm"}
+BATCH_PROTOCOL_LIMITED_ADAPTERS = {"bore"}
 
 
 def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
@@ -99,8 +102,15 @@ def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
     missing: list[str] = []
     if topology.get("category") != "two_sided_tunnel":
         missing.append("Candidate is not a two-sided tunnel")
-    if adapter not in {"rathole", "frp"}:
-        missing.append("Adapter does not render a private tunneled probe service")
+    if adapter in BATCH_BASELINE_ADAPTERS:
+        missing.append("Adapter is a direct Layer-4 baseline, not a tunnel candidate")
+    elif adapter in BATCH_PROTOCOL_LIMITED_ADAPTERS:
+        missing.append(
+            "Bore v0.6 cannot safely render a separate private loopback probe listener "
+            "alongside the public service without broad tunnel-port exposure"
+        )
+    elif adapter not in PRIVATE_PROBE_TUNNEL_ADAPTERS:
+        missing.append("Adapter is not part of the current Layer-4 tunnel benchmark set")
     if not candidate.runnable:
         missing.append("Candidate is not runnable on this server")
     return {
@@ -108,7 +118,7 @@ def benchmark_readiness(candidate: LinkCandidate) -> dict[str, Any]:
         "missing_requirements": missing,
         "probe_path": (candidate.probe or {}).get("path", ""),
         "real_service_path": topology.get("real_service_path", ""),
-        "authentication_status": "rathole_transport_auth" if adapter in {"rathole", "frp"} and candidate.runnable else "not_available",
+        "authentication_status": "adapter_transport_auth" if adapter in PRIVATE_PROBE_TUNNEL_ADAPTERS and candidate.runnable else "not_available",
         "required_contract": list(BENCHMARK_REQUIREMENTS),
     }
 
@@ -535,9 +545,9 @@ def start_candidate(
         readiness_payload = _wait_for_service_readiness(service=service, audit_path=paths.audit_path)
         start_payload["readiness"] = readiness_payload
         if not readiness_payload.get("ok"):
+            _apply_candidate_stop(service, audit_path=paths.audit_path)
             for started_service in reversed(started):
                 _apply_candidate_stop(started_service, audit_path=paths.audit_path)
-            _apply_candidate_stop(service, audit_path=paths.audit_path)
             _rollback_service_install(install_payload, audit_path=paths.audit_path)
             _mark_candidate(link, candidate.adapter, "test_failed")
             state.active_link_candidates.pop(link.id, None)
@@ -1337,6 +1347,7 @@ def _candidate_context(
             "real_worker_service_port": topology.get("ports", {}).get("worker_service_port", link.worker_service_port or 0),
             "real_transport_port": topology.get("ports", {}).get("effective_transport_port", link.transport_port),
             "gost_tunnel_id": topology.get("gost_tunnel_id", ""),
+            "gost_service_host": topology.get("gost_service_host", ""),
             "gost_probe_host": topology.get("gost_probe_host", ""),
             "bore_control_port": topology.get("bore_control_port", BORE_CONTROL_PORT),
             "paired_transport_port": link.transport_port,
@@ -1412,7 +1423,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
     else:
         controller_listens = [f"0.0.0.0:{effective_transport_port}", f"0.0.0.0:{controller_user_facing_port}"]
-    if adapter_name in {"rathole", "frp"}:
+    if adapter_name in PRIVATE_PROBE_TUNNEL_ADAPTERS:
         controller_listens.append(f"127.0.0.1:{probe_port}")
     return {
         "adapter": adapter_name,
@@ -1428,6 +1439,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
         "first_start_side": "controller",
         "supports_runtime": True,
         "gost_tunnel_id": _uuid_from_hmac(link, adapter_name, "gost-tunnel-id") if adapter_name == "gost" else "",
+        "gost_service_host": f"service-{link.id[-6:]}-{adapter_name}.local" if adapter_name == "gost" else "",
         "gost_probe_host": f"probe-{link.id[-6:]}-{adapter_name}.local" if adapter_name == "gost" else "",
         "bore_control_port": BORE_CONTROL_PORT if adapter_name == "bore" else 0,
         "effective_transport_port": effective_transport_port,
@@ -1435,7 +1447,7 @@ def _build_topology(link: LinkProfile, adapter_name: str, transport: str, probe:
             "controller": {
                 "process_role": controller_role,
                 "adapter_enabled": True,
-                "owned_ports": [effective_transport_port, controller_user_facing_port] + ([probe_port] if adapter_name in {"rathole", "frp"} else []),
+                "owned_ports": [effective_transport_port, controller_user_facing_port] + ([probe_port] if adapter_name in PRIVATE_PROBE_TUNNEL_ADAPTERS else []),
                 "dependency_ports": [worker_service_port],
                 "listens_on": controller_listens,
                 "connects_to": [],
@@ -1815,9 +1827,26 @@ def _service_readiness_checks(
     topology: dict[str, Any],
     probe: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    if adapter_name != "frp" or side_name != "controller":
+    if side_name != "controller":
         return []
     ports = topology.get("ports") or {}
+    if adapter_name in {"backhaul", "gost", "chisel"}:
+        return [
+            {
+                "kind": "tcp",
+                "label": f"{adapter_name} transport listener",
+                "host": "127.0.0.1",
+                "port": int(ports.get("effective_transport_port") or ports.get("transport_port") or 0),
+            },
+            {
+                "kind": "tcp",
+                "label": f"{adapter_name} private probe listener",
+                "host": "127.0.0.1",
+                "port": int(probe.get("port") or 0),
+            },
+        ]
+    if adapter_name != "frp":
+        return []
     if runtime_role == "frps":
         return [
             {

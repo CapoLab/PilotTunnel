@@ -41,49 +41,70 @@ class GostAdapter(DryRunAdapter):
         real_controller_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
         tunnel_id = context.remote_stub.get("gost_tunnel_id", "")
+        service_host = context.remote_stub.get("gost_service_host", "service.local")
         probe_host = context.remote_stub.get("gost_probe_host", "probe.local")
+        probe_port = int(context.remote_stub.get("probe_port") or context.profile.ports.check_port or 0)
+        include_probe = context.remote_stub.get("mode") == "candidate-smoke" and probe_port > 0
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
         controller_address = context.controller_address or context.profile.target_host
         if context.role == "controller":
-            return "\n".join(
+            lines = [
+                "services:",
+                "- name: tunnel-server",
+                f"  addr: :{transport_port}",
+                "  handler:",
+                "    type: tunnel",
+                "    metadata:",
+                "      tunnel.direct: true",
+                "  listener:",
+                "    type: tcp",
+                "- name: service-visitor",
+                f"  addr: :{real_controller_port}",
+                "  handler:",
+                "    type: tcp",
+                "    chain: chain-0",
+                "  listener:",
+                "    type: tcp",
+                "  forwarder:",
+                "    nodes:",
+                "    - name: service",
+                f"      addr: {service_host}",
+            ]
+            if include_probe:
+                lines.extend(
+                    [
+                        "- name: probe-visitor",
+                        f"  addr: 127.0.0.1:{probe_port}",
+                        "  handler:",
+                        "    type: tcp",
+                        "    chain: chain-0",
+                        "  listener:",
+                        "    type: tcp",
+                        "  forwarder:",
+                        "    nodes:",
+                        "    - name: probe",
+                        f"      addr: {probe_host}",
+                    ]
+                )
+            lines.extend(
                 [
-                    "services:",
-                    "- name: tunnel-server",
-                    f"  addr: :{transport_port}",
-                    "  handler:",
-                    "    type: tunnel",
-                    "    metadata:",
-                    "      tunnel.direct: true",
-                    "  listener:",
-                    "    type: tcp",
-                    "- name: service-visitor",
-                    f"  addr: :{real_controller_port}",
-                    "  handler:",
-                    "    type: tcp",
-                    "    chain: chain-0",
-                    "  listener:",
-                    "    type: tcp",
-                    "  forwarder:",
-                    "    nodes:",
-                    "    - name: probe",
-                    f"      addr: {probe_host}",
-                    "chains:",
-                    "- name: chain-0",
-                    "  hops:",
-                    "  - name: hop-0",
-                    "    nodes:",
-                    "    - name: node-0",
-                    f"      addr: :{transport_port}",
-                    "      connector:",
-                    "        type: tunnel",
-                    "        metadata:",
-                    f"          tunnel.id: {tunnel_id}",
-                    "      dialer:",
-                    "        type: tcp",
+                "chains:",
+                "- name: chain-0",
+                "  hops:",
+                "  - name: hop-0",
+                "    nodes:",
+                "    - name: node-0",
+                f"      addr: :{transport_port}",
+                "      connector:",
+                "        type: tunnel",
+                "        metadata:",
+                f"          tunnel.id: {tunnel_id}",
+                "      dialer:",
+                "        type: tcp",
                 ]
             )
-        return "\n".join(
-            [
+            return "\n".join(lines)
+        lines = [
                 "services:",
                 "- name: probe-client",
                 "  addr: :0",
@@ -97,7 +118,19 @@ class GostAdapter(DryRunAdapter):
                 "    - name: service",
                 f"      addr: 127.0.0.1:{real_worker_port}",
                 "      filter:",
-                f"        host: {probe_host}",
+                f"        host: {service_host}",
+        ]
+        if include_probe:
+            lines.extend(
+                [
+                    "    - name: probe",
+                    f"      addr: 127.0.0.1:{probe_port}",
+                    "      filter:",
+                    f"        host: {probe_host}",
+                ]
+            )
+        lines.extend(
+            [
                 "chains:",
                 "- name: chain-0",
                 "  hops:",
@@ -113,3 +146,4 @@ class GostAdapter(DryRunAdapter):
                 "        type: tcp",
             ]
         )
+        return "\n".join(lines)

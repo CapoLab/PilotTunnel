@@ -49,14 +49,13 @@ class FrpAdapter(DryRunAdapter):
         real_controller_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
         runtime_role = context.remote_stub.get("frp_runtime_role", "")
+        common_handshake = self._common_handshake_lines(token)
         if context.role == "controller" and runtime_role != "frpc-visitor":
             return "\n".join(
                 [
                     'bindAddr = "0.0.0.0"',
                     f"bindPort = {transport_port}",
-                    "transport.tcpMux = false",
-                    "auth.method = \"token\"",
-                    f"auth.token = \"{token}\"",
+                    *common_handshake,
                 ]
             )
         controller_address = "127.0.0.1" if runtime_role == "frpc-visitor" else context.controller_address or context.profile.target_host
@@ -64,7 +63,7 @@ class FrpAdapter(DryRunAdapter):
         if runtime_role == "frpc-visitor":
             return "\n".join([
                 f'serverAddr = "{controller_address}"', f"serverPort = {transport_port}",
-                "auth.method = \"token\"", f"auth.token = \"{token}\"", "",
+                *common_handshake, "",
                 "[[visitors]]", f'name = "{context.profile.name}-probe-visitor"', 'type = "stcp"',
                 f'serverName = "{context.profile.name}-probe"', f'secretKey = "{token}"',
                 'bindAddr = "127.0.0.1"', f"bindPort = {probe_port}",
@@ -73,8 +72,7 @@ class FrpAdapter(DryRunAdapter):
             [
                 f'serverAddr = "{controller_address}"',
                 f"serverPort = {transport_port}",
-                "auth.method = \"token\"",
-                f"auth.token = \"{token}\"",
+                *common_handshake,
                 "",
                 "[[proxies]]",
                 f'name = "{context.profile.name}"',
@@ -91,6 +89,15 @@ class FrpAdapter(DryRunAdapter):
                 f"localPort = {probe_port}",
             ]
         )
+
+    @staticmethod
+    def _common_handshake_lines(token: str) -> list[str]:
+        # frp requires tcpMux to be consistent between frps and every frpc.
+        return [
+            "transport.tcpMux = false",
+            "auth.method = \"token\"",
+            f"auth.token = \"{token}\"",
+        ]
 
     def _runtime_command(self, context: AdapterContext, executable_path: str, config_path: str) -> list[str]:
         executable = Path(executable_path)

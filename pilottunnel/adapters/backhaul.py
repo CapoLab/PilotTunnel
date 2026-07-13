@@ -43,19 +43,26 @@ class BackhaulAdapter(DryRunAdapter):
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
         real_controller_port = context.remote_stub.get("real_controller_user_facing_port", context.profile.ports.main_port)
         real_worker_port = context.remote_stub.get("real_worker_service_port", context.profile.ports.service_port or context.profile.target_port)
+        probe_port = int(context.remote_stub.get("probe_port") or context.profile.ports.check_port or 0)
+        include_probe = context.remote_stub.get("mode") == "candidate-smoke" and probe_port > 0
         if context.role == "controller":
-            return "\n".join(
+            lines = [
+                "[server]",
+                f'bind_addr = "0.0.0.0:{transport_port}"',
+                f'transport = "{context.transport}"',
+                f'token = "{token}"',
+                "log_level = \"info\"",
+                "ports = [",
+                f'  "{real_controller_port}=127.0.0.1:{real_worker_port}",',
+            ]
+            if include_probe:
+                lines.append(f'  "127.0.0.1:{probe_port}=127.0.0.1:{probe_port}",')
+            lines.extend(
                 [
-                    "[server]",
-                    f'bind_addr = "0.0.0.0:{transport_port}"',
-                    f'transport = "{context.transport}"',
-                    f'token = "{token}"',
-                    "log_level = \"info\"",
-                    "ports = [",
-                    f'  "{real_controller_port}=127.0.0.1:{real_worker_port}"',
                     "]",
                 ]
             )
+            return "\n".join(lines)
         controller_address = context.controller_address or context.profile.target_host
         return "\n".join(
             [

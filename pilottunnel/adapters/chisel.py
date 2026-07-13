@@ -38,17 +38,20 @@ class ChiselAdapter(DryRunAdapter):
         transport_port = context.profile.ports.control_port or context.profile.ports.main_port
         user = context.secrets.get("auth_user", "pilot")
         password = context.secrets.get("auth_password", "PAIRING_SECRET_REQUIRED")
+        probe_port = int(context.remote_stub.get("probe_port") or context.profile.ports.check_port or 0)
+        include_probe = context.remote_stub.get("mode") == "candidate-smoke" and probe_port > 0
         if context.role == "controller":
-            return "\n".join(
-                [
-                    "[chisel]",
-                    "mode = server",
-                    f"listen_port = {transport_port}",
-                    "reverse = true",
-                    f"auth = {user}:{password}",
-                    f"remote_port = {context.profile.ports.main_port}",
-                ]
-            )
+            lines = [
+                "[chisel]",
+                "mode = server",
+                f"listen_port = {transport_port}",
+                "reverse = true",
+                f"auth = {user}:{password}",
+                f"remote_port = {context.profile.ports.main_port}",
+            ]
+            if include_probe:
+                lines.append(f"probe_remote = 127.0.0.1:{probe_port}")
+            return "\n".join(lines)
         return "\n".join(
             [
                 "[chisel]",
@@ -57,6 +60,7 @@ class ChiselAdapter(DryRunAdapter):
                 f"auth = {user}:{password}",
                 f"reverse_remote = 0.0.0.0:{context.profile.ports.main_port}",
                 f"local_target = 127.0.0.1:{context.profile.ports.service_port or context.profile.target_port}",
+                *( [f"probe_reverse = 127.0.0.1:{probe_port} -> 127.0.0.1:{probe_port}"] if include_probe else [] ),
             ]
         )
 
@@ -84,7 +88,11 @@ class ChiselAdapter(DryRunAdapter):
             ]
         controller_address = context.controller_address or context.profile.target_host
         reverse = f"R:0.0.0.0:{context.profile.ports.main_port}:127.0.0.1:{context.profile.ports.service_port or context.profile.target_port}"
-        return [executable_path, "client", f"{controller_address}:{transport_port}", reverse]
+        argv = [executable_path, "client", f"{controller_address}:{transport_port}", reverse]
+        probe_port = int(context.remote_stub.get("probe_port") or context.profile.ports.check_port or 0)
+        if context.remote_stub.get("mode") == "candidate-smoke" and probe_port > 0:
+            argv.append(f"R:127.0.0.1:{probe_port}:127.0.0.1:{probe_port}")
+        return argv
 
     def _environment(self, context: AdapterContext) -> dict[str, str]:
         if context.role != "worker":
