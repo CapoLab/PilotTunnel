@@ -2184,6 +2184,44 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["active_adapter"], "rathole")
         self.assertEqual(stopped, ["pilottunnel-link-001-rathole-tcp-controller.service"])
 
+    def test_candidate_stop_uses_installed_unit_when_staged_service_dir_is_missing(self) -> None:
+        self._create_controller_link()
+        target_dir = Path(self.temp_dir.name) / "systemd-target"
+        target_dir.mkdir()
+        missing_service_dir = Path(self.temp_dir.name) / "missing-service-dir"
+        called_dirs: list[Path] = []
+
+        def fake_apply_stop(*, service_dir: Path, service_name: str | None, confirm: str | None, audit_path: Path, timeout_seconds: float = 0):
+            called_dirs.append(service_dir)
+            return {"ok": True, "service_name": service_name, "service_dir": str(service_dir)}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.SYSTEMD_TARGET_DIR", target_dir), patch("pilottunnel.candidates.apply_stop", side_effect=fake_apply_stop):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            link_id = json.loads(self.config.read_text(encoding="utf-8"))["links"][0]["id"]
+            state_data = json.loads(self.state.read_text(encoding="utf-8"))
+            state_data["active_link_candidates"][link_id] = {
+                "adapter": "rathole",
+                "transport": "tcp",
+                "category": "two_sided_tunnel",
+                "role": "controller",
+                "state": "running",
+                "services": [
+                    {
+                        "service_name": "pilottunnel-link-001-rathole-tcp-controller.service",
+                        "service_dir": str(missing_service_dir),
+                        "runtime_dir": str(self.work_dir / "candidate-runtime" / link_id / "rathole" / "controller"),
+                        "kind": "adapter",
+                    }
+                ],
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+            self.state.write_text(json.dumps(state_data, indent=2, sort_keys=True), encoding="utf-8")
+            code, output = self.run_cli("candidate", "stop", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        self.assertEqual(called_dirs, [target_dir])
+        payload = json.loads(output)
+        self.assertTrue(any("Staged service dir is missing" in warning for item in payload["stop"] for warning in item.get("warnings", [])))
+
     def test_candidate_result_detects_stale_runtime_config_when_installed_config_lacks_probe_service(self) -> None:
         self._create_controller_link()
         temp_systemd_dir = Path(self.temp_dir.name) / "systemd-runtime-check"

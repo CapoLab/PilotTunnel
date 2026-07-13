@@ -349,12 +349,7 @@ def start_candidate(
         stop_results: list[dict[str, Any]] = []
         for service in reversed(side_plan["services"]):
             stop_results.append(
-                apply_stop(
-                    service_dir=Path(service["service_dir"]),
-                    service_name=service["service_name"],
-                    confirm=STOP_CONFIRM_TOKEN,
-                    audit_path=paths.audit_path,
-                )
+                _apply_candidate_stop(service, audit_path=paths.audit_path)
             )
         if any(not item.get("ok") for item in stop_results):
             _mark_candidate(link, candidate.adapter, "test_failed")
@@ -509,12 +504,7 @@ def start_candidate(
         start_results.append(start_payload)
         if not start_payload.get("ok"):
             for started_service in reversed(started):
-                apply_stop(
-                    service_dir=Path(started_service["service_dir"]),
-                    service_name=started_service["service_name"],
-                    confirm=STOP_CONFIRM_TOKEN,
-                    audit_path=paths.audit_path,
-                )
+                _apply_candidate_stop(started_service, audit_path=paths.audit_path)
             _rollback_service_install(install_payload, audit_path=paths.audit_path)
             _mark_candidate(link, candidate.adapter, "test_failed")
             state.active_link_candidates.pop(link.id, None)
@@ -546,18 +536,8 @@ def start_candidate(
         start_payload["readiness"] = readiness_payload
         if not readiness_payload.get("ok"):
             for started_service in reversed(started):
-                apply_stop(
-                    service_dir=Path(started_service["service_dir"]),
-                    service_name=started_service["service_name"],
-                    confirm=STOP_CONFIRM_TOKEN,
-                    audit_path=paths.audit_path,
-                )
-            apply_stop(
-                service_dir=Path(service["service_dir"]),
-                service_name=service["service_name"],
-                confirm=STOP_CONFIRM_TOKEN,
-                audit_path=paths.audit_path,
-            )
+                _apply_candidate_stop(started_service, audit_path=paths.audit_path)
+            _apply_candidate_stop(service, audit_path=paths.audit_path)
             _rollback_service_install(install_payload, audit_path=paths.audit_path)
             _mark_candidate(link, candidate.adapter, "test_failed")
             state.active_link_candidates.pop(link.id, None)
@@ -593,12 +573,7 @@ def start_candidate(
     if not status_payload.get("ok") or inactive_services or missing_services:
         status_errors = [str(item) for item in (status_payload.get("status", {}).get("errors") or []) if str(item).strip()]
         for started_service in reversed(started):
-            apply_stop(
-                service_dir=Path(started_service["service_dir"]),
-                service_name=started_service["service_name"],
-                confirm=STOP_CONFIRM_TOKEN,
-                audit_path=paths.audit_path,
-            )
+            _apply_candidate_stop(started_service, audit_path=paths.audit_path)
         _rollback_service_install(install_payload, audit_path=paths.audit_path)
         _mark_candidate(link, candidate.adapter, "test_failed")
         state.active_link_candidates.pop(link.id, None)
@@ -731,12 +706,7 @@ def stop_candidate(
     stop_results: list[dict[str, Any]] = []
     errors: list[str] = []
     for service in reversed(services):
-        payload = apply_stop(
-            service_dir=Path(service["service_dir"]),
-            service_name=service["service_name"],
-            confirm=STOP_CONFIRM_TOKEN,
-            audit_path=paths.audit_path,
-        )
+        payload = _apply_candidate_stop(service, audit_path=paths.audit_path)
         stop_results.append(payload)
         if not payload.get("ok"):
             errors.extend(payload.get("errors", []) or [payload.get("message", "Candidate stop failed")])
@@ -1714,6 +1684,25 @@ def _active_services_for_candidate(*, candidate: LinkCandidate, role: str, activ
     if services:
         return services
     return list(_side_plan(candidate, role).get("services") or [])
+
+
+def _apply_candidate_stop(service: dict[str, Any], *, audit_path: Path) -> dict[str, Any]:
+    service_name = str(service.get("service_name") or "")
+    staged_dir_text = str(service.get("service_dir") or "")
+    staged_dir = Path(staged_dir_text) if staged_dir_text else None
+    service_dir = staged_dir if staged_dir is not None and staged_dir.exists() else SYSTEMD_TARGET_DIR
+    payload = apply_stop(
+        service_dir=service_dir,
+        service_name=service_name,
+        confirm=STOP_CONFIRM_TOKEN,
+        audit_path=audit_path,
+    )
+    if service_dir == SYSTEMD_TARGET_DIR and staged_dir is not None and not staged_dir.exists():
+        warnings = list(payload.get("warnings") or [])
+        warnings.append(f"Staged service dir is missing; stopped known installed PilotTunnel unit from systemd target dir: {staged_dir}")
+        payload["warnings"] = sorted(set(filter(None, warnings)))
+        payload["stale_service_dir"] = str(staged_dir)
+    return payload
 
 
 def _candidate_runtime_fingerprint(candidate: LinkCandidate, role: str) -> str:
