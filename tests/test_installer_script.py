@@ -1204,6 +1204,133 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue(any("candidate start --adapter frp --link link-001 --json" in line for line in commands))
             self.assertFalse(any("candidate smoke-test" in line for line in commands))
 
+    def test_controller_runner_restores_rathole_when_frp_start_fails(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"active_file='{self.to_bash_path(active_file)}'\n"
+                    "args=\" $* \"\n"
+                    "active=\"\"\n"
+                    "[ -f \"$active_file\" ] && active=\"$(cat \"$active_file\")\"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' \"{\\\"ok\\\": true, \\\"active_adapter\\\": \\\"$active\\\", \\\"candidates\\\": [{\\\"adapter\\\": \\\"$active\\\", \\\"runtime_systemd_ok\\\": true, \\\"runtime_services\\\": [{\\\"service_name\\\": \\\"pilottunnel-link-001-${active}.service\\\", \\\"active_state\\\": \\\"active\\\", \\\"sub_state\\\": \\\"running\\\"}]}]}\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  if [ -z \"$active\" ]; then\n"
+                    "    printf '%s\\n' '{\"ok\": false, \"message\": \"No active candidate is running on this server for the selected link\"}'\n"
+                    "    exit 0\n"
+                    "  fi\n"
+                    "  printf '%s' '' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": true, \"blockers\": [], \"warnings\": []}, {\"adapter\": \"rathole\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter frp \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"Candidate start verification failed because systemd reported inactive service state for: pilottunnel-link-001-frp-tcp-controller-frpc-visitor.service\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter rathole \"* ]]; then\n"
+                    "  printf '%s' 'rathole' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"rathole restored\", \"runtime_config_status\": \"current\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate smoke-test \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"smoke should not run\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("frpc-visitor", result.stderr)
+            self.assertEqual(active_file.read_text(encoding="utf-8"), "rathole")
+            commands = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("candidate start --adapter rathole" in line for line in commands))
+            self.assertFalse(any("candidate smoke-test" in line for line in commands))
+
+    def test_controller_runner_surfaces_restore_failure_after_target_start_failure(self) -> None:
+        with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = Path(temp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            command_log = Path(temp_dir) / "commands.log"
+            active_file = Path(temp_dir) / "active.adapter"
+            active_file.write_text("rathole", encoding="utf-8")
+            self.write_fake_cli_python(
+                fake_bin,
+                body=(
+                    f"printf '%s\\n' \"$*\" >> '{self.to_bash_path(command_log)}'\n"
+                    f"active_file='{self.to_bash_path(active_file)}'\n"
+                    "args=\" $* \"\n"
+                    "active=\"\"\n"
+                    "[ -f \"$active_file\" ] && active=\"$(cat \"$active_file\")\"\n"
+                    "if [[ \"$args\" == *\" node status \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"normalized_role\": \"controller\", \"initialized\": true}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate result \"* ]]; then\n"
+                    "  printf '%s\\n' \"{\\\"ok\\\": true, \\\"active_adapter\\\": \\\"$active\\\"}\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate stop \"* ]]; then\n"
+                    "  if [ -z \"$active\" ]; then\n"
+                    "    printf '%s\\n' '{\"ok\": false, \"message\": \"No active candidate is running on this server for the selected link\"}'\n"
+                    "    exit 0\n"
+                    "  fi\n"
+                    "  printf '%s' '' > \"$active_file\"\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"message\": \"stopped\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate prepare-all \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": true, \"candidates\": [{\"adapter\": \"frp\", \"runnable\": true, \"blockers\": [], \"warnings\": []}, {\"adapter\": \"rathole\", \"runnable\": true, \"blockers\": [], \"warnings\": []}]}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter frp \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"frp start failed\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$args\" == *\" candidate start --adapter rathole \"* ]]; then\n"
+                    "  printf '%s\\n' '{\"ok\": false, \"message\": \"rathole restore failed\"}'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                ),
+            )
+            result = self.run_test_runner(
+                base_dir,
+                "--link",
+                "link-001",
+                "--adapter",
+                "frp",
+                "--json",
+                extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("frp start failed", result.stderr)
+            self.assertIn("additionally failed to restore previous candidate", result.stderr)
+            self.assertIn("rathole restore failed", result.stderr)
+
     def test_controller_test_runner_handoffs_active_candidate_and_restores_on_probe_failure(self) -> None:
         with self.menu_install_root() as base_dir, tempfile.TemporaryDirectory() as temp_dir:
             fake_bin = Path(temp_dir) / "fake-bin"

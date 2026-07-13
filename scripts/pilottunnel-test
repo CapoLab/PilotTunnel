@@ -405,7 +405,10 @@ restore_previous_candidate() {
   fi
   run_pt_capture candidate stop --link "$LINK_LABEL" --json || true
   if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
-    return 1
+    stop_message="$(capture_message)"
+    if ! printf '%s' "$stop_message" | grep -Fq "No active candidate is running"; then
+      return 1
+    fi
   fi
   cleanup_capture
   run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
@@ -420,6 +423,17 @@ restore_previous_candidate() {
   cleanup_capture
   TARGET_STARTED=0
   return 0
+}
+
+fail_with_restore_context() {
+  original_message="$1"
+  cleanup_capture
+  if restore_previous_candidate; then
+    fail "$original_message"
+  fi
+  restore_message="$(capture_message)"
+  cleanup_capture
+  fail "${original_message}; additionally failed to restore previous candidate: ${restore_message:-unknown restore failure}"
 }
 
 restore_unit_scope() {
@@ -827,17 +841,13 @@ run_worker_flow() {
   fi
   if ! prepare_all_with_worker_retry; then
     message="$(capture_message)"
-    cleanup_capture
-    restore_previous_candidate || true
-    fail "${message:-candidate prepare-all failed on worker}"
+    fail_with_restore_context "${message:-candidate prepare-all failed on worker}"
   fi
   cleanup_capture
   run_pt_capture candidate start --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --json || true
   if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
     message="$(capture_message)"
-    cleanup_capture
-    restore_previous_candidate || true
-    fail "${message:-candidate start failed on worker}"
+    fail_with_restore_context "${message:-candidate start failed on worker}"
   fi
   TARGET_STARTED=1
   if [ "$START_ONLY" -eq 1 ]; then
@@ -876,16 +886,12 @@ run_controller_flow() {
     run_pt_capture candidate prepare-all --link "$LINK_LABEL" --json || true
     if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
       message="$(capture_message)"
-      cleanup_capture
-      restore_previous_candidate || true
-      fail "${message:-candidate prepare-all failed on controller}"
+      fail_with_restore_context "${message:-candidate prepare-all failed on controller}"
     fi
     cleanup_capture
     if ! start_candidate_with_controller_retry; then
       message="$(capture_message)"
-      cleanup_capture
-      restore_previous_candidate || true
-      fail "${message:-candidate start failed on controller}"
+      fail_with_restore_context "${message:-candidate start failed on controller}"
     fi
     TARGET_STARTED=1
     runtime_config="$(json_query runtime_config_status)"
@@ -893,18 +899,14 @@ run_controller_flow() {
   fi
   if [ "$START_ONLY" -eq 0 ]; then
     if ! candidate_local_services_active; then
-      cleanup_capture
-      restore_previous_candidate || true
-      fail "Candidate local services are not active; refusing to run smoke tests"
+      fail_with_restore_context "Candidate local services are not active; refusing to run smoke tests"
     fi
     cleanup_capture
     run_pt_capture candidate smoke-test --adapter "$ADAPTER_NAME" --link "$LINK_LABEL" --mode probe --attempts "$ATTEMPTS" --timeout "$TIMEOUT_SECONDS" --json || true
     if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
       message="$(capture_message)"
       probe_result="failed"
-      cleanup_capture
-      restore_previous_candidate || true
-      fail "${message:-probe smoke test failed}"
+      fail_with_restore_context "${message:-probe smoke test failed}"
     fi
     probe_result="$(json_query result.probe_status)"
     runtime_config="${runtime_config:-$(json_query runtime_config_status)}"
@@ -913,15 +915,17 @@ run_controller_flow() {
     if ! { [ "$LAST_STATUS" -eq 0 ] && last_payload_ok; }; then
       message="$(capture_message)"
       real_result="failed"
-      cleanup_capture
-      restore_previous_candidate || true
-      fail "${message:-real service smoke test failed}"
+      fail_with_restore_context "${message:-real service smoke test failed}"
     fi
     real_result="$(json_query result.real_service_status)"
     runtime_config="${runtime_config:-$(json_query runtime_config_status)}"
     cleanup_capture
   fi
-  restore_previous_candidate || true
+  if ! restore_previous_candidate; then
+    restore_message="$(capture_message)"
+    cleanup_capture
+    fail "controller benchmark completed, but failed to restore previous candidate: ${restore_message:-unknown restore failure}"
+  fi
   emit_summary "$(controller_summary "$runtime_config" "$probe_result" "$real_result" "controller flow complete")"
 }
 

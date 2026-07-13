@@ -10,6 +10,7 @@ import shlex
 import shutil
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,8 @@ SYSTEMD_TARGET_DIR = Path("/etc/systemd/system")
 PROBE_MARKER = "pilotunnel-probe"
 BORE_CONTROL_PORT = 7835
 SUPPORTED_CANDIDATE_LAYERS = {"auto", "layer4"}
+SERVICE_READINESS_TIMEOUT_SECONDS = 10.0
+SERVICE_READINESS_INTERVAL_SECONDS = 0.2
 
 # A candidate can render and start locally without providing a safe way to
 # benchmark both sides. Keep that distinction explicit for all adapters.
@@ -534,6 +537,49 @@ def start_candidate(
                 "start": start_results,
                 "rolled_back": True,
                 "next_instruction": "Inspect the staged unit logs, then retry the candidate after resolving the startup blocker.",
+                "real_systemd_touched": True,
+                "services_started": False,
+                "firewall_touched": False,
+                "routes_touched": False,
+            }
+        readiness_payload = _wait_for_service_readiness(service=service, audit_path=paths.audit_path)
+        start_payload["readiness"] = readiness_payload
+        if not readiness_payload.get("ok"):
+            for started_service in reversed(started):
+                apply_stop(
+                    service_dir=Path(started_service["service_dir"]),
+                    service_name=started_service["service_name"],
+                    confirm=STOP_CONFIRM_TOKEN,
+                    audit_path=paths.audit_path,
+                )
+            apply_stop(
+                service_dir=Path(service["service_dir"]),
+                service_name=service["service_name"],
+                confirm=STOP_CONFIRM_TOKEN,
+                audit_path=paths.audit_path,
+            )
+            _rollback_service_install(install_payload, audit_path=paths.audit_path)
+            _mark_candidate(link, candidate.adapter, "test_failed")
+            state.active_link_candidates.pop(link.id, None)
+            return {
+                "ok": False,
+                "action": "candidate-start",
+                "message": readiness_payload.get("message", f"Candidate service '{service['service_name']}' did not become ready"),
+                "link_id": link.id,
+                "link_label": link.label,
+                "role": role,
+                "pairing_state": link.effective_pairing_state,
+                "probe_port": link.probe_port,
+                "aux_test_port": link.aux_test_port,
+                "reserved_test_range": list(link.reserved_test_range),
+                "active_adapter": candidate.adapter,
+                "candidates_summary": _candidate_summary_rows(link),
+                "candidate": _candidate_payload(candidate),
+                "install": install_payload,
+                "daemon_reload": reload_payload,
+                "start": start_results,
+                "rolled_back": True,
+                "next_instruction": "Inspect the managed service readiness blocker, then retry the candidate after resolving it.",
                 "real_systemd_touched": True,
                 "services_started": False,
                 "firewall_touched": False,
@@ -1205,6 +1251,13 @@ def _stage_side(
                         "service_dir": service_dir,
                         "runtime_dir": runtime_dir,
                         "unit_path": unit.path,
+                        "readiness": _service_readiness_checks(
+                            adapter_name=adapter_name,
+                            side_name=side_name,
+                            runtime_role=str(spec.get("name") or ""),
+                            topology=topology,
+                            probe=probe,
+                        ),
                     }
                 )
 
@@ -1765,6 +1818,83 @@ def _candidate_runtime_blocker(candidate: LinkCandidate, runtime_status: dict[st
     return f"Candidate '{candidate.adapter}' is not currently running on this controller (systemd state: {state})"
 
 
+def _service_readiness_checks(
+    *,
+    adapter_name: str,
+    side_name: str,
+    runtime_role: str,
+    topology: dict[str, Any],
+    probe: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if adapter_name != "frp" or side_name != "controller":
+        return []
+    ports = topology.get("ports") or {}
+    if runtime_role == "frps":
+        return [
+            {
+                "kind": "tcp",
+                "label": "frps transport listener",
+                "host": "127.0.0.1",
+                "port": int(ports.get("effective_transport_port") or ports.get("transport_port") or 0),
+            }
+        ]
+    if runtime_role == "frpc-visitor":
+        return [
+            {
+                "kind": "tcp",
+                "label": "frpc visitor private probe listener",
+                "host": "127.0.0.1",
+                "port": int(probe.get("port") or 0),
+            }
+        ]
+    return []
+
+
+def _wait_for_service_readiness(*, service: dict[str, Any], audit_path: Path) -> dict[str, Any]:
+    checks = list(service.get("readiness") or [])
+    if not checks:
+        return {"ok": True, "checks": [], "message": "No service-specific readiness checks required"}
+    service_name = str(service.get("service_name") or "")
+    deadline = time.monotonic() + SERVICE_READINESS_TIMEOUT_SECONDS
+    last_message = "service did not report active"
+    while True:
+        try:
+            status_payload = inspect_managed_status(service_dir=SYSTEMD_TARGET_DIR, service_name=service_name, audit_path=audit_path)
+        except ValueError as exc:
+            status_payload = {"ok": False, "services": [], "warnings": [], "errors": [str(exc)]}
+        entry = next((item for item in status_payload.get("services", []) if item.get("service_name") == service_name), None)
+        active = bool(entry and entry.get("active_state") == "active" and entry.get("sub_state") in {"running", "exited", "listening"})
+        if not active:
+            errors = [str(item) for item in status_payload.get("errors", []) if str(item).strip()]
+            last_message = errors[0] if errors else f"systemd has not reported '{service_name}' active yet"
+        else:
+            failed_check = None
+            for check in checks:
+                if check.get("kind") == "tcp" and not _local_tcp_ready(str(check.get("host") or "127.0.0.1"), int(check.get("port") or 0)):
+                    failed_check = check
+                    last_message = f"{check.get('label', 'tcp readiness')} is not accepting TCP connections on {check.get('host')}:{check.get('port')}"
+                    break
+            if failed_check is None:
+                return {"ok": True, "checks": checks, "message": f"Candidate service '{service_name}' is ready"}
+        if time.monotonic() >= deadline:
+            return {
+                "ok": False,
+                "checks": checks,
+                "message": f"Candidate service '{service_name}' did not become ready: {last_message}",
+            }
+        time.sleep(SERVICE_READINESS_INTERVAL_SECONDS)
+
+
+def _local_tcp_ready(host: str, port: int) -> bool:
+    if port < 1:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
 def _candidate_side_runtime_status(*, audit_path: Path, side_plan: dict[str, Any], allow_missing: bool = False) -> dict[str, Any]:
     aggregated_services: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -1922,7 +2052,7 @@ def _mark_candidate(link: LinkProfile, adapter_name: str, state_name: str) -> No
     if state_name not in CANDIDATE_STATES:
         raise ValueError(f"Unsupported candidate state '{state_name}'")
     for candidate in link.candidates:
-        candidate.selected = candidate.adapter == adapter_name
+        candidate.selected = candidate.adapter == adapter_name and state_name in {"selected", "starting", "running", "test_passed"}
         if candidate.adapter == adapter_name:
             candidate.state = state_name
 

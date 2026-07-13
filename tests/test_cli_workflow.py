@@ -1300,12 +1300,15 @@ class CliWorkflowTests(unittest.TestCase):
         self._create_controller_link()
         start_calls: list[str] = []
         stop_calls: list[str] = []
+        installed_services: list[str] = []
 
         def fake_install(*, services, summary_name):
+            installed_services[:] = [item["service_name"] for item in services]
             return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"]} for item in services]}
 
-        def fake_status(**kwargs):
-            return {"ok": False, "services": [], "warnings": [], "errors": ["missing"]}
+        def fake_status(*, service_name=None, **kwargs):
+            services = [{"service_name": service_name, "active_state": "active", "sub_state": "running"}] if service_name in installed_services else []
+            return {"ok": True, "services": services, "warnings": [], "errors": []}
 
         def fake_start(*, service_name=None, **kwargs):
             start_calls.append(service_name)
@@ -1315,13 +1318,17 @@ class CliWorkflowTests(unittest.TestCase):
             stop_calls.append(service_name)
             return {"ok": True, "service_name": service_name}
 
-        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop):
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop), patch("pilottunnel.candidates._local_tcp_ready", return_value=True):
             self.run_cli("candidate", "prepare-all", "--link", "link-001")
             code, _output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
         self.assertEqual(code, 1)
         self.assertEqual(len(start_calls), 2)
         self.assertEqual(len(stop_calls), 1)
         self.assertIn("frps", stop_calls[0])
+        config_data = json.loads(self.config.read_text(encoding="utf-8"))
+        frp = next(item for item in config_data["links"][0]["candidates"] if item["adapter"] == "frp")
+        self.assertEqual(frp["state"], "test_failed")
+        self.assertFalse(frp["selected"])
 
     def test_frp_controller_start_and_stop_manage_only_local_services(self) -> None:
         self._create_controller_link()
@@ -1345,7 +1352,7 @@ class CliWorkflowTests(unittest.TestCase):
             stop_calls.append(service_name)
             return {"ok": True, "service_name": service_name}
 
-        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop):
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", side_effect=fake_stop), patch("pilottunnel.candidates._local_tcp_ready", return_value=True):
             self.run_cli("candidate", "prepare-all", "--link", "link-001")
             start_code, start_output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
             stop_code, stop_output = self.run_cli("candidate", "stop", "--link", "link-001", "--json")
@@ -1358,6 +1365,39 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(stop_calls, list(reversed(start_calls)))
         for service_name in start_calls + stop_calls:
             self.assertNotIn("pilotunnel-probe", service_name)
+
+    def test_frp_controller_start_waits_for_frps_listener_before_visitor(self) -> None:
+        self._create_controller_link()
+        installed_services: list[str] = []
+        events: list[str] = []
+
+        def fake_install(*, services, summary_name):
+            installed_services[:] = [item["service_name"] for item in services]
+            return {"ok": True, "summary_file": str(Path(self.temp_dir.name) / summary_name), "services": [{"service_name": item["service_name"], "target_unit_path": str(Path(self.temp_dir.name) / item["service_name"]), "backup_path": "", "kind": item["kind"], "service_dir": item["service_dir"], "runtime_dir": item["runtime_dir"]} for item in services]}
+
+        def fake_status(*, service_name=None, **kwargs):
+            services = [{"service_name": service_name, "active_state": "active", "sub_state": "running"}] if service_name in installed_services else []
+            return {"ok": True, "services": services, "warnings": [], "errors": []}
+
+        def fake_start(*, service_name=None, **kwargs):
+            events.append(f"start:{service_name}")
+            return {"ok": True, "service_name": service_name}
+
+        def fake_tcp_ready(host: str, port: int):
+            events.append(f"tcp:{port}")
+            return True
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates._install_candidate_service_units", side_effect=fake_install), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_reload", return_value={"ok": True}), patch("pilottunnel.candidates.apply_start", side_effect=fake_start), patch("pilottunnel.candidates.apply_stop", return_value={"ok": True}), patch("pilottunnel.candidates._local_tcp_ready", side_effect=fake_tcp_ready):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            code, output = self.run_cli("candidate", "start", "--adapter", "frp", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        frps_start = next(index for index, event in enumerate(events) if "start:" in event and "frps" in event)
+        transport_ready = next(index for index, event in enumerate(events) if event == f"tcp:{self.control_port}")
+        visitor_start = next(index for index, event in enumerate(events) if "start:" in event and "frpc-visitor" in event)
+        probe_ready = next(index for index, event in enumerate(events) if event == f"tcp:{DEFAULT_PROBE_PORT}")
+        self.assertLess(frps_start, transport_ready)
+        self.assertLess(transport_ready, visitor_start)
+        self.assertLess(visitor_start, probe_ready)
 
     def test_frp_worker_start_rolls_back_when_frpc_start_fails(self) -> None:
         self._create_worker_link_from_pairing_code()
@@ -2114,6 +2154,35 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertTrue(any("Skipped stale candidate cleanup" in warning for warning in payload["warnings"]))
         state_data = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertNotIn(link_id, state_data.get("active_link_candidates", {}))
+
+    def test_candidate_stop_reconciles_active_systemd_service_when_state_is_stale(self) -> None:
+        self._create_controller_link()
+        stopped: list[str] = []
+
+        def fake_status(*, service_name: str | None, **kwargs):
+            if service_name == "pilottunnel-link-001-rathole-tcp-controller.service":
+                return {
+                    "ok": True,
+                    "services": [{"service_name": service_name, "active_state": "active", "sub_state": "running"}],
+                    "warnings": [],
+                    "errors": [],
+                }
+            return {"ok": False, "services": [], "warnings": [], "errors": []}
+
+        def fake_apply_stop(*, service_name: str | None, **kwargs):
+            stopped.append(service_name or "")
+            return {"ok": True, "service_name": service_name}
+
+        with self._prepare_candidate_binaries(), patch("pilottunnel.candidates.inspect_managed_status", side_effect=fake_status), patch("pilottunnel.candidates.apply_stop", side_effect=fake_apply_stop):
+            self.run_cli("candidate", "prepare-all", "--link", "link-001")
+            state_data = json.loads(self.state.read_text(encoding="utf-8"))
+            state_data["active_link_candidates"] = {}
+            self.state.write_text(json.dumps(state_data, indent=2, sort_keys=True), encoding="utf-8")
+            code, output = self.run_cli("candidate", "stop", "--link", "link-001", "--json")
+        self.assertEqual(code, 0, msg=output)
+        payload = json.loads(output)
+        self.assertEqual(payload["active_adapter"], "rathole")
+        self.assertEqual(stopped, ["pilottunnel-link-001-rathole-tcp-controller.service"])
 
     def test_candidate_result_detects_stale_runtime_config_when_installed_config_lacks_probe_service(self) -> None:
         self._create_controller_link()
